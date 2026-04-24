@@ -1,0 +1,36 @@
+Mialem stary projket na githubie i mial mniej wiecej takie fujnkcje:ElektroScan AI - Full Stack Computer Vision Suite 🚀
+Profesjonalne rozwiązanie SaaS do automatycznego przedmiarowania instalacji elektrycznych (Quantity Takeoff) oparte na silniku OpenCV i nowoczesnym frontendzie React.
+
+🏗️ Architektura Projektu
+Backend (/backend): FastAPI + OpenCV. Przetwarza obrazy w czasie rzeczywistym, wykrywa symbole i zarządza bazą wzorców.
+Frontend (/frontend): React + Vite + Tailwind. Zaawansowany silnik graficzny Canvas do wizualizacji wyników i uczenia "Active Learning".
+⚡ Jak uruchomić projekt (Instrukcja)
+1. Uruchomienie Backend (Silnik AI) 🐍
+Wymagany Python 3.8+.
+
+cd backend
+python -m venv .venv
+.\.venv\Scripts\activate
+pip install -r requirements.txt
+python main.py
+Backend domyślnie nasłuchuje na porcie 8000.
+
+2. Uruchomienie Frontend (Interfejs) ⚛️
+Wymagany Node.js 16+.
+
+cd frontend
+npm install
+npm run dev
+Interfejs domyślnie dostępny pod adresem: http://localhost:3000.
+
+🛠️ Kluczowe Funkcje
+Multi-Scale Template Matching: Precyzyjne wykrywanie symboli o różnej wielkości i rotacji.
+Exclude Area: Możliwość ręcznego "zasłonięcia" legendy lub ramek rysunku, by nie generowały błędów.
+Active Learning: Prawy przycisk myszy na dowolnym boxie pozwala go usunąć lub "nauczyć" system poprawnej nazwy na przyszłość.
+Infinite Canvas: Płynne przesuwanie i zoomowanie dużych schematów architektonicznych.
+📦 Autorzy
+Projekt realizowany w ramach praktyk inżynierskich – Automatyzacja Przedmiarów Elektrycznych. Maty & Antigravity (AI)
+
+
+
+I ja to robilem na szarym tle po probie edycji kodu na wykrywanie koloru byla istna tragedia dlatego robimy tylko i wylacznie pod ten pdf co ci wyslalem

@@ -1,0 +1,1 @@
+# ElektroScan AI — Core Engine
