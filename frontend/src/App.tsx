@@ -41,7 +41,7 @@ function App() {
 
   // ── Handlery ────────────────────────────────────────────
 
-  const handleFileSelect = (selectedFile: File) => {
+  const handleFileSelect = async (selectedFile: File) => {
     setFile(selectedFile);
     setPdfPreview(null);
     setResults([]);
@@ -49,21 +49,45 @@ function App() {
     setSessionId(null);
     setExcludedZones([]);
     setFocusedBoxId(null);
+    
+    setIsProcessing(true);
+    setProgressText('Ładowanie podglądu PDF...');
+    try {
+      const formData = new FormData();
+      formData.append('file', selectedFile);
+      const res = await fetch('http://localhost:8000/api/preview', { method: 'POST', body: formData });
+      if (!res.ok) throw new Error('Błąd podglądu');
+      const data = await res.json();
+      setPdfPreview(data.planPreview);
+      setSessionId(data.sessionId);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsProcessing(false);
+      setProgressText('');
+    }
   };
 
   const handleExtractLegend = async () => {
-    if (!file) return;
+    if (!sessionId) return;
     setIsProcessing(true);
-    setProgressText('Przesyłanie i konwersja PDF (300 DPI)...');
+    setProgressText('Ekstrakcja legendy (300 DPI)...');
     try {
-      const formData = new FormData();
-      formData.append('file', file);
-      const response = await fetch('http://localhost:8000/api/extract-legend', { method: 'POST', body: formData });
+      const response = await fetch(`http://localhost:8000/api/extract-legend?session_id=${sessionId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          excluded_zones: excludedZones.map(z => ({
+            x: Math.round(z.x),
+            y: Math.round(z.y),
+            width: Math.round(z.width),
+            height: Math.round(z.height),
+          }))
+        })
+      });
       if (!response.ok) throw new Error('Błąd serwera');
       const data = await response.json();
       setPatterns(data.patterns);
-      setPdfPreview(data.planPreview);
-      setSessionId(data.sessionId);
     } catch (error) {
       console.error(error);
       alert('Wystąpił błąd podczas ekstrakcji legendy. Upewnij się, że backend działa.');

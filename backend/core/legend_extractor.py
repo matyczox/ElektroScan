@@ -109,8 +109,9 @@ def extract_legend(
     output_dir: str = "templates",
     dpi: int = 300,
     legend_keyword: str = "LEGENDA",
-    legend_width_pt: float = 350,
+    legend_width_pt: float = 300,
     legend_height_pt: float = 550,
+    exclude_rects: list[tuple[int, int, int, int]] = None
 ) -> list[ExtractedSymbol]:
     """
     Wyciąga wzorce symboli z legendy planu elektrycznego.
@@ -123,13 +124,16 @@ def extract_legend(
         legend_keyword:   Słowo kluczowe do zlokalizowania legendy.
         legend_width_pt:  Szacowana szerokość legendy w punktach PDF.
         legend_height_pt: Szacowana wysokość legendy w punktach PDF.
-
-    Returns:
-        Lista ExtractedSymbol z nazwami i obrazami.
+        exclude_rects:    Strefy do zignorowania.
     """
     doc = fitz.open(pdf_path)
     page = doc.load_page(0)
     text_blocks = page.get_text("blocks")
+
+    # Aplikujemy strefy wykluczone do obrazu planu (żeby zamazać niechciane fragmenty legendy)
+    if exclude_rects:
+        for ex, ey, ew, eh in exclude_rects:
+            cv2.rectangle(plan_image, (ex, ey), (ex + ew, ey + eh), (255, 255, 255), -1)
 
     # 1. Lokalizacja legendy
     found = page.search_for(legend_keyword)

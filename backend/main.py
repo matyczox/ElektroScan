@@ -7,6 +7,8 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pathlib import Path
+from pydantic import BaseModel
+from typing import Optional, List
 
 # Importujemy nasze core'owe moduły
 from core.legend_extractor import pdf_to_png, extract_legend
@@ -36,37 +38,70 @@ TEMPLATES_DIR.mkdir(exist_ok=True)
 async def root():
     return {"message": "ElektroScan AI API is running"}
 
-@app.post("/api/extract-legend")
-async def api_extract_legend(file: UploadFile = File(...)):
+class ExtractRequest(BaseModel):
+    excluded_zones: Optional[List[dict]] = []
+
+@app.post("/api/preview")
+async def api_preview(file: UploadFile = File(...)):
     if not file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Tylko pliki PDF są obsługiwane.")
     
     session_id = str(uuid.uuid4())
     file_path = UPLOAD_DIR / f"{session_id}.pdf"
     
-    # 1. Zapisujemy plik PDF
+    # Zapis
     with file_path.open("wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
         
     try:
-        # 2. Renderujemy PDF do PNG (300 DPI)
-        print(f"Renderowanie planu: {file.filename}")
+        # Render podglądu (300 DPI — identycznie jak detekcja)
+        plan_img = pdf_to_png(str(file_path), dpi=300)
+        _, buffer_plan = cv2.imencode('.jpg', plan_img, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        plan_base64 = base64.b64encode(buffer_plan).decode('utf-8')
+        
+        return {
+            "planPreview": f"data:image/jpeg;base64,{plan_base64}",
+            "sessionId": session_id
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/extract-legend")
+async def api_extract_legend(session_id: str, body: ExtractRequest = None):
+    file_path = UPLOAD_DIR / f"{session_id}.pdf"
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Nie znaleziono pliku sesji.")
+        
+    try:
+        print(f"Renderowanie planu do ekstrakcji (300 DPI)")
         plan_img = pdf_to_png(str(file_path), dpi=300)
         
-        # 3. Wyciągamy legendę
+        # Strefy wykluczone
+        exclude_rects = []
+        if body and body.excluded_zones:
+            for zone in body.excluded_zones:
+                try:
+                    exclude_rects.append((
+                        int(zone["x"]), int(zone["y"]),
+                        int(zone["width"]), int(zone["height"])
+                    ))
+                except (KeyError, ValueError):
+                    pass
+        
         print("Ekstrakcja legendy...")
-        # Czyścimy stare wzorce przed nową ekstrakcją
         if TEMPLATES_DIR.exists():
             shutil.rmtree(TEMPLATES_DIR)
         TEMPLATES_DIR.mkdir(exist_ok=True)
         
-        symbols = extract_legend(str(file_path), plan_img, output_dir=str(TEMPLATES_DIR))
+        symbols = extract_legend(
+            str(file_path), 
+            plan_img, 
+            output_dir=str(TEMPLATES_DIR),
+            exclude_rects=exclude_rects
+        )
         
-        # 4. Przygotowujemy odpowiedź
-        # Konwertujemy plan do base64 dla podglądu (JPEG dla szybkości)
-        _, buffer_plan = cv2.imencode('.jpg', plan_img, [cv2.IMWRITE_JPEG_QUALITY, 80])
-        plan_base64 = base64.b64encode(buffer_plan).decode('utf-8')
-        
+        # Generujemy podgląd jeszcze raz na wypadek gdyby UI go potrzebowało w pełnej rozdz.
+        # Ale zwracamy wzorce.
         patterns_list = []
         for s in symbols:
             _, buffer_s = cv2.imencode('.png', s.image)
@@ -77,9 +112,7 @@ async def api_extract_legend(file: UploadFile = File(...)):
             })
             
         return {
-            "planPreview": f"data:image/jpeg;base64,{plan_base64}",
-            "patterns": patterns_list,
-            "sessionId": session_id
+            "patterns": patterns_list
         }
         
     except Exception as e:
