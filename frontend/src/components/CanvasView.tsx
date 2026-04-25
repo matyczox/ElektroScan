@@ -9,6 +9,7 @@ interface Box {
   height: number;
   color: string;
   confidence: number;
+  symbolName: string;
 }
 
 interface ExcludedZone {
@@ -158,7 +159,6 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
     );
   }
 
-  const BOX_COLOR = '#c6a87c';
   const BOX_FOCUS_COLOR = '#f97316';
   const BOX_LOW_COLOR = '#f59e0b';
 
@@ -272,13 +272,13 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
             const isFocused = focusedBoxId === box.id || pulsingId === box.id;
             const isPulsing = pulsingId === box.id;
             const isLowConf = box.confidence < 0.65;
-            const color = isFocused ? BOX_FOCUS_COLOR : (isLowConf ? BOX_LOW_COLOR : BOX_COLOR);
+            const color = isFocused ? BOX_FOCUS_COLOR : (isLowConf ? BOX_LOW_COLOR : box.color);
 
             return (
               <div
                 key={box.id}
                 onClick={e => { e.stopPropagation(); onBoxClick?.(box.id); }}
-                title={`Pewność: ${(box.confidence * 100).toFixed(0)}%`}
+                title={`Pewność: ${(box.confidence * 100).toFixed(0)}%\nWzorzec: ${box.symbolName}`}
                 style={{
                   position: 'absolute',
                   left: box.x,
@@ -292,7 +292,26 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
                   boxSizing: 'border-box',
                   animation: isPulsing ? 'boxPulse 0.5s ease-in-out 4' : 'none',
                 }}
-              />
+              >
+                {/* Etykieta symbolu widoczna po najechaniu lub ciągle */}
+                <div style={{
+                  position: 'absolute',
+                  top: -16,
+                  left: -2,
+                  background: color,
+                  color: '#fff',
+                  fontSize: 9,
+                  fontWeight: 'bold',
+                  padding: '1px 4px',
+                  borderRadius: 2,
+                  whiteSpace: 'nowrap',
+                  pointerEvents: 'none',
+                  opacity: 0.8,
+                }}>
+                  {/* Ucinamy za długie nazwy (np. z '.png' lub długie) */}
+                  {(box as any).symbolName ? (box as any).symbolName.split('_')[0].substring(0, 15) : 'Symbol'}
+                </div>
+              </div>
             );
           })}
 

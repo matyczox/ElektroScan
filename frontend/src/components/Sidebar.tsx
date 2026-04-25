@@ -14,6 +14,8 @@ interface SidebarProps {
   patterns: any[];
   onUpdatePattern: (index: number, newName: string) => void;
   onDeletePattern: (index: number) => void;
+  layers?: {name: string, visible: boolean}[];
+  onToggleLayer?: (name: string) => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -27,7 +29,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
   progressText,
   patterns,
   onUpdatePattern,
-  onDeletePattern
+  onDeletePattern,
+  layers = [],
+  onToggleLayer
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [editingPatternIndex, setEditingPatternIndex] = useState<number | null>(null);
@@ -95,6 +99,28 @@ export const Sidebar: React.FC<SidebarProps> = ({
             style={{ display: 'none' }} 
           />
         </div>
+
+        {/* Warstwy PDF */}
+        {layers && layers.length > 0 && (
+          <div className="card">
+            <div className="card-header">
+              <Layers size={14} /> Warstwy PDF (Zoptymalizuj tło)
+            </div>
+            <div style={{ maxHeight: 150, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {layers.map((layer, idx) => (
+                <label key={idx} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, cursor: 'pointer', color: layer.visible ? 'var(--text-main)' : 'var(--text-muted)' }}>
+                  <input 
+                    type="checkbox" 
+                    checked={layer.visible}
+                    onChange={() => onToggleLayer?.(layer.name)}
+                    disabled={isProcessing}
+                  />
+                  <span style={{ textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }}>{layer.name}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Action Buttons */}
         <div className="card">

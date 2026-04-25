@@ -22,6 +22,7 @@ function App() {
   const [focusedBoxId, setFocusedBoxId] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [excludedZones, setExcludedZones] = useState<ExcludedZone[]>([]);
+  const [layers, setLayers] = useState<{name: string, visible: boolean}[]>([]);
 
   const fetchTemplates = async () => {
     try {
@@ -60,8 +61,40 @@ function App() {
       const data = await res.json();
       setPdfPreview(data.planPreview);
       setSessionId(data.sessionId);
+      
+      // Fetch layers
+      fetch(`http://localhost:8000/api/layers?session_id=${data.sessionId}`)
+        .then(r => r.json())
+        .then(d => setLayers(d.layers || []))
+        .catch(err => console.error("Layers fetch error", err));
+        
     } catch (e) {
       console.error(e);
+    } finally {
+      setIsProcessing(false);
+      setProgressText('');
+    }
+  };
+
+  const handleToggleLayer = async (layerName: string) => {
+    if (!sessionId) return;
+    const newLayers = layers.map(l => l.name === layerName ? { ...l, visible: !l.visible } : l);
+    setLayers(newLayers);
+    
+    setIsProcessing(true);
+    setProgressText('Przeliczanie warstw...');
+    try {
+      const hiddenLayers = newLayers.filter(l => !l.visible).map(l => l.name);
+      const res = await fetch(`http://localhost:8000/api/render-preview?session_id=${sessionId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hidden_layers: hiddenLayers })
+      });
+      if (!res.ok) throw new Error('Błąd odświeżania podglądu');
+      const data = await res.json();
+      setPdfPreview(data.planPreview);
+    } catch (err) {
+      console.error(err);
     } finally {
       setIsProcessing(false);
       setProgressText('');
@@ -82,7 +115,8 @@ function App() {
             y: Math.round(z.y),
             width: Math.round(z.width),
             height: Math.round(z.height),
-          }))
+          })),
+          hidden_layers: layers.filter(l => !l.visible).map(l => l.name)
         })
       });
       if (!response.ok) throw new Error('Błąd serwera');
@@ -111,7 +145,8 @@ function App() {
             y: Math.round(z.y),
             width: Math.round(z.width),
             height: Math.round(z.height),
-          }))
+          })),
+          hidden_layers: layers.filter(l => !l.visible).map(l => l.name)
         })
       });
       if (!response.ok) throw new Error('Błąd serwera');
@@ -138,6 +173,7 @@ function App() {
     setPatterns([]);
     setResults([]);
     setBoxes([]);
+    setLayers([]);
     setSessionId(null);
     setExcludedZones([]);
     setFocusedBoxId(null);
@@ -213,6 +249,8 @@ function App() {
         patterns={patterns}
         onUpdatePattern={handleUpdatePattern}
         onDeletePattern={handleDeletePattern}
+        layers={layers}
+        onToggleLayer={handleToggleLayer}
       />
 
       {/* Środek: Canvas */}

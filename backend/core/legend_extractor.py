@@ -86,14 +86,48 @@ class ExtractedSymbol:
     pixel_count: int = 0  # liczba kolorowych pikseli — przydatna do sortowania
 
 
-# ── Główna funkcja ─────────────────────────────────────────────────────────
-
-def pdf_to_png(pdf_path: str, page: int = 0, dpi: int = 300) -> np.ndarray:
+def get_pdf_layers(pdf_path: str) -> list[dict]:
     """
-    Konwertuje stronę PDF do obrazu OpenCV (BGR).
-    Zwraca np.ndarray gotowy do przetwarzania.
+    Zwraca listę warstw (Optional Content Groups - OCG) dostępnych w pliku PDF.
     """
     doc = fitz.open(pdf_path)
+    layers = []
+    
+    # Próbujemy pobrać konfigurację warstw
+    try:
+        ui_configs = doc.layer_ui_configs()
+        if ui_configs:
+            for conf in ui_configs:
+                # conf to dict, np. {'text': 'Warstwa 1', 'depth': 0, 'on': True, ...}
+                if 'text' in conf:
+                    layers.append({
+                        "name": conf["text"],
+                        "visible": conf.get("on", True)
+                    })
+    except Exception as e:
+        print(f"Błąd odczytu warstw: {e}")
+        
+    return layers
+
+def pdf_to_png(pdf_path: str, page: int = 0, dpi: int = 300, hidden_layers: list[str] = None) -> np.ndarray:
+    """
+    Konwertuje stronę PDF do obrazu OpenCV (BGR).
+    Pozwala na wyłączenie wybranych warstw (hidden_layers) przed renderowaniem.
+    """
+    doc = fitz.open(pdf_path)
+    
+    # ── HYBRYDOWE PODEJŚCIE: Wyłączanie warstw architektonicznych ──
+    if hidden_layers:
+        try:
+            ui_configs = doc.layer_ui_configs()
+            if ui_configs:
+                for conf in ui_configs:
+                    if conf.get("text") in hidden_layers:
+                        # Wyłączamy warstwę w dokumencie
+                        doc.set_layer_ui_config(conf["number"], action=2) # 2 = Turn Off
+        except Exception as e:
+            print(f"Błąd ukrywania warstw: {e}")
+
     pg = doc.load_page(page)
     zoom = dpi / 72.0
     pix = pg.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)

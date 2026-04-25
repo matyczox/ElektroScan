@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from typing import Optional, List
 
 # Importujemy nasze core'owe moduły
-from core.legend_extractor import pdf_to_png, extract_legend
+from core.legend_extractor import pdf_to_png, extract_legend, get_pdf_layers
 from core.detector import load_templates, detect_symbols, draw_results
 
 app = FastAPI(title="ElektroScan AI API")
@@ -40,6 +40,10 @@ async def root():
 
 class ExtractRequest(BaseModel):
     excluded_zones: Optional[List[dict]] = []
+    hidden_layers: Optional[List[str]] = []
+
+class RenderRequest(BaseModel):
+    hidden_layers: Optional[List[str]] = []
 
 @app.post("/api/preview")
 async def api_preview(file: UploadFile = File(...)):
@@ -66,6 +70,30 @@ async def api_preview(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/layers")
+async def api_layers(session_id: str):
+    file_path = UPLOAD_DIR / f"{session_id}.pdf"
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Nie znaleziono pliku sesji.")
+    layers = get_pdf_layers(str(file_path))
+    return {"layers": layers}
+
+@app.post("/api/render-preview")
+async def api_render_preview(session_id: str, body: RenderRequest = None):
+    file_path = UPLOAD_DIR / f"{session_id}.pdf"
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Nie znaleziono pliku sesji.")
+    try:
+        hidden_layers = body.hidden_layers if body else []
+        plan_img = pdf_to_png(str(file_path), dpi=300, hidden_layers=hidden_layers)
+        _, buffer_plan = cv2.imencode('.jpg', plan_img, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        plan_base64 = base64.b64encode(buffer_plan).decode('utf-8')
+        return {
+            "planPreview": f"data:image/jpeg;base64,{plan_base64}"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/api/extract-legend")
 async def api_extract_legend(session_id: str, body: ExtractRequest = None):
     file_path = UPLOAD_DIR / f"{session_id}.pdf"
@@ -74,7 +102,8 @@ async def api_extract_legend(session_id: str, body: ExtractRequest = None):
         
     try:
         print(f"Renderowanie planu do ekstrakcji (300 DPI)")
-        plan_img = pdf_to_png(str(file_path), dpi=300)
+        hidden_layers = body.hidden_layers if body else []
+        plan_img = pdf_to_png(str(file_path), dpi=300, hidden_layers=hidden_layers)
         
         # Strefy wykluczone
         exclude_rects = []
@@ -124,6 +153,7 @@ from typing import Optional, List
 
 class AnalyzeRequest(BaseModel):
     excluded_zones: Optional[List[dict]] = []
+    hidden_layers: Optional[List[str]] = []
 
 @app.post("/api/analyze")
 async def api_analyze(session_id: str, body: AnalyzeRequest = None):
@@ -134,7 +164,8 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
         
     try:
         # 1. Ładujemy plan
-        plan_img = pdf_to_png(str(plan_path), dpi=300)
+        hidden_layers = body.hidden_layers if body else []
+        plan_img = pdf_to_png(str(plan_path), dpi=300, hidden_layers=hidden_layers)
         
         # 2. Ładujemy wzorce
         templates = load_templates(str(TEMPLATES_DIR))
