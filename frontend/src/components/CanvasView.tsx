@@ -9,6 +9,7 @@ interface Box {
   height: number;
   color: string;
   confidence: number;
+  verificationScore?: number;
   symbolName: string;
 }
 
@@ -271,14 +272,15 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
           {boxes.map(box => {
             const isFocused = focusedBoxId === box.id || pulsingId === box.id;
             const isPulsing = pulsingId === box.id;
-            const isLowConf = box.confidence < 0.65;
+            const displayConfidence = box.verificationScore ?? box.confidence;
+            const isLowConf = displayConfidence < 0.55;
             const color = isFocused ? BOX_FOCUS_COLOR : (isLowConf ? BOX_LOW_COLOR : box.color);
 
             return (
               <div
                 key={box.id}
                 onClick={e => { e.stopPropagation(); onBoxClick?.(box.id); }}
-                title={`Pewność: ${(box.confidence * 100).toFixed(0)}%\nWzorzec: ${box.symbolName}`}
+                title={`Weryfikacja: ${(displayConfidence * 100).toFixed(0)}%\nMatch template: ${(box.confidence * 100).toFixed(0)}%\nWzorzec: ${box.symbolName}`}
                 style={{
                   position: 'absolute',
                   left: box.x,

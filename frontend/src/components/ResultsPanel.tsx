@@ -9,6 +9,7 @@ interface Box {
   width: number;
   height: number;
   confidence: number;
+  verificationScore?: number;
   color: string;
 }
 
@@ -62,8 +63,10 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
     });
   };
 
+  const getDisplayConfidence = (box: Box) => box.verificationScore ?? box.confidence;
+
   // Group boxes by symbolName, applying confidence filter
-  const filteredBoxes = boxes.filter(b => b.confidence * 100 >= minConfidence);
+  const filteredBoxes = boxes.filter(b => getDisplayConfidence(b) * 100 >= minConfidence);
   const boxesBySymbol: Record<string, Box[]> = {};
   filteredBoxes.forEach(b => {
     if (!boxesBySymbol[b.symbolName]) boxesBySymbol[b.symbolName] = [];
@@ -260,6 +263,7 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
                         ) : (
                           groupBoxes.map(box => {
                             const isFocused = focusedBoxId === box.id;
+                            const displayConfidence = getDisplayConfidence(box);
                             return (
                             <div
                               key={box.id}
@@ -281,11 +285,11 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
                                 style={{
                                   fontSize: 11,
                                   fontWeight: 700,
-                                  color: box.confidence < 0.65 ? '#f59e0b' : '#10b981',
+                                  color: displayConfidence < 0.55 ? '#f59e0b' : '#10b981',
                                   minWidth: 36,
                                 }}
                               >
-                                {(box.confidence * 100).toFixed(0)}%
+                                {(displayConfidence * 100).toFixed(0)}%
                               </span>
                               {/* Position */}
                               <span className="text-xs text-muted" style={{ flex: 1 }}>

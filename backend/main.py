@@ -223,6 +223,8 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
                     "width": det.width,
                     "height": det.height,
                     "confidence": det.confidence,
+                    "verificationScore": det.verification_score,
+                    "source": det.source,
                     "color": r.color,
                 })
             

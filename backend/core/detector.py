@@ -39,23 +39,33 @@ MIN_TEMPLATE_PIXELS = 20
 
 MIN_COVERAGE_RATIO = 0.24
 MIN_PURITY_RATIO = 0.08
+MIN_CONTEXT_PURITY = 0.72
 MIN_VERIFICATION_SCORE = 0.40
+MAX_CENTROID_OFFSET_RATIO = 0.18
+LOW_MATCH_STRICT_THRESHOLD = 0.58
+CONTEXT_MARGIN_RATIO = 0.40
 
-LOCAL_MAX_KERNEL_RATIO = 0.35
+LOCAL_MAX_KERNEL_RATIO = 0.25
 
 PRECISE_KEYWORDS = ["gniazdo", "wypust"]
+MIRRORED_VARIANT_PREFIXES = {"06", "07", "09"}
 
 COLOR_HUE_TOLERANCE = 18
 COLOR_SAT_TOLERANCE = 80
 COLOR_VAL_TOLERANCE = 80
 COLOR_HUE_REJECTION_THRESHOLD = 36
+SOCKET_07_EXTRA_MIN_COVERAGE = 0.30
+SOCKET_07_PROMOTION_SEARCH_RADIUS = 4
 
 PREFILTER_NMS_MIN_CANDIDATES = 250
 PREFILTER_NMS_IOU_THRESHOLD = 0.85
 
-CLUSTER_IOU_THRESHOLD = 0.18
-CLUSTER_IOM_THRESHOLD = 0.50
-CLUSTER_CENTER_DISTANCE_RATIO = 0.40
+CLUSTER_IOU_THRESHOLD = 0.30
+CLUSTER_IOM_THRESHOLD = 0.72
+CLUSTER_CENTER_DISTANCE_RATIO = 0.28
+CROSS_COLOR_CLUSTER_IOU_THRESHOLD = 0.55
+CROSS_COLOR_CLUSTER_IOM_THRESHOLD = 0.88
+CROSS_COLOR_CENTER_DISTANCE_RATIO = 0.16
 
 DEFAULT_PDF_DPI = 300
 PDF_TEXT_MIN_TOKEN_LENGTH = 2
@@ -114,6 +124,7 @@ class TemplateVariant:
     template_id: int
     scale: float
     rotation: int
+    mirrored: bool
     transformed_mask: np.ndarray
     pixel_count: int
     width: int
@@ -127,6 +138,7 @@ class CandidateHit:
     template_id: int
     scale: float
     rotation: int
+    mirrored: bool
     transformed_mask: np.ndarray | None
     pixel_count: int
     bbox: tuple[int, int, int, int]
@@ -135,8 +147,23 @@ class CandidateHit:
     source: str = "template"
     coverage: float = 0.0
     purity: float = 0.0
+    context_purity: float = 1.0
     color_similarity: float = 1.0
     verification_score: float = 0.0
+
+
+@dataclass
+class TargetedPromotionRule:
+    """Pair-specific promotion from a smaller template to a larger one."""
+
+    parent_template_id: int
+    scale: float
+    rotation: int
+    mirrored: bool
+    offset_x: int
+    offset_y: int
+    extension_mask: np.ndarray
+    extension_pixels: int
 
 
 # HSV helpers
@@ -214,6 +241,13 @@ def _normalize_template_name(name: str) -> str:
     return re.sub(r"^\d+_+", "", name)
 
 
+def _template_numeric_prefix(name: str) -> str | None:
+    """Return the numeric prefix from a template filename stem, if present."""
+
+    match = re.match(r"^(\d+)_", name)
+    return match.group(1) if match else None
+
+
 def _derive_text_tokens(name: str) -> list[str]:
     """Extract short text tokens that can be searched directly in the PDF."""
 
@@ -238,6 +272,8 @@ def _prepare_variants(template_id: int, template: TemplateInfo) -> list[Template
 
     variants: list[TemplateVariant] = []
     base_mask = template.mask
+    template_prefix = _template_numeric_prefix(Path(template.path).name)
+    allow_mirror = template_prefix in MIRRORED_VARIANT_PREFIXES
 
     for scale in SCALES:
         if scale != 1.0:
@@ -247,25 +283,122 @@ def _prepare_variants(template_id: int, template: TemplateInfo) -> list[Template
         else:
             scaled_mask = base_mask
 
-        for rotation, rotate_code in ROTATIONS:
-            rot_mask = cv2.rotate(scaled_mask, rotate_code) if rotate_code is not None else scaled_mask
-            pixel_count = int(cv2.countNonZero(rot_mask))
-            if pixel_count == 0:
-                continue
+        mask_sources = [(False, scaled_mask)]
+        if allow_mirror:
+            mask_sources.append((True, cv2.flip(scaled_mask, 1)))
 
-            variants.append(
-                TemplateVariant(
-                    template_id=template_id,
-                    scale=scale,
-                    rotation=rotation,
-                    transformed_mask=rot_mask,
-                    pixel_count=pixel_count,
-                    width=int(rot_mask.shape[1]),
-                    height=int(rot_mask.shape[0]),
+        for mirrored, source_mask in mask_sources:
+            for rotation, rotate_code in ROTATIONS:
+                rot_mask = cv2.rotate(source_mask, rotate_code) if rotate_code is not None else source_mask
+                pixel_count = int(cv2.countNonZero(rot_mask))
+                if pixel_count == 0:
+                    continue
+
+                variants.append(
+                    TemplateVariant(
+                        template_id=template_id,
+                        scale=scale,
+                        rotation=rotation,
+                        mirrored=mirrored,
+                        transformed_mask=rot_mask,
+                        pixel_count=pixel_count,
+                        width=int(rot_mask.shape[1]),
+                        height=int(rot_mask.shape[0]),
+                    )
                 )
-            )
 
     return variants
+
+
+def _build_socket_07_promotions(
+    templates: list[TemplateInfo],
+    variants_by_template: dict[int, list[TemplateVariant]],
+) -> dict[tuple[int, float, int, bool], list[TargetedPromotionRule]]:
+    """Build narrow socket-family -> 07 promotion maps based on template containment."""
+
+    template_ids_by_prefix = {
+        prefix: template_id
+        for template_id, template in enumerate(templates)
+        for prefix in [_template_numeric_prefix(Path(template.path).name)]
+        if prefix is not None
+    }
+
+    parent_id = template_ids_by_prefix.get("07")
+    if parent_id is None:
+        return {}
+
+    parent_variants = list(variants_by_template.get(parent_id, []))
+
+    promotions: dict[tuple[int, float, int, bool], list[TargetedPromotionRule]] = {}
+    child_specs = {
+        "06": (0.95, 0.82),
+        "09": (0.82, 0.90),
+    }
+
+    for child_prefix, (min_child_coverage, min_crop_purity) in child_specs.items():
+        child_id = template_ids_by_prefix.get(child_prefix)
+        if child_id is None:
+            continue
+
+        for child_variant in variants_by_template.get(child_id, []):
+            child_key = (child_id, child_variant.scale, child_variant.rotation, child_variant.mirrored)
+            for parent_mirrored in (False, True):
+                for parent_variant in parent_variants:
+                    if parent_variant.rotation != child_variant.rotation:
+                        continue
+                    if parent_variant.mirrored != parent_mirrored:
+                        continue
+                    if child_variant.width > parent_variant.width or child_variant.height > parent_variant.height:
+                        continue
+
+                    result = cv2.matchTemplate(
+                        parent_variant.transformed_mask,
+                        child_variant.transformed_mask,
+                        cv2.TM_CCORR_NORMED,
+                    )
+                    _, _, _, max_loc = cv2.minMaxLoc(result)
+                    offset_x, offset_y = int(max_loc[0]), int(max_loc[1])
+                    crop = parent_variant.transformed_mask[
+                        offset_y : offset_y + child_variant.height,
+                        offset_x : offset_x + child_variant.width,
+                    ]
+                    if crop.shape != child_variant.transformed_mask.shape:
+                        continue
+
+                    intersection = int(cv2.countNonZero(cv2.bitwise_and(crop, child_variant.transformed_mask)))
+                    child_coverage = intersection / max(1, child_variant.pixel_count)
+                    crop_pixels = int(cv2.countNonZero(crop))
+                    crop_purity = intersection / max(1, crop_pixels)
+                    if child_coverage < min_child_coverage or crop_purity < min_crop_purity:
+                        continue
+
+                    child_canvas = np.zeros_like(parent_variant.transformed_mask)
+                    child_canvas[
+                        offset_y : offset_y + child_variant.height,
+                        offset_x : offset_x + child_variant.width,
+                    ] = child_variant.transformed_mask
+                    extension_mask = cv2.bitwise_and(
+                        parent_variant.transformed_mask,
+                        cv2.bitwise_not(child_canvas),
+                    )
+                    extension_pixels = int(cv2.countNonZero(extension_mask))
+                    if extension_pixels <= 0:
+                        continue
+
+                    promotions.setdefault(child_key, []).append(
+                        TargetedPromotionRule(
+                            parent_template_id=parent_id,
+                            scale=parent_variant.scale,
+                            rotation=parent_variant.rotation,
+                            mirrored=parent_mirrored,
+                            offset_x=offset_x,
+                            offset_y=offset_y,
+                            extension_mask=extension_mask,
+                            extension_pixels=extension_pixels,
+                        )
+                    )
+
+    return promotions
 
 
 def load_templates(folder: str) -> list[TemplateInfo]:
@@ -386,6 +519,46 @@ def _roi_color_similarity(
     return max(0.0, 1.0 - (diff / COLOR_HUE_REJECTION_THRESHOLD))
 
 
+def _mask_centroid(mask: np.ndarray) -> tuple[float, float] | None:
+    """Return the centroid of foreground pixels in a binary mask."""
+
+    moments = cv2.moments(mask, binaryImage=True)
+    if moments["m00"] == 0:
+        return None
+
+    return (
+        float(moments["m10"] / moments["m00"]),
+        float(moments["m01"] / moments["m00"]),
+    )
+
+
+def _context_purity(
+    plan_mask: np.ndarray,
+    bbox: tuple[int, int, int, int],
+    intersection_mask: np.ndarray,
+) -> float:
+    """Measure how much local foreground around the hit is explained by the template."""
+
+    x, y, w, h = bbox
+    margin = max(3, int(round(max(w, h) * CONTEXT_MARGIN_RATIO)))
+
+    x0 = max(0, x - margin)
+    y0 = max(0, y - margin)
+    x1 = min(plan_mask.shape[1], x + w + margin)
+    y1 = min(plan_mask.shape[0], y + h + margin)
+
+    context_mask = plan_mask[y0:y1, x0:x1]
+    if context_mask.size == 0:
+        return 0.0
+
+    context_foreground = int(cv2.countNonZero(context_mask))
+    if context_foreground == 0:
+        return 0.0
+
+    explained_pixels = int(cv2.countNonZero(intersection_mask))
+    return explained_pixels / context_foreground
+
+
 def _validate_template_hit(
     hit: CandidateHit,
     plan_mask: np.ndarray,
@@ -404,11 +577,34 @@ def _validate_template_hit(
     if roi_foreground == 0 or hit.pixel_count <= 0:
         return False
 
-    intersection = int(cv2.countNonZero(cv2.bitwise_and(roi, hit.transformed_mask)))
+    intersection_mask = cv2.bitwise_and(roi, hit.transformed_mask)
+    intersection = int(cv2.countNonZero(intersection_mask))
     coverage = intersection / hit.pixel_count
     purity = intersection / roi_foreground
 
     if coverage < MIN_COVERAGE_RATIO or purity < MIN_PURITY_RATIO:
+        return False
+
+    template_centroid = _mask_centroid(hit.transformed_mask)
+    intersection_centroid = _mask_centroid(intersection_mask)
+    if template_centroid is None or intersection_centroid is None:
+        return False
+
+    centroid_offset = float(
+        np.hypot(
+            template_centroid[0] - intersection_centroid[0],
+            template_centroid[1] - intersection_centroid[1],
+        )
+    )
+    bbox_diagonal = max(1.0, float(np.hypot(hit.bbox[2], hit.bbox[3])))
+    centroid_offset_ratio = centroid_offset / bbox_diagonal
+    if centroid_offset_ratio > MAX_CENTROID_OFFSET_RATIO:
+        return False
+
+    context_purity = _context_purity(plan_mask, hit.bbox, intersection_mask)
+    if context_purity <= 0.0:
+        return False
+    if hit.match_score < LOW_MATCH_STRICT_THRESHOLD and context_purity < MIN_CONTEXT_PURITY:
         return False
 
     color_similarity = _roi_color_similarity(plan_image, plan_mask, hit.bbox, hit.dominant_hsv)
@@ -416,9 +612,10 @@ def _validate_template_hit(
         return False
 
     verification_score = (
-        0.60 * hit.match_score
-        + 0.25 * coverage
+        0.45 * hit.match_score
+        + 0.20 * coverage
         + 0.15 * purity
+        + 0.20 * context_purity
     )
 
     if verification_score < MIN_VERIFICATION_SCORE:
@@ -426,9 +623,94 @@ def _validate_template_hit(
 
     hit.coverage = round(coverage, 4)
     hit.purity = round(purity, 4)
+    hit.context_purity = round(context_purity, 4)
     hit.color_similarity = round(color_similarity, 4)
     hit.verification_score = round(verification_score, 4)
     return True
+
+
+def _maybe_promote_socket_06_to_07(
+    hit: CandidateHit,
+    plan_image: np.ndarray,
+    templates: list[TemplateInfo],
+    plan_masks: dict[int, np.ndarray],
+    variants_lookup: dict[tuple[int, float, int, bool], TemplateVariant],
+    promotions: dict[tuple[int, float, int, bool], list[TargetedPromotionRule]],
+) -> CandidateHit:
+    """Replace a 06 hit with 07 when the 07-only extension pixels are present."""
+
+    rules = promotions.get((hit.template_id, hit.scale, hit.rotation, hit.mirrored))
+    if not rules:
+        return hit
+
+    best_promoted: CandidateHit | None = None
+    best_key: tuple[float, float, float] | None = None
+
+    for rule in rules:
+        parent_variant = variants_lookup.get(
+            (rule.parent_template_id, rule.scale, rule.rotation, rule.mirrored)
+        )
+        parent_plan_mask = plan_masks.get(rule.parent_template_id)
+        if parent_variant is None or parent_plan_mask is None:
+            continue
+        promotion_plan_mask = cv2.dilate(parent_plan_mask, DILATE_KERNEL, iterations=1)
+
+        base_parent_x = hit.bbox[0] - rule.offset_x
+        base_parent_y = hit.bbox[1] - rule.offset_y
+
+        for delta_y in range(-SOCKET_07_PROMOTION_SEARCH_RADIUS, SOCKET_07_PROMOTION_SEARCH_RADIUS + 1):
+            for delta_x in range(-SOCKET_07_PROMOTION_SEARCH_RADIUS, SOCKET_07_PROMOTION_SEARCH_RADIUS + 1):
+                parent_bbox = (
+                    base_parent_x + delta_x,
+                    base_parent_y + delta_y,
+                    parent_variant.width,
+                    parent_variant.height,
+                )
+                parent_roi = _roi_mask(promotion_plan_mask, parent_bbox)
+                if parent_roi is None or parent_roi.shape != parent_variant.transformed_mask.shape:
+                    continue
+
+                extra_overlap = int(cv2.countNonZero(cv2.bitwise_and(parent_roi, rule.extension_mask)))
+                extra_coverage = extra_overlap / max(1, rule.extension_pixels)
+                if extra_coverage < SOCKET_07_EXTRA_MIN_COVERAGE:
+                    continue
+
+                try:
+                    local_match = float(
+                        cv2.matchTemplate(
+                            parent_roi,
+                            parent_variant.transformed_mask,
+                            cv2.TM_CCORR_NORMED,
+                        )[0][0]
+                    )
+                except cv2.error:
+                    continue
+
+                promoted_hit = CandidateHit(
+                    template_id=rule.parent_template_id,
+                    scale=rule.scale,
+                    rotation=rule.rotation,
+                    mirrored=rule.mirrored,
+                    transformed_mask=parent_variant.transformed_mask,
+                    pixel_count=parent_variant.pixel_count,
+                    bbox=parent_bbox,
+                    match_score=local_match,
+                    dominant_hsv=templates[rule.parent_template_id].dominant_hsv,
+                    source="template_promoted_06_to_07",
+                )
+                if not _validate_template_hit(promoted_hit, promotion_plan_mask, plan_image):
+                    continue
+
+                candidate_key = (
+                    float(extra_coverage),
+                    float(promoted_hit.verification_score),
+                    float(promoted_hit.match_score),
+                )
+                if best_key is None or candidate_key > best_key:
+                    best_promoted = promoted_hit
+                    best_key = candidate_key
+
+    return best_promoted or hit
 
 
 def _bbox_metrics(
@@ -465,6 +747,27 @@ def _bbox_metrics(
     return inter_area, iou, iom, normalized_center_distance
 
 
+def _box_center(box: tuple[int, int, int, int]) -> tuple[float, float]:
+    """Return the geometric center of a bbox."""
+
+    x, y, w, h = box
+    return (x + w / 2.0, y + h / 2.0)
+
+
+def _center_inside_box(
+    center: tuple[float, float],
+    box: tuple[int, int, int, int],
+    margin_ratio: float = 0.05,
+) -> bool:
+    """Check whether a center point lies inside a bbox with a small safety margin."""
+
+    x, y = center
+    bx, by, bw, bh = box
+    pad_x = bw * margin_ratio
+    pad_y = bh * margin_ratio
+    return (bx - pad_x) <= x <= (bx + bw + pad_x) and (by - pad_y) <= y <= (by + bh + pad_y)
+
+
 def _should_cluster(hit_a: CandidateHit, hit_b: CandidateHit) -> bool:
     """Decide whether two candidates describe the same physical object."""
 
@@ -472,13 +775,29 @@ def _should_cluster(hit_a: CandidateHit, hit_b: CandidateHit) -> bool:
     if inter_area <= 0:
         return False
 
-    if iom >= CLUSTER_IOM_THRESHOLD:
+    center_a = _box_center(hit_a.bbox)
+    center_b = _box_center(hit_b.bbox)
+    centers_nested = _center_inside_box(center_a, hit_b.bbox) or _center_inside_box(center_b, hit_a.bbox)
+
+    if (
+        hit_a.dominant_hsv is not None
+        and hit_b.dominant_hsv is not None
+        and _hue_distance(hit_a.dominant_hsv[0], hit_b.dominant_hsv[0]) > (COLOR_HUE_TOLERANCE + 6)
+    ):
+        return (
+            centers_nested
+            and iou >= CROSS_COLOR_CLUSTER_IOU_THRESHOLD
+            and iom >= CROSS_COLOR_CLUSTER_IOM_THRESHOLD
+            and center_distance <= CROSS_COLOR_CENTER_DISTANCE_RATIO
+        )
+
+    if iou >= CLUSTER_IOU_THRESHOLD and center_distance <= CLUSTER_CENTER_DISTANCE_RATIO:
         return True
 
-    return (
-        iou >= CLUSTER_IOU_THRESHOLD
-        and center_distance <= CLUSTER_CENTER_DISTANCE_RATIO
-    )
+    if iom >= CLUSTER_IOM_THRESHOLD and centers_nested and center_distance <= (CLUSTER_CENTER_DISTANCE_RATIO * 1.15):
+        return True
+
+    return False
 
 
 def _prefilter_candidates(candidates: list[CandidateHit]) -> list[CandidateHit]:
@@ -689,6 +1008,7 @@ def _collect_pdf_text_hits(
                             template_id=template_id,
                             scale=1.0,
                             rotation=_quad_rotation(hit) if hasattr(hit, "ul") else 0,
+                            mirrored=False,
                             transformed_mask=None,
                             pixel_count=max(1, bbox[2] * bbox[3]),
                             bbox=bbox,
@@ -812,10 +1132,21 @@ def detect_symbols(
         template_id: _prepare_variants(template_id, template)
         for template_id, template in enumerate(templates)
     }
+    variants_lookup = {
+        (variant.template_id, variant.scale, variant.rotation, variant.mirrored): variant
+        for variants in variants_by_template.values()
+        for variant in variants
+    }
+    socket_07_promotions = _build_socket_07_promotions(templates, variants_by_template)
+    plan_masks_by_template = {
+        template_id: _get_plan_mask(template)
+        for template_id, template in enumerate(templates)
+    }
 
     diagnostics = {
         "raw_peaks": 0,
         "validated_template_hits": 0,
+        "promoted_socket_to_07": 0,
         "pdf_text_hits": len(pdf_candidates),
         "prefilter_hits": 0,
         "final_hits": 0,
@@ -824,7 +1155,7 @@ def detect_symbols(
     def _scan_template(template_id: int) -> list[CandidateHit]:
         template = templates[template_id]
         threshold = THRESHOLD_PRECISE if template.requires_precision else THRESHOLD_DILATED
-        plan_mask = _get_plan_mask(template)
+        plan_mask = plan_masks_by_template[template_id]
 
         template_hits: list[CandidateHit] = []
         for variant in variants_by_template.get(template_id, []):
@@ -847,6 +1178,7 @@ def detect_symbols(
                         template_id=template_id,
                         scale=variant.scale,
                         rotation=variant.rotation,
+                        mirrored=variant.mirrored,
                         transformed_mask=variant.transformed_mask,
                         pixel_count=variant.pixel_count,
                         bbox=(px, py, variant.width, variant.height),
@@ -870,9 +1202,19 @@ def detect_symbols(
 
     validated_candidates: list[CandidateHit] = list(pdf_candidates)
     for hit in raw_template_hits:
-        plan_mask = _get_plan_mask(templates[hit.template_id])
+        plan_mask = plan_masks_by_template[hit.template_id]
         if _validate_template_hit(hit, plan_mask, plan_image):
-            validated_candidates.append(hit)
+            promoted_hit = _maybe_promote_socket_06_to_07(
+                hit,
+                plan_image,
+                templates,
+                plan_masks_by_template,
+                variants_lookup,
+                socket_07_promotions,
+            )
+            if promoted_hit.template_id != hit.template_id:
+                diagnostics["promoted_socket_to_07"] += 1
+            validated_candidates.append(promoted_hit)
 
     diagnostics["validated_template_hits"] = len(validated_candidates) - len(pdf_candidates)
 
@@ -886,6 +1228,7 @@ def detect_symbols(
         "Detection diagnostics:"
         f" raw_peaks={diagnostics['raw_peaks']},"
         f" validated_template_hits={diagnostics['validated_template_hits']},"
+        f" promoted_socket_to_07={diagnostics['promoted_socket_to_07']},"
         f" pdf_text_hits={diagnostics['pdf_text_hits']},"
         f" after_prefilter={diagnostics['prefilter_hits']},"
         f" final_clusters={diagnostics['final_hits']}"
