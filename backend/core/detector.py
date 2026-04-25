@@ -179,6 +179,8 @@ def detect_symbols(
 
     results: list[DetectionResult] = []
 
+    SCALES = [0.90, 1.00, 1.10]  # 3 skale — łapie symbole lekko większe/mniejsze niż wzorzec
+
     for tpl in templates:
         # Wybór maski i progu w zależności od typu symbolu
         if tpl.requires_precision:
@@ -188,39 +190,50 @@ def detect_symbols(
             plan_mask = mask_dilated
             threshold = THRESHOLD_DILATED
 
-        # Przygotowanie 4 rotacji wzorca
-        rotated_masks = []
-        for rot in ROTATIONS:
-            if rot is None:
-                rotated_masks.append(tpl.mask)
-            else:
-                rotated_masks.append(cv2.rotate(tpl.mask, rot))
+        # Przygotowanie 4 rotacji × 3 skale = 12 prób na wzorzec
+        raw_hits: list[list[int]] = []
+        hit_scores: dict[tuple, float] = {}
 
-        # Zbieramy trafienia ze wszystkich rotacji (x, y, w, h, confidence)
-        raw_hits: list[list[int]] = []     # do groupRectangles (bez confidence)
-        hit_scores: dict[tuple, float] = {} # mapa (x,y) -> max_confidence
+        for scale in SCALES:
+            for rot in ROTATIONS:
+                # Skalujemy maskę wzorca
+                base_mask = tpl.mask
+                if scale != 1.0:
+                    new_w = max(1, int(base_mask.shape[1] * scale))
+                    new_h = max(1, int(base_mask.shape[0] * scale))
+                    scaled_mask = cv2.resize(base_mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+                else:
+                    scaled_mask = base_mask
 
-        for rot_mask in rotated_masks:
-            h, w = rot_mask.shape[:2]
+                # Rotacja
+                if rot is not None:
+                    rot_mask = cv2.rotate(scaled_mask, rot)
+                else:
+                    rot_mask = scaled_mask
 
-            # Zabezpieczenie: wzorzec większy niż plan
-            if h > plan_mask.shape[0] or w > plan_mask.shape[1]:
-                continue
+                h, w = rot_mask.shape[:2]
 
-            match_result = cv2.matchTemplate(plan_mask, rot_mask, cv2.TM_CCOEFF_NORMED)
-            locations = np.where(match_result >= threshold)
+                # Zabezpieczenie: wzorzec większy niż plan
+                if h > plan_mask.shape[0] or w > plan_mask.shape[1]:
+                    continue
 
-            # Bezpiecznik przeciążeniowy
-            if len(locations[0]) > MAX_HITS_PER_ROTATION:
-                continue
+                match_result = cv2.matchTemplate(plan_mask, rot_mask, cv2.TM_CCOEFF_NORMED)
+                locations = np.where(match_result >= threshold)
 
-            for pt in zip(*locations[::-1]):
-                px, py = int(pt[0]), int(pt[1])
-                score = float(match_result[py, px])
-                raw_hits.append([px, py, int(w), int(h)])
-                key = (px, py)
-                if key not in hit_scores or score > hit_scores[key]:
-                    hit_scores[key] = score
+                # Bezpiecznik przeciążeniowy
+                if len(locations[0]) > MAX_HITS_PER_ROTATION:
+                    continue
+
+                for pt in zip(*locations[::-1]):
+                    px, py = int(pt[0]), int(pt[1])
+                    score = float(match_result[py, px])
+                    # Normalizujemy rozmiar do skali 1.0 dla groupRectangles
+                    norm_w = int(tpl.mask.shape[1])
+                    norm_h = int(tpl.mask.shape[0])
+                    raw_hits.append([px, py, norm_w, norm_h])
+                    key = (px, py)
+                    if key not in hit_scores or score > hit_scores[key]:
+                        hit_scores[key] = score
 
         # Grupowanie duplikatów
         if len(raw_hits) == 0:
@@ -239,7 +252,7 @@ def detect_symbols(
             if cv2.countNonZero(roi) <= tpl.pixel_count * MIN_PIXEL_DENSITY_RATIO:
                 continue
 
-            # Znajdź najlepsze confidence dla tego prostokąta
+            # Najlepsze confidence dla tego prostokąta
             best_conf = hit_scores.get((int(x), int(y)), threshold)
 
             detections.append(Detection(
@@ -250,18 +263,15 @@ def detect_symbols(
             ))
 
             # ── DESTRUCTIVE MASKING ──
-            # Wymazujemy znaleziony obszar z OBU masek, żeby mniejsze
-            # symbole nie mogły się tu dopasować.
             cv2.rectangle(mask_precise, (x, y), (x+w, y+h), 0, -1)
             cv2.rectangle(mask_dilated, (x, y), (x+w, y+h), 0, -1)
 
-        # Odejmij 1 za legendę (wzorzec matchuje sam siebie w legendzie)
+        # Odejmij 1 za legendę
         count = len(detections)
         if subtract_legend:
             count = max(0, count - 1)
 
         if count > 0:
-            # Losowy, ale deterministyczny kolor hex na podstawie nazwy
             import hashlib
             h_val = int(hashlib.md5(tpl.name.encode()).hexdigest()[:6], 16)
             r = (h_val >> 16) & 0xFF | 0x40
@@ -277,6 +287,7 @@ def detect_symbols(
             ))
 
     return results
+
 
 
 def draw_results(

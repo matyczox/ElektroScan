@@ -26,6 +26,8 @@ interface CanvasViewProps {
   excludedZones?: ExcludedZone[];
   onAddExcludedZone?: (x: number, y: number, w: number, h: number) => void;
   onRemoveExcludedZone?: (index: number) => void;
+  symbolNames?: string[];
+  onAddManualBox?: (box: Omit<Box, 'id' | 'color'> & { symbolName: string }) => void;
 }
 
 export const CanvasView: React.FC<CanvasViewProps> = ({
@@ -36,6 +38,8 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
   excludedZones = [],
   onAddExcludedZone,
   onRemoveExcludedZone,
+  symbolNames = [],
+  onAddManualBox,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState(1);
@@ -48,6 +52,12 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
   const [isDrawing, setIsDrawing] = useState(false);
   const [drawStart, setDrawStart] = useState({ x: 0, y: 0 });
   const [drawCurrent, setDrawCurrent] = useState({ x: 0, y: 0 });
+
+  // Tryb ręcznego dodawania symbolu
+  const [isManualMode, setIsManualMode] = useState(false);
+  const [manualPos, setManualPos] = useState<{ x: number, y: number } | null>(null);
+  const [manualSymbol, setManualSymbol] = useState('');
+  const [manualSize, setManualSize] = useState(40);
 
   // Pulsowanie wybranej ramki
   const [pulsingId, setPulsingId] = useState<string | null>(null);
@@ -95,6 +105,13 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
 
   const handleMouseDown = (e: React.MouseEvent) => {
     if (!imageSrc) return;
+    if (isManualMode) {
+      const coords = getCanvasCoordinates(e.clientX, e.clientY);
+      setManualPos(coords);
+      if (symbolNames.length > 0 && !manualSymbol) setManualSymbol(symbolNames[0]);
+      // Nie starujemy drag
+      return;
+    }
     if (isZoneMode) {
       setIsDrawing(true);
       const coords = getCanvasCoordinates(e.clientX, e.clientY);
@@ -141,9 +158,23 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
     );
   }
 
-  const BOX_COLOR = '#c6a87c';         // złoty — normalny
-  const BOX_FOCUS_COLOR = '#f97316';   // pomarańcz — zaznaczony / pulsujący
-  const BOX_LOW_COLOR = '#f59e0b';     // żółty — niski confidence
+  const BOX_COLOR = '#c6a87c';
+  const BOX_FOCUS_COLOR = '#f97316';
+  const BOX_LOW_COLOR = '#f59e0b';
+
+  const confirmManualBox = () => {
+    if (!manualPos || !manualSymbol) return;
+    onAddManualBox?.({
+      symbolName: manualSymbol,
+      x: Math.round(manualPos.x - manualSize / 2),
+      y: Math.round(manualPos.y - manualSize / 2),
+      width: manualSize,
+      height: manualSize,
+      confidence: 1.0,
+    });
+    setManualPos(null);
+    setIsManualMode(false);
+  };
 
   return (
     <div className="workspace" ref={containerRef} onWheel={handleWheel}>
@@ -277,6 +308,77 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
               backgroundColor: 'rgba(249,115,22,0.12)',
               pointerEvents: 'none',
             }} />
+          )}
+
+          {/* Ręczne dodawanie - Modal */}
+          {manualPos && (
+            <div
+              style={{
+                position: 'absolute',
+                left: manualPos.x,
+                top: manualPos.y,
+                transform: `scale(${1 / scale}) translate(10px, 10px)`,
+                background: 'var(--bg-secondary)',
+                border: '1px solid var(--border-light)',
+                borderRadius: 8,
+                padding: 12,
+                zIndex: 100,
+                boxShadow: '0 4px 12px rgba(0,0,0,0.5)',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 8,
+                width: 200,
+                cursor: 'default',
+              }}
+              onClick={e => e.stopPropagation()}
+              onMouseDown={e => e.stopPropagation()}
+            >
+              <h4 style={{ margin: 0, fontSize: 12, color: 'var(--accent-gold)' }}>Dodaj symbol</h4>
+              <select 
+                value={manualSymbol} 
+                onChange={e => setManualSymbol(e.target.value)}
+                style={{ width: '100%', padding: '4px', background: 'var(--bg-primary)', color: 'white', border: '1px solid var(--border-light)', borderRadius: 4 }}
+              >
+                {symbolNames.map(s => <option key={s} value={s}>{s}</option>)}
+              </select>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Rozmiar:</span>
+                <input 
+                  type="number" 
+                  value={manualSize} 
+                  onChange={e => setManualSize(Number(e.target.value))}
+                  style={{ width: 50, padding: 2, background: 'var(--bg-primary)', color: 'white', border: '1px solid var(--border-light)' }}
+                />
+              </div>
+              <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
+                <button 
+                  onClick={confirmManualBox}
+                  style={{ flex: 1, background: 'var(--accent-gold)', color: 'black', border: 'none', padding: '4px', borderRadius: 4, fontWeight: 'bold', cursor: 'pointer' }}
+                >
+                  Dodaj
+                </button>
+                <button 
+                  onClick={() => setManualPos(null)}
+                  style={{ flex: 1, background: 'transparent', border: '1px solid var(--border-light)', color: 'white', padding: '4px', borderRadius: 4, cursor: 'pointer' }}
+                >
+                  Anuluj
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Podgląd dodawanego boxa */}
+          {manualPos && (
+             <div style={{
+                position: 'absolute',
+                left: manualPos.x - manualSize / 2,
+                top: manualPos.y - manualSize / 2,
+                width: manualSize,
+                height: manualSize,
+                border: '2px dashed var(--accent-gold)',
+                backgroundColor: 'rgba(198,168,124,0.2)',
+                pointerEvents: 'none',
+             }} />
           )}
         </div>
       </div>

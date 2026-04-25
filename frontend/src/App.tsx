@@ -169,6 +169,33 @@ function App() {
     if (focusedBoxId === id) setFocusedBoxId(null);
   };
 
+  const handleAddManualBox = (box: Omit<any, 'id' | 'color'>) => {
+    // Kolor z backendu lub domyślny złoty, id losowe
+    const newBox = {
+      ...box,
+      id: `manual_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+      color: '#c6a87c', // Zostanie zaktualizowany przy ew. ponownej analizie, ale Canvas zignoruje bo używa wbudowanego
+    };
+    
+    // ResultsPanel potrzebuje kolorów w grupach, ale grupy bierze z "results".
+    // Musimy upewnić się, że symbol istnieje w results, jeśli nie, to go dodać.
+    setResults(prev => {
+      const exists = prev.find(r => r.name === box.symbolName);
+      if (exists) return prev;
+      
+      // Prosty hash koloru, jeśli go nie było
+      const hash = box.symbolName.split('').reduce((a,b)=>{a=((a<<5)-a)+b.charCodeAt(0);return a&a},0);
+      const r = (hash >> 16) & 0xFF | 0x40;
+      const g = (hash >> 8) & 0xFF | 0x40;
+      const b = hash & 0xFF | 0x40;
+      const color = `#${Math.min(r,255).toString(16).padStart(2,'0')}${Math.min(g,255).toString(16).padStart(2,'0')}${Math.min(b,255).toString(16).padStart(2,'0')}`;
+
+      return [...prev, { name: box.symbolName, count: 0, color }];
+    });
+
+    setBoxes(prev => [...prev, newBox]);
+  };
+
   // ── Render ──────────────────────────────────────────────
 
   return (
@@ -197,6 +224,8 @@ function App() {
         excludedZones={excludedZones}
         onAddExcludedZone={(x, y, w, h) => setExcludedZones(prev => [...prev, { x, y, width: w, height: h }])}
         onRemoveExcludedZone={idx => setExcludedZones(prev => prev.filter((_, i) => i !== idx))}
+        symbolNames={patterns.map(p => p.name)}
+        onAddManualBox={handleAddManualBox}
       />
 
       {/* Prawy panel */}
