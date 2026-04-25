@@ -194,10 +194,24 @@ function App() {
     setPatterns(updated);
   };
 
-  const handleDeletePattern = (index: number) => {
-    const updated = [...patterns];
-    updated.splice(index, 1);
-    setPatterns(updated);
+  const handleDeletePattern = async (index: number) => {
+    const pattern = patterns[index];
+    if (!pattern) return;
+
+    try {
+      const response = await fetch(`http://localhost:8000/api/templates/${encodeURIComponent(pattern.name)}`, {
+        method: 'DELETE',
+      });
+
+      if (!response.ok) {
+        throw new Error('Nie udało się usunąć wzorca');
+      }
+
+      setPatterns(prev => prev.filter((_, currentIndex) => currentIndex !== index));
+    } catch (error) {
+      console.error('Błąd podczas usuwania wzorca', error);
+      alert('Nie udało się usunąć wzorca z bazy wiedzy.');
+    }
   };
 
   const handleRejectBox = (id: string) => {

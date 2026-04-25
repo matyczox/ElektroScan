@@ -184,7 +184,14 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
             print(f"Strefy wykluczone: {exclude_rects}")
         
         # 4. Detekcja
-        results = detect_symbols(plan_img, templates, exclude_rects=exclude_rects)
+        results = detect_symbols(
+            plan_img,
+            templates,
+            exclude_rects=exclude_rects,
+            pdf_path=str(plan_path),
+            pdf_dpi=300,
+            hidden_layers=hidden_layers,
+        )
         
         # 5. Rysujemy ramki
         result_img = draw_results(plan_img, results)
@@ -267,6 +274,15 @@ async def api_delete_templates():
         shutil.rmtree(TEMPLATES_DIR)
         TEMPLATES_DIR.mkdir(exist_ok=True)
     return {"message": "Baza wiedzy wyczyszczona."}
+
+@app.delete("/api/templates/{template_name}")
+async def api_delete_template(template_name: str):
+    target = TEMPLATES_DIR / f"{template_name}.png"
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="Nie znaleziono wzorca.")
+
+    target.unlink()
+    return {"message": f"Wzorzec '{template_name}' usunięty."}
 
 @app.post("/api/clear")
 async def api_clear():
