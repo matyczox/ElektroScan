@@ -11,6 +11,14 @@ interface Box {
   confidence: number;
   verificationScore?: number;
   color: string;
+  source?: string;
+  rotation?: number;
+  scale?: number;
+  mirrored?: boolean;
+  coverage?: number;
+  purity?: number;
+  contextPurity?: number;
+  colorSimilarity?: number;
 }
 
 interface ResultGroup {

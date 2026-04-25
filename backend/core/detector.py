@@ -48,7 +48,7 @@ CONTEXT_MARGIN_RATIO = 0.40
 LOCAL_MAX_KERNEL_RATIO = 0.25
 
 PRECISE_KEYWORDS = ["gniazdo", "wypust"]
-MIRRORED_VARIANT_PREFIXES = {"06", "07", "09"}
+MIRRORED_VARIANT_PREFIXES = {"06", "07", "09", "10", "11", "12"}
 
 COLOR_HUE_TOLERANCE = 18
 COLOR_SAT_TOLERANCE = 80
@@ -56,6 +56,22 @@ COLOR_VAL_TOLERANCE = 80
 COLOR_HUE_REJECTION_THRESHOLD = 36
 SOCKET_07_EXTRA_MIN_COVERAGE = 0.30
 SOCKET_07_PROMOTION_SEARCH_RADIUS = 4
+SOCKET_PROMOTED_MAX_VERIFICATION_DROP = 0.05
+SWITCH_10_EXTRA_MIN_COVERAGE = 0.18
+SWITCH_12_EXTRA_MIN_COVERAGE = 0.18
+SWITCH_PROMOTION_SEARCH_RADIUS = 8
+SWITCH_FAMILY_MIN_CHILD_COVERAGE = 0.62
+SWITCH_FAMILY_MIN_CROP_PURITY = 0.90
+SWITCH_PROMOTED_MIN_PURITY = 0.58
+SWITCH_PROMOTED_MIN_CONTEXT_PURITY = 0.22
+SWITCH_PROMOTED_MIN_VERIFICATION = 0.62
+SWITCH_PROMOTED_MAX_VERIFICATION_DROP = 0.06
+PROMOTED_PARENT_MIN_VERIFICATION = 0.68
+PROMOTED_PARENT_OVERRIDE_MARGIN = 0.16
+PROMOTED_PARENT_MIN_AREA_RATIO = 1.10
+NOISY_PARTIAL_CONTEXT_THRESHOLD = 0.36
+NOISY_PARTIAL_COVERAGE_THRESHOLD = 0.67
+NOISY_PARTIAL_PURITY_THRESHOLD = 0.88
 
 PREFILTER_NMS_MIN_CANDIDATES = 250
 PREFILTER_NMS_IOU_THRESHOLD = 0.85
@@ -90,6 +106,11 @@ class Detection:
     source: str = "template"
     rotation: int = 0
     scale: float = 1.0
+    mirrored: bool = False
+    coverage: float = 0.0
+    purity: float = 0.0
+    context_purity: float = 0.0
+    color_similarity: float = 1.0
     verification_score: float = 0.0
 
 
@@ -150,12 +171,14 @@ class CandidateHit:
     context_purity: float = 1.0
     color_similarity: float = 1.0
     verification_score: float = 0.0
+    promoted_from_template_id: int | None = None
 
 
 @dataclass
 class TargetedPromotionRule:
     """Pair-specific promotion from a smaller template to a larger one."""
 
+    child_template_id: int
     parent_template_id: int
     scale: float
     rotation: int
@@ -164,6 +187,7 @@ class TargetedPromotionRule:
     offset_y: int
     extension_mask: np.ndarray
     extension_pixels: int
+    min_extra_coverage: float
 
 
 # HSV helpers
@@ -314,7 +338,7 @@ def _build_socket_07_promotions(
     templates: list[TemplateInfo],
     variants_by_template: dict[int, list[TemplateVariant]],
 ) -> dict[tuple[int, float, int, bool], list[TargetedPromotionRule]]:
-    """Build narrow socket-family -> 07 promotion maps based on template containment."""
+    """Build targeted family-promotion rules from contained symbols to fuller parents."""
 
     template_ids_by_prefix = {
         prefix: template_id
@@ -323,22 +347,20 @@ def _build_socket_07_promotions(
         if prefix is not None
     }
 
-    parent_id = template_ids_by_prefix.get("07")
-    if parent_id is None:
-        return {}
-
-    parent_variants = list(variants_by_template.get(parent_id, []))
-
     promotions: dict[tuple[int, float, int, bool], list[TargetedPromotionRule]] = {}
-    child_specs = {
-        "06": (0.95, 0.82),
-        "09": (0.82, 0.90),
-    }
+    family_specs = [
+        ("06", "07", 0.95, 0.82, SOCKET_07_EXTRA_MIN_COVERAGE),
+        ("09", "07", 0.82, 0.90, SOCKET_07_EXTRA_MIN_COVERAGE),
+        ("11", "10", SWITCH_FAMILY_MIN_CHILD_COVERAGE, SWITCH_FAMILY_MIN_CROP_PURITY, SWITCH_10_EXTRA_MIN_COVERAGE),
+        ("11", "12", SWITCH_FAMILY_MIN_CHILD_COVERAGE, SWITCH_FAMILY_MIN_CROP_PURITY, SWITCH_12_EXTRA_MIN_COVERAGE),
+    ]
 
-    for child_prefix, (min_child_coverage, min_crop_purity) in child_specs.items():
+    for child_prefix, parent_prefix, min_child_coverage, min_crop_purity, min_extra_coverage in family_specs:
         child_id = template_ids_by_prefix.get(child_prefix)
-        if child_id is None:
+        parent_id = template_ids_by_prefix.get(parent_prefix)
+        if child_id is None or parent_id is None:
             continue
+        parent_variants = list(variants_by_template.get(parent_id, []))
 
         for child_variant in variants_by_template.get(child_id, []):
             child_key = (child_id, child_variant.scale, child_variant.rotation, child_variant.mirrored)
@@ -387,6 +409,7 @@ def _build_socket_07_promotions(
 
                     promotions.setdefault(child_key, []).append(
                         TargetedPromotionRule(
+                            child_template_id=child_id,
                             parent_template_id=parent_id,
                             scale=parent_variant.scale,
                             rotation=parent_variant.rotation,
@@ -395,6 +418,7 @@ def _build_socket_07_promotions(
                             offset_y=offset_y,
                             extension_mask=extension_mask,
                             extension_pixels=extension_pixels,
+                            min_extra_coverage=min_extra_coverage,
                         )
                     )
 
@@ -585,6 +609,18 @@ def _validate_template_hit(
     if coverage < MIN_COVERAGE_RATIO or purity < MIN_PURITY_RATIO:
         return False
 
+    if (
+        context_purity := _context_purity(plan_mask, hit.bbox, intersection_mask)
+    ) <= 0.0:
+        return False
+
+    if (
+        context_purity < NOISY_PARTIAL_CONTEXT_THRESHOLD
+        and coverage < NOISY_PARTIAL_COVERAGE_THRESHOLD
+        and purity < NOISY_PARTIAL_PURITY_THRESHOLD
+    ):
+        return False
+
     template_centroid = _mask_centroid(hit.transformed_mask)
     intersection_centroid = _mask_centroid(intersection_mask)
     if template_centroid is None or intersection_centroid is None:
@@ -601,9 +637,6 @@ def _validate_template_hit(
     if centroid_offset_ratio > MAX_CENTROID_OFFSET_RATIO:
         return False
 
-    context_purity = _context_purity(plan_mask, hit.bbox, intersection_mask)
-    if context_purity <= 0.0:
-        return False
     if hit.match_score < LOW_MATCH_STRICT_THRESHOLD and context_purity < MIN_CONTEXT_PURITY:
         return False
 
@@ -653,13 +686,27 @@ def _maybe_promote_socket_06_to_07(
         parent_plan_mask = plan_masks.get(rule.parent_template_id)
         if parent_variant is None or parent_plan_mask is None:
             continue
-        promotion_plan_mask = cv2.dilate(parent_plan_mask, DILATE_KERNEL, iterations=1)
+        parent_prefix = _template_numeric_prefix(Path(templates[rule.parent_template_id].path).name)
+        if parent_prefix == "07":
+            promotion_plan_mask = cv2.dilate(parent_plan_mask, DILATE_KERNEL, iterations=1)
+        else:
+            promotion_plan_mask = parent_plan_mask
+        extension_plan_mask = (
+            cv2.dilate(parent_plan_mask, DILATE_KERNEL, iterations=1)
+            if parent_prefix in {"10", "12"}
+            else promotion_plan_mask
+        )
+        search_radius = (
+            SWITCH_PROMOTION_SEARCH_RADIUS
+            if parent_prefix in {"10", "12"}
+            else SOCKET_07_PROMOTION_SEARCH_RADIUS
+        )
 
         base_parent_x = hit.bbox[0] - rule.offset_x
         base_parent_y = hit.bbox[1] - rule.offset_y
 
-        for delta_y in range(-SOCKET_07_PROMOTION_SEARCH_RADIUS, SOCKET_07_PROMOTION_SEARCH_RADIUS + 1):
-            for delta_x in range(-SOCKET_07_PROMOTION_SEARCH_RADIUS, SOCKET_07_PROMOTION_SEARCH_RADIUS + 1):
+        for delta_y in range(-search_radius, search_radius + 1):
+            for delta_x in range(-search_radius, search_radius + 1):
                 parent_bbox = (
                     base_parent_x + delta_x,
                     base_parent_y + delta_y,
@@ -667,12 +714,15 @@ def _maybe_promote_socket_06_to_07(
                     parent_variant.height,
                 )
                 parent_roi = _roi_mask(promotion_plan_mask, parent_bbox)
+                extension_roi = _roi_mask(extension_plan_mask, parent_bbox)
                 if parent_roi is None or parent_roi.shape != parent_variant.transformed_mask.shape:
                     continue
+                if extension_roi is None or extension_roi.shape != parent_variant.transformed_mask.shape:
+                    continue
 
-                extra_overlap = int(cv2.countNonZero(cv2.bitwise_and(parent_roi, rule.extension_mask)))
+                extra_overlap = int(cv2.countNonZero(cv2.bitwise_and(extension_roi, rule.extension_mask)))
                 extra_coverage = extra_overlap / max(1, rule.extension_pixels)
-                if extra_coverage < SOCKET_07_EXTRA_MIN_COVERAGE:
+                if extra_coverage < rule.min_extra_coverage:
                     continue
 
                 try:
@@ -696,10 +746,23 @@ def _maybe_promote_socket_06_to_07(
                     bbox=parent_bbox,
                     match_score=local_match,
                     dominant_hsv=templates[rule.parent_template_id].dominant_hsv,
-                    source="template_promoted_06_to_07",
+                    source=f"template_promoted_{rule.child_template_id}_to_{rule.parent_template_id}",
+                    promoted_from_template_id=hit.template_id,
                 )
                 if not _validate_template_hit(promoted_hit, promotion_plan_mask, plan_image):
                     continue
+                if parent_prefix == "07":
+                    if promoted_hit.verification_score < (hit.verification_score - SOCKET_PROMOTED_MAX_VERIFICATION_DROP):
+                        continue
+                if parent_prefix in {"10", "12"}:
+                    if (
+                        promoted_hit.purity < SWITCH_PROMOTED_MIN_PURITY
+                        or promoted_hit.context_purity < SWITCH_PROMOTED_MIN_CONTEXT_PURITY
+                        or promoted_hit.verification_score < SWITCH_PROMOTED_MIN_VERIFICATION
+                        or promoted_hit.verification_score
+                        < (hit.verification_score - SWITCH_PROMOTED_MAX_VERIFICATION_DROP)
+                    ):
+                        continue
 
                 candidate_key = (
                     float(extra_coverage),
@@ -822,11 +885,66 @@ def _prefilter_candidates(candidates: list[CandidateHit]) -> list[CandidateHit]:
     return [candidate for idx, candidate in enumerate(candidates) if idx in keep]
 
 
-def _cluster_candidates(candidates: list[CandidateHit]) -> list[CandidateHit]:
+def _candidate_rank_key(hit: CandidateHit) -> tuple[float, float, float, int]:
+    """Return the default winner ranking inside a cluster."""
+
+    return (
+        float(hit.verification_score),
+        float(hit.color_similarity),
+        float(hit.match_score),
+        1 if hit.source == "pdf_text" else 0,
+    )
+
+
+def _select_cluster_winner(
+    group_hits: list[CandidateHit],
+    parent_ids_by_child: dict[int, set[int]],
+) -> CandidateHit:
+    """Pick one winner per cluster, preferring promoted fuller symbols over simpler cores."""
+
+    base_winner = max(group_hits, key=_candidate_rank_key)
+    override_candidates: list[CandidateHit] = []
+
+    for hit in group_hits:
+        child_id = hit.promoted_from_template_id
+        if child_id is None:
+            continue
+        if hit.template_id not in parent_ids_by_child.get(child_id, set()):
+            continue
+        if hit.verification_score < PROMOTED_PARENT_MIN_VERIFICATION:
+            continue
+
+        child_hits = [candidate for candidate in group_hits if candidate.template_id == child_id]
+        if not child_hits:
+            continue
+
+        best_child = max(child_hits, key=_candidate_rank_key)
+        child_area = max(1, best_child.bbox[2] * best_child.bbox[3])
+        parent_area = max(1, hit.bbox[2] * hit.bbox[3])
+        if parent_area < child_area * PROMOTED_PARENT_MIN_AREA_RATIO:
+            continue
+
+        if hit.verification_score + PROMOTED_PARENT_OVERRIDE_MARGIN < best_child.verification_score:
+            continue
+
+        override_candidates.append(hit)
+
+    if override_candidates:
+        return max(override_candidates, key=_candidate_rank_key)
+
+    return base_winner
+
+
+def _cluster_candidates(
+    candidates: list[CandidateHit],
+    parent_ids_by_child: dict[int, set[int]] | None = None,
+) -> list[CandidateHit]:
     """Cluster class-agnostic overlaps and keep one winner per physical place."""
 
     if not candidates:
         return []
+
+    parent_ids_by_child = parent_ids_by_child or {}
 
     parent = list(range(len(candidates)))
 
@@ -853,17 +971,7 @@ def _cluster_candidates(candidates: list[CandidateHit]) -> list[CandidateHit]:
 
     winners: list[CandidateHit] = []
     for group_hits in groups.values():
-        winners.append(
-            max(
-                group_hits,
-                key=lambda hit: (
-                    hit.verification_score,
-                    hit.color_similarity,
-                    hit.match_score,
-                    1 if hit.source == "pdf_text" else 0,
-                ),
-            )
-        )
+        winners.append(_select_cluster_winner(group_hits, parent_ids_by_child))
 
     winners.sort(key=lambda hit: (hit.bbox[1], hit.bbox[0], -hit.verification_score))
     return winners
@@ -1138,6 +1246,10 @@ def detect_symbols(
         for variant in variants
     }
     socket_07_promotions = _build_socket_07_promotions(templates, variants_by_template)
+    parent_ids_by_child: dict[int, set[int]] = {}
+    for rules in socket_07_promotions.values():
+        for rule in rules:
+            parent_ids_by_child.setdefault(rule.child_template_id, set()).add(rule.parent_template_id)
     plan_masks_by_template = {
         template_id: _get_plan_mask(template)
         for template_id, template in enumerate(templates)
@@ -1146,7 +1258,7 @@ def detect_symbols(
     diagnostics = {
         "raw_peaks": 0,
         "validated_template_hits": 0,
-        "promoted_socket_to_07": 0,
+        "promoted_targeted_hits": 0,
         "pdf_text_hits": len(pdf_candidates),
         "prefilter_hits": 0,
         "final_hits": 0,
@@ -1213,7 +1325,7 @@ def detect_symbols(
                 socket_07_promotions,
             )
             if promoted_hit.template_id != hit.template_id:
-                diagnostics["promoted_socket_to_07"] += 1
+                diagnostics["promoted_targeted_hits"] += 1
             validated_candidates.append(promoted_hit)
 
     diagnostics["validated_template_hits"] = len(validated_candidates) - len(pdf_candidates)
@@ -1221,14 +1333,14 @@ def detect_symbols(
     prefiltered_candidates = _prefilter_candidates(validated_candidates)
     diagnostics["prefilter_hits"] = len(prefiltered_candidates)
 
-    final_hits = _cluster_candidates(prefiltered_candidates)
+    final_hits = _cluster_candidates(prefiltered_candidates, parent_ids_by_child)
     diagnostics["final_hits"] = len(final_hits)
 
     print(
         "Detection diagnostics:"
         f" raw_peaks={diagnostics['raw_peaks']},"
         f" validated_template_hits={diagnostics['validated_template_hits']},"
-        f" promoted_socket_to_07={diagnostics['promoted_socket_to_07']},"
+        f" promoted_targeted_hits={diagnostics['promoted_targeted_hits']},"
         f" pdf_text_hits={diagnostics['pdf_text_hits']},"
         f" after_prefilter={diagnostics['prefilter_hits']},"
         f" final_clusters={diagnostics['final_hits']}"
@@ -1247,6 +1359,11 @@ def detect_symbols(
             source=hit.source,
             rotation=hit.rotation,
             scale=hit.scale,
+            mirrored=hit.mirrored,
+            coverage=round(hit.coverage, 3),
+            purity=round(hit.purity, 3),
+            context_purity=round(hit.context_purity, 3),
+            color_similarity=round(hit.color_similarity, 3),
             verification_score=round(hit.verification_score, 3),
         )
         per_template.setdefault(hit.template_id, []).append(detection)

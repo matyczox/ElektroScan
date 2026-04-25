@@ -11,6 +11,14 @@ interface Box {
   confidence: number;
   verificationScore?: number;
   symbolName: string;
+  source?: string;
+  rotation?: number;
+  scale?: number;
+  mirrored?: boolean;
+  coverage?: number;
+  purity?: number;
+  contextPurity?: number;
+  colorSimilarity?: number;
 }
 
 interface ExcludedZone {
@@ -63,6 +71,7 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
 
   // Pulsowanie wybranej ramki
   const [pulsingId, setPulsingId] = useState<string | null>(null);
+  const [copiedBoxId, setCopiedBoxId] = useState<string | null>(null);
 
   useEffect(() => {
     if (imageSrc) {
@@ -162,6 +171,42 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
 
   const BOX_FOCUS_COLOR = '#f97316';
   const BOX_LOW_COLOR = '#f59e0b';
+
+  const formatDebugValue = (value?: number, digits = 3) =>
+    typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : 'n/a';
+
+  const buildDebugPayload = (box: Box) => {
+    const lines = [
+      `symbol=${box.symbolName}`,
+      `bbox=${box.x},${box.y},${box.width},${box.height}`,
+      `match=${formatDebugValue(box.confidence)}`,
+      `verification=${formatDebugValue(box.verificationScore)}`,
+      `coverage=${formatDebugValue(box.coverage)}`,
+      `purity=${formatDebugValue(box.purity)}`,
+      `context_purity=${formatDebugValue(box.contextPurity)}`,
+      `color_similarity=${formatDebugValue(box.colorSimilarity)}`,
+      `rotation=${box.rotation ?? 0}`,
+      `scale=${formatDebugValue(box.scale)}`,
+      `mirrored=${box.mirrored ? 'true' : 'false'}`,
+      `source=${box.source ?? 'template'}`,
+      `box_id=${box.id}`,
+    ];
+    return lines.join('\n');
+  };
+
+  const copyBoxDebug = async (box: Box) => {
+    const payload = buildDebugPayload(box);
+
+    try {
+      await navigator.clipboard.writeText(payload);
+      setCopiedBoxId(box.id);
+      window.setTimeout(() => {
+        setCopiedBoxId(current => (current === box.id ? null : current));
+      }, 1600);
+    } catch (error) {
+      console.error('Nie udało się skopiować debug info boxa', error);
+    }
+  };
 
   const confirmManualBox = () => {
     if (!manualPos || !manualSymbol) return;
@@ -279,8 +324,12 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
             return (
               <div
                 key={box.id}
-                onClick={e => { e.stopPropagation(); onBoxClick?.(box.id); }}
-                title={`Weryfikacja: ${(displayConfidence * 100).toFixed(0)}%\nMatch template: ${(box.confidence * 100).toFixed(0)}%\nWzorzec: ${box.symbolName}`}
+                onClick={e => {
+                  e.stopPropagation();
+                  onBoxClick?.(box.id);
+                  void copyBoxDebug(box);
+                }}
+                title={`Weryfikacja: ${(displayConfidence * 100).toFixed(0)}%\nMatch template: ${(box.confidence * 100).toFixed(0)}%\nWzorzec: ${box.symbolName}\nKlik kopiuje debug`}
                 style={{
                   position: 'absolute',
                   left: box.x,
@@ -313,6 +362,24 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
                   {/* Ucinamy za długie nazwy (np. z '.png' lub długie) */}
                   {(box as any).symbolName ? (box as any).symbolName.split('_')[0].substring(0, 15) : 'Symbol'}
                 </div>
+                {copiedBoxId === box.id && (
+                  <div style={{
+                    position: 'absolute',
+                    top: box.height + 4,
+                    left: 0,
+                    background: 'rgba(15, 23, 42, 0.92)',
+                    color: '#fff',
+                    fontSize: 10,
+                    fontWeight: 700,
+                    padding: '2px 6px',
+                    borderRadius: 4,
+                    whiteSpace: 'nowrap',
+                    pointerEvents: 'none',
+                    zIndex: 5,
+                  }}>
+                    Debug skopiowany
+                  </div>
+                )}
               </div>
             );
           })}

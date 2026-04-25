@@ -225,6 +225,13 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
                     "confidence": det.confidence,
                     "verificationScore": det.verification_score,
                     "source": det.source,
+                    "rotation": det.rotation,
+                    "scale": det.scale,
+                    "mirrored": det.mirrored,
+                    "coverage": det.coverage,
+                    "purity": det.purity,
+                    "contextPurity": det.context_purity,
+                    "colorSimilarity": det.color_similarity,
                     "color": r.color,
                 })
             
