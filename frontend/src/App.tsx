@@ -1,14 +1,37 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Sidebar } from './components/Sidebar';
 import { CanvasView } from './components/CanvasView';
 import { ResultsPanel } from './components/ResultsPanel';
 import './index.css';
+
+const API_BASE = 'http://127.0.0.1:8000';
+const withNoCache = (path: string) => `${API_BASE}${path}${path.includes('?') ? '&' : '?'}_ts=${Date.now()}`;
 
 interface ExcludedZone {
   x: number;
   y: number;
   width: number;
   height: number;
+}
+
+interface AnalysisContext {
+  analysisId?: string;
+  generatedAtUtc?: string;
+  sessionId?: string;
+  sourcePdf?: string;
+  hiddenLayersUsed?: string[];
+  excludedZonesUsed?: Array<[number, number, number, number]>;
+  hiddenLayerDebug?: {
+    matched?: string[];
+    unmatched?: string[];
+    requested?: Array<{
+      value?: string;
+      repr?: string;
+      length?: number;
+      normalized?: string;
+      matches?: string[];
+    }>;
+  };
 }
 
 function App() {
@@ -23,10 +46,13 @@ function App() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [excludedZones, setExcludedZones] = useState<ExcludedZone[]>([]);
   const [layers, setLayers] = useState<{name: string, visible: boolean}[]>([]);
+  const [analysisContext, setAnalysisContext] = useState<AnalysisContext | null>(null);
+  const detectRequestSeqRef = useRef(0);
+  const detectAbortRef = useRef<AbortController | null>(null);
 
   const fetchTemplates = async () => {
     try {
-      const response = await fetch('http://localhost:8000/api/templates');
+      const response = await fetch(withNoCache('/api/templates'), { cache: 'no-store' });
       if (response.ok) {
         const data = await response.json();
         setPatterns(data.patterns || []);
@@ -50,20 +76,25 @@ function App() {
     setSessionId(null);
     setExcludedZones([]);
     setFocusedBoxId(null);
+    setAnalysisContext(null);
     
     setIsProcessing(true);
     setProgressText('Ładowanie podglądu PDF...');
     try {
       const formData = new FormData();
       formData.append('file', selectedFile);
-      const res = await fetch('http://localhost:8000/api/preview', { method: 'POST', body: formData });
+      const res = await fetch(withNoCache('/api/preview'), {
+        method: 'POST',
+        body: formData,
+        cache: 'no-store',
+      });
       if (!res.ok) throw new Error('Błąd podglądu');
       const data = await res.json();
       setPdfPreview(data.planPreview);
       setSessionId(data.sessionId);
       
       // Fetch layers
-      fetch(`http://localhost:8000/api/layers?session_id=${data.sessionId}`)
+      fetch(withNoCache(`/api/layers?session_id=${data.sessionId}`), { cache: 'no-store' })
         .then(r => r.json())
         .then(d => setLayers(d.layers || []))
         .catch(err => console.error("Layers fetch error", err));
@@ -85,9 +116,10 @@ function App() {
     setProgressText('Przeliczanie warstw...');
     try {
       const hiddenLayers = newLayers.filter(l => !l.visible).map(l => l.name);
-      const res = await fetch(`http://localhost:8000/api/render-preview?session_id=${sessionId}`, {
+      const res = await fetch(withNoCache(`/api/render-preview?session_id=${sessionId}`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
         body: JSON.stringify({ hidden_layers: hiddenLayers })
       });
       if (!res.ok) throw new Error('Błąd odświeżania podglądu');
@@ -106,9 +138,10 @@ function App() {
     setIsProcessing(true);
     setProgressText('Ekstrakcja legendy (300 DPI)...');
     try {
-      const response = await fetch(`http://localhost:8000/api/extract-legend?session_id=${sessionId}`, {
+      const response = await fetch(withNoCache(`/api/extract-legend?session_id=${sessionId}`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
         body: JSON.stringify({
           excluded_zones: excludedZones.map(z => ({
             x: Math.round(z.x),
@@ -133,12 +166,24 @@ function App() {
 
   const handleDetect = async () => {
     if (!sessionId) return;
+    detectRequestSeqRef.current += 1;
+    const requestSeq = detectRequestSeqRef.current;
+    detectAbortRef.current?.abort();
+    const controller = new AbortController();
+    detectAbortRef.current = controller;
+
     setIsProcessing(true);
     setProgressText('Analiza hybrydowa (HSV + Complexity Sorting)...');
+    setResults([]);
+    setBoxes([]);
+    setAnalysisContext(null);
+    setFocusedBoxId(null);
     try {
-      const response = await fetch(`http://localhost:8000/api/analyze?session_id=${sessionId}`, {
+      const response = await fetch(withNoCache(`/api/analyze?session_id=${sessionId}`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+        cache: 'no-store',
         body: JSON.stringify({
           excluded_zones: excludedZones.map(z => ({
             x: Math.round(z.x),
@@ -151,22 +196,27 @@ function App() {
       });
       if (!response.ok) throw new Error('Błąd serwera');
       const data = await response.json();
+      if (requestSeq !== detectRequestSeqRef.current) return;
       setResults(data.results);
       setBoxes(data.boxes || []);
+      setAnalysisContext(data.analysisContext || null);
       setPdfPreview(data.resultImage);
       setFocusedBoxId(null);
     } catch (error) {
+      if ((error as Error).name === 'AbortError') return;
       console.error(error);
       alert('Błąd podczas analizy planu.');
     } finally {
-      setIsProcessing(false);
-      setProgressText('');
+      if (requestSeq === detectRequestSeqRef.current) {
+        setIsProcessing(false);
+        setProgressText('');
+      }
     }
   };
 
   const handleClear = async () => {
     try {
-      await fetch('http://localhost:8000/api/clear', { method: 'POST' });
+      await fetch(withNoCache('/api/clear'), { method: 'POST', cache: 'no-store' });
     } catch (_e) { /* ignore */ }
     setFile(null);
     setPdfPreview(null);
@@ -177,11 +227,12 @@ function App() {
     setSessionId(null);
     setExcludedZones([]);
     setFocusedBoxId(null);
+    setAnalysisContext(null);
   };
 
   const handleClearTemplates = async () => {
     try {
-      await fetch('http://localhost:8000/api/templates', { method: 'DELETE' });
+      await fetch(withNoCache('/api/templates'), { method: 'DELETE', cache: 'no-store' });
       setPatterns([]);
     } catch (e) {
       console.error('Błąd podczas czyszczenia bazy wiedzy', e);
@@ -199,8 +250,9 @@ function App() {
     if (!pattern) return;
 
     try {
-      const response = await fetch(`http://localhost:8000/api/templates/${encodeURIComponent(pattern.name)}`, {
+      const response = await fetch(withNoCache(`/api/templates/${encodeURIComponent(pattern.name)}`), {
         method: 'DELETE',
+        cache: 'no-store',
       });
 
       if (!response.ok) {
@@ -269,8 +321,10 @@ function App() {
 
       {/* Środek: Canvas */}
       <CanvasView
+        key={analysisContext?.analysisId ?? sessionId ?? 'canvas-empty'}
         imageSrc={pdfPreview}
         boxes={boxes}
+        analysisContext={analysisContext}
         focusedBoxId={focusedBoxId}
         onBoxClick={id => setFocusedBoxId(prev => prev === id ? null : id)}
         excludedZones={excludedZones}

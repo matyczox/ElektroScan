@@ -2,8 +2,10 @@ import os
 import shutil
 import uuid
 import base64
+import json
+from datetime import datetime, timezone
 import cv2
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pathlib import Path
@@ -11,7 +13,7 @@ from pydantic import BaseModel
 from typing import Optional, List
 
 # Importujemy nasze core'owe moduły
-from core.legend_extractor import pdf_to_png, extract_legend, get_pdf_layers
+from core.legend_extractor import pdf_to_png, extract_legend, get_pdf_layers, _normalize_layer_name
 from core.detector import load_templates, detect_symbols, draw_results
 
 app = FastAPI(title="ElektroScan AI API")
@@ -25,14 +27,93 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def disable_response_caching(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
+
 # Ścieżki robocze
 BASE_DIR = Path(__file__).parent
 UPLOAD_DIR = BASE_DIR / "uploads"
 TEMPLATES_DIR = BASE_DIR / "templates"
+ANALYSIS_DIR = BASE_DIR / "analysis_debug"
+SESSION_META_SUFFIX = ".meta.json"
 
 # Upewniamy się, że foldery istnieją
 UPLOAD_DIR.mkdir(exist_ok=True)
 TEMPLATES_DIR.mkdir(exist_ok=True)
+ANALYSIS_DIR.mkdir(exist_ok=True)
+
+
+def _session_meta_path(session_id: str) -> Path:
+    return UPLOAD_DIR / f"{session_id}{SESSION_META_SUFFIX}"
+
+
+def _write_session_meta(session_id: str, *, source_pdf: str) -> None:
+    _session_meta_path(session_id).write_text(
+        json.dumps({"sourcePdf": source_pdf}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def _read_session_meta(session_id: str) -> dict:
+    meta_path = _session_meta_path(session_id)
+    if not meta_path.exists():
+        return {}
+
+    try:
+        return json.loads(meta_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _analysis_snapshot_path(analysis_id: str) -> Path:
+    return ANALYSIS_DIR / f"{analysis_id}.json"
+
+
+def _write_analysis_snapshot(analysis_id: str, payload: dict) -> None:
+    _analysis_snapshot_path(analysis_id).write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _build_hidden_layer_debug(pdf_path: str, hidden_layers: list[str]) -> dict:
+    available_layers = get_pdf_layers(pdf_path)
+    available_names = [str(layer.get("name", "")) for layer in available_layers if layer.get("name")]
+    normalized_available = {}
+    for name in available_names:
+        normalized_available.setdefault(_normalize_layer_name(name), []).append(name)
+
+    requested = []
+    matched = []
+    unmatched = []
+
+    for raw_name in hidden_layers:
+        normalized = _normalize_layer_name(raw_name)
+        matches = normalized_available.get(normalized, [])
+        entry = {
+            "value": raw_name,
+            "repr": ascii(raw_name),
+            "length": len(raw_name),
+            "normalized": normalized,
+            "matches": matches,
+        }
+        requested.append(entry)
+        if matches:
+            matched.append(raw_name)
+        else:
+            unmatched.append(raw_name)
+
+    return {
+        "requested": requested,
+        "matched": matched,
+        "unmatched": unmatched,
+    }
 
 @app.get("/")
 async def root():
@@ -56,6 +137,7 @@ async def api_preview(file: UploadFile = File(...)):
     # Zapis
     with file_path.open("wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
+    _write_session_meta(session_id, source_pdf=file.filename or file_path.name)
         
     try:
         # Render podglądu (300 DPI — identycznie jak detekcja)
@@ -65,7 +147,8 @@ async def api_preview(file: UploadFile = File(...)):
         
         return {
             "planPreview": f"data:image/jpeg;base64,{plan_base64}",
-            "sessionId": session_id
+            "sessionId": session_id,
+            "sourcePdf": file.filename or file_path.name,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -165,6 +248,7 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
     try:
         # 1. Ładujemy plan
         hidden_layers = body.hidden_layers if body else []
+        session_meta = _read_session_meta(session_id)
         plan_img = pdf_to_png(str(plan_path), dpi=300, hidden_layers=hidden_layers)
         
         # 2. Ładujemy wzorce
@@ -182,6 +266,8 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
                 except (KeyError, ValueError):
                     pass
             print(f"Strefy wykluczone: {exclude_rects}")
+
+        hidden_layer_debug = _build_hidden_layer_debug(str(plan_path), hidden_layers)
         
         # 4. Detekcja
         results = detect_symbols(
@@ -203,6 +289,16 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
         # Przygotowujemy dane o ramkach dla frontendu (opcjonalnie)
         # Na razie wysyłamy gotowy obraz i listę wyników
         
+        analysis_context = {
+            "analysisId": str(uuid.uuid4()),
+            "generatedAtUtc": datetime.now(timezone.utc).isoformat(),
+            "sessionId": session_id,
+            "sourcePdf": session_meta.get("sourcePdf", plan_path.name),
+            "hiddenLayersUsed": hidden_layers,
+            "excludedZonesUsed": exclude_rects,
+            "hiddenLayerDebug": hidden_layer_debug,
+        }
+
         formatted_results = []
         all_boxes = []
 
@@ -232,15 +328,36 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
                     "purity": det.purity,
                     "contextPurity": det.context_purity,
                     "colorSimilarity": det.color_similarity,
+                    "analysisId": analysis_context["analysisId"],
+                    "analysisGeneratedUtc": analysis_context["generatedAtUtc"],
+                    "analysisSession": analysis_context["sessionId"],
+                    "sourcePdf": analysis_context["sourcePdf"],
+                    "hiddenLayersUsed": analysis_context["hiddenLayersUsed"],
                     "color": r.color,
                 })
-            
-        return {
+
+        response_payload = {
             "message": "Analiza zakończona",
+            "analysisContext": analysis_context,
             "results": formatted_results,
             "boxes": all_boxes,
             "resultImage": f"data:image/jpeg;base64,{result_base64}"
         }
+
+        try:
+            _write_analysis_snapshot(
+                analysis_context["analysisId"],
+                {
+                    "analysisContext": analysis_context,
+                    "results": formatted_results,
+                    "boxes": all_boxes,
+                    "resultImageLength": len(response_payload["resultImage"]),
+                },
+            )
+        except OSError as snapshot_error:
+            print(f"Nie udało się zapisać snapshotu analizy: {snapshot_error}")
+
+        return response_payload
         
     except Exception as e:
         print(f"Błąd podczas analizy: {str(e)}")

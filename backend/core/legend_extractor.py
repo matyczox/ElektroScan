@@ -25,6 +25,7 @@ import numpy as np
 import fitz  # PyMuPDF
 import os
 import re
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -121,22 +122,21 @@ def _render_doc_to_bgr(doc: fitz.Document, page: int = 0, dpi: int = 300) -> np.
 
 def _normalize_layer_name(name: str) -> str:
     """Normalize layer names to make matching resilient to PDF text encoding quirks."""
-    return (
-        str(name)
-        .strip()
-        .lower()
-        .replace("ą", "a")
-        .replace("ć", "c")
-        .replace("ę", "e")
-        .replace("ł", "l")
-        .replace("ń", "n")
-        .replace("ó", "o")
-        .replace("ś", "s")
-        .replace("ź", "z")
-        .replace("ż", "z")
-        .replace("œ", "s")
-        .replace("ñ", "n")
-    )
+    text = str(name).strip()
+
+    # When layer names pass through different shells / encodings we sometimes
+    # get mojibake like "UKĹAD" instead of "UKŁAD". Repair that first when
+    # possible, then normalize everything to the same ASCII-ish form.
+    try:
+        repaired = text.encode("latin1").decode("utf-8")
+        if "\ufffd" not in repaired:
+            text = repaired
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        pass
+
+    text = text.casefold().translate(str.maketrans({"ł": "l", "Ł": "l"}))
+    normalized = unicodedata.normalize("NFKD", text)
+    return "".join(char for char in normalized if not unicodedata.combining(char))
 
 
 def _get_ocg_xrefs_in_catalog_order(doc: fitz.Document) -> list[int]:

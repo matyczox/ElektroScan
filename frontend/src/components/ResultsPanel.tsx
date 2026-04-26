@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Layers, ChevronDown, ChevronRight, X, Calculator, Upload } from 'lucide-react';
 
+const API_BASE = 'http://127.0.0.1:8000';
+const withNoCache = (path: string) => `${API_BASE}${path}${path.includes('?') ? '&' : '?'}_ts=${Date.now()}`;
+
 interface Box {
   id: string;
   symbolName: string;
@@ -19,6 +22,11 @@ interface Box {
   purity?: number;
   contextPurity?: number;
   colorSimilarity?: number;
+  analysisId?: string;
+  analysisGeneratedUtc?: string;
+  analysisSession?: string;
+  sourcePdf?: string;
+  hiddenLayersUsed?: string[];
 }
 
 interface ResultGroup {
@@ -93,9 +101,10 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
     try {
       const formData = new FormData();
       formData.append('file', file);
-      const res = await fetch('http://localhost:8000/api/templates/upload', {
+      const res = await fetch(withNoCache('/api/templates/upload'), {
         method: 'POST',
         body: formData,
+        cache: 'no-store',
       });
       if (res.ok) {
         onTemplateUploaded?.();

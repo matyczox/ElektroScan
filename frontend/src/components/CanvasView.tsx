@@ -19,6 +19,11 @@ interface Box {
   purity?: number;
   contextPurity?: number;
   colorSimilarity?: number;
+  analysisId?: string;
+  analysisGeneratedUtc?: string;
+  analysisSession?: string;
+  sourcePdf?: string;
+  hiddenLayersUsed?: string[];
 }
 
 interface ExcludedZone {
@@ -28,9 +33,30 @@ interface ExcludedZone {
   height: number;
 }
 
+interface AnalysisContext {
+  analysisId?: string;
+  generatedAtUtc?: string;
+  sessionId?: string;
+  sourcePdf?: string;
+  hiddenLayersUsed?: string[];
+  excludedZonesUsed?: Array<[number, number, number, number]>;
+  hiddenLayerDebug?: {
+    matched?: string[];
+    unmatched?: string[];
+    requested?: Array<{
+      value?: string;
+      repr?: string;
+      length?: number;
+      normalized?: string;
+      matches?: string[];
+    }>;
+  };
+}
+
 interface CanvasViewProps {
   imageSrc: string | null;
   boxes?: Box[];
+  analysisContext?: AnalysisContext | null;
   onBoxClick?: (id: string) => void;
   focusedBoxId?: string | null;
   excludedZones?: ExcludedZone[];
@@ -43,6 +69,7 @@ interface CanvasViewProps {
 export const CanvasView: React.FC<CanvasViewProps> = ({
   imageSrc,
   boxes = [],
+  analysisContext,
   onBoxClick,
   focusedBoxId,
   excludedZones = [],
@@ -79,6 +106,11 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
       setPosition({ x: 50, y: 50 });
     }
   }, [imageSrc]);
+
+  useEffect(() => {
+    setPulsingId(null);
+    setCopiedBoxId(null);
+  }, [analysisContext?.analysisId]);
 
   // Kiedy focusedBoxId się zmienia → animuj pan do tej ramki
   useEffect(() => {
@@ -176,6 +208,27 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
     typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : 'n/a';
 
   const buildDebugPayload = (box: Box) => {
+    const nearbyBoxes = boxes
+      .filter(candidate => {
+        const centerDx = Math.abs((candidate.x + candidate.width / 2) - (box.x + box.width / 2));
+        const centerDy = Math.abs((candidate.y + candidate.height / 2) - (box.y + box.height / 2));
+        return centerDx <= 80 && centerDy <= 80;
+      })
+      .map(candidate =>
+        `${candidate.symbolName}@${candidate.x},${candidate.y},${candidate.width},${candidate.height}#${candidate.analysisId ?? analysisContext?.analysisId ?? 'n/a'}`
+      );
+    const hiddenLayers = box.hiddenLayersUsed?.length
+      ? box.hiddenLayersUsed.join(" | ")
+      : analysisContext?.hiddenLayersUsed?.length
+      ? analysisContext.hiddenLayersUsed.join(" | ")
+      : "(none)";
+    const hiddenLayerUnmatched = analysisContext?.hiddenLayerDebug?.unmatched?.join(" | ") || "(none)";
+    const hiddenLayerReprs = analysisContext?.hiddenLayerDebug?.requested
+      ?.map(entry => `${entry.value ?? ''}=>${entry.repr ?? 'n/a'}|norm=${entry.normalized ?? 'n/a'}|len=${entry.length ?? 0}|matches=${(entry.matches ?? []).join('&') || '(none)'}`)
+      .join(" || ") || "(none)";
+    const excludedZones = analysisContext?.excludedZonesUsed?.length
+      ? analysisContext.excludedZonesUsed.map(zone => zone.join(",")).join(" | ")
+      : "(none)";
     const lines = [
       `symbol=${box.symbolName}`,
       `bbox=${box.x},${box.y},${box.width},${box.height}`,
@@ -189,6 +242,16 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
       `scale=${formatDebugValue(box.scale)}`,
       `mirrored=${box.mirrored ? 'true' : 'false'}`,
       `source=${box.source ?? 'template'}`,
+      `analysis_id=${box.analysisId ?? analysisContext?.analysisId ?? 'n/a'}`,
+      `analysis_generated_utc=${box.analysisGeneratedUtc ?? analysisContext?.generatedAtUtc ?? 'n/a'}`,
+      `analysis_session=${box.analysisSession ?? analysisContext?.sessionId ?? 'n/a'}`,
+      `source_pdf=${box.sourcePdf ?? analysisContext?.sourcePdf ?? 'n/a'}`,
+      `hidden_layers_used=${hiddenLayers}`,
+      `excluded_zones_used=${excludedZones}`,
+      `hidden_layers_unmatched=${hiddenLayerUnmatched}`,
+      `hidden_layers_repr=${hiddenLayerReprs}`,
+      `frontend_boxes_count=${boxes.length}`,
+      `frontend_nearby_boxes=${nearbyBoxes.join(' || ') || '(none)'}`,
       `box_id=${box.id}`,
     ];
     return lines.join('\n');
@@ -323,7 +386,7 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
 
             return (
               <div
-                key={box.id}
+                key={`${box.analysisId ?? analysisContext?.analysisId ?? 'na'}:${box.id}`}
                 onClick={e => {
                   e.stopPropagation();
                   onBoxClick?.(box.id);
