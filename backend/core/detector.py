@@ -1461,6 +1461,7 @@ def detect_symbols(
         "promoted_parent_search_hits": 0,
         "pdf_text_hits": len(pdf_candidates),
         "prefilter_hits": 0,
+        "pre_parent_clusters": 0,
         "final_hits": 0,
     }
 
@@ -1548,8 +1549,13 @@ def detect_symbols(
     timings["prefilter"] = time.perf_counter() - phase_start
 
     phase_start = time.perf_counter()
+    pre_parent_candidates = _cluster_candidates(prefiltered_candidates, parent_ids_by_child)
+    diagnostics["pre_parent_clusters"] = len(pre_parent_candidates)
+    timings["pre_parent_clustering"] = time.perf_counter() - phase_start
+
+    phase_start = time.perf_counter()
     parent_search_candidates: list[CandidateHit] = []
-    for hit in prefiltered_candidates:
+    for hit in pre_parent_candidates:
         promoted_hit = _maybe_promote_switch_parent_search(
             hit,
             plan_image,
@@ -1598,6 +1604,7 @@ def detect_symbols(
         f" promoted_parent_search_hits={diagnostics['promoted_parent_search_hits']},"
         f" pdf_text_hits={diagnostics['pdf_text_hits']},"
         f" after_prefilter={diagnostics['prefilter_hits']},"
+        f" pre_parent_clusters={diagnostics['pre_parent_clusters']},"
         f" final_clusters={diagnostics['final_hits']},"
         f" timings_ms="
         f"pdf_text:{timings_ms['pdf_text']:.0f}|"
@@ -1605,6 +1612,7 @@ def detect_symbols(
         f"scan:{timings_ms['scan']:.0f}|"
         f"validation_targeted:{timings_ms['validation_targeted']:.0f}|"
         f"prefilter:{timings_ms['prefilter']:.0f}|"
+        f"pre_parent_clustering:{timings_ms['pre_parent_clustering']:.0f}|"
         f"parent_search:{timings_ms['parent_search']:.0f}|"
         f"clustering:{timings_ms['clustering']:.0f}"
     )
