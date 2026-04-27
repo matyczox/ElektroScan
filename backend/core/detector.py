@@ -1369,6 +1369,7 @@ def detect_symbols(
     pdf_path: str | None = None,
     pdf_dpi: int = DEFAULT_PDF_DPI,
     hidden_layers: list[str] | None = None,
+    debug_profile: dict | None = None,
 ) -> list[DetectionResult]:
     """
     Detect symbols on a rendered plan using template matching plus PDF-text fallback.
@@ -1569,6 +1570,22 @@ def detect_symbols(
     diagnostics["final_hits"] = len(final_hits)
     timings["clustering"] = time.perf_counter() - phase_start
 
+    timings_ms = {
+        name: round(seconds * 1000.0, 3)
+        for name, seconds in timings.items()
+    }
+    if debug_profile is not None:
+        debug_profile.clear()
+        debug_profile.update(
+            {
+                "timingsMs": timings_ms,
+                "counters": {key: int(value) for key, value in diagnostics.items()},
+                "slowestPhase": max(timings_ms.items(), key=lambda item: item[1])[0]
+                if timings_ms
+                else None,
+            }
+        )
+
     print(
         "Detection diagnostics:"
         f" prepared_variants={diagnostics['prepared_variants']},"
@@ -1583,13 +1600,13 @@ def detect_symbols(
         f" after_prefilter={diagnostics['prefilter_hits']},"
         f" final_clusters={diagnostics['final_hits']},"
         f" timings_ms="
-        f"pdf_text:{timings['pdf_text'] * 1000:.0f}|"
-        f"prepare:{timings['prepare'] * 1000:.0f}|"
-        f"scan:{timings['scan'] * 1000:.0f}|"
-        f"validation_targeted:{timings['validation_targeted'] * 1000:.0f}|"
-        f"prefilter:{timings['prefilter'] * 1000:.0f}|"
-        f"parent_search:{timings['parent_search'] * 1000:.0f}|"
-        f"clustering:{timings['clustering'] * 1000:.0f}"
+        f"pdf_text:{timings_ms['pdf_text']:.0f}|"
+        f"prepare:{timings_ms['prepare']:.0f}|"
+        f"scan:{timings_ms['scan']:.0f}|"
+        f"validation_targeted:{timings_ms['validation_targeted']:.0f}|"
+        f"prefilter:{timings_ms['prefilter']:.0f}|"
+        f"parent_search:{timings_ms['parent_search']:.0f}|"
+        f"clustering:{timings_ms['clustering']:.0f}"
     )
 
     per_template: dict[int, list[Detection]] = {}

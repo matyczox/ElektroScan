@@ -3,6 +3,7 @@ import shutil
 import uuid
 import base64
 import json
+import time
 from datetime import datetime, timezone
 import cv2
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request
@@ -80,6 +81,24 @@ def _write_analysis_snapshot(analysis_id: str, payload: dict) -> None:
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+def _elapsed_ms(start: float) -> float:
+    return round((time.perf_counter() - start) * 1000.0, 3)
+
+
+def _slowest_stages(timings_ms: dict[str, float], limit: int = 8) -> list[dict]:
+    ignored = {"total", "totalBeforeSnapshot"}
+    ranked = sorted(
+        (
+            (name, value)
+            for name, value in timings_ms.items()
+            if name not in ignored and isinstance(value, (int, float))
+        ),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    return [{"name": name, "ms": round(float(value), 3)} for name, value in ranked[:limit]]
 
 
 def _build_hidden_layer_debug(pdf_path: str, hidden_layers: list[str]) -> dict:
@@ -245,16 +264,32 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
     if not plan_path.exists():
         raise HTTPException(status_code=404, detail="Nie znaleziono pliku sesji.")
         
+    request_start = time.perf_counter()
+    timings_ms: dict[str, float] = {}
+    counters: dict[str, int] = {}
+
     try:
-        # 1. Ładujemy plan
+        phase_start = time.perf_counter()
         hidden_layers = body.hidden_layers if body else []
         session_meta = _read_session_meta(session_id)
+        timings_ms["requestSetup"] = _elapsed_ms(phase_start)
+
+        # 1. Ładujemy plan
+        phase_start = time.perf_counter()
         plan_img = pdf_to_png(str(plan_path), dpi=300, hidden_layers=hidden_layers)
+        timings_ms["renderPdf"] = _elapsed_ms(phase_start)
+        counters["planWidth"] = int(plan_img.shape[1])
+        counters["planHeight"] = int(plan_img.shape[0])
+        counters["hiddenLayers"] = len(hidden_layers)
         
         # 2. Ładujemy wzorce
+        phase_start = time.perf_counter()
         templates = load_templates(str(TEMPLATES_DIR))
+        timings_ms["loadTemplates"] = _elapsed_ms(phase_start)
+        counters["templatesLoaded"] = len(templates)
         
         # 3. Strefy wykluczone → lista krotek (x, y, w, h)
+        phase_start = time.perf_counter()
         exclude_rects = []
         if body and body.excluded_zones:
             for zone in body.excluded_zones:
@@ -266,10 +301,16 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
                 except (KeyError, ValueError):
                     pass
             print(f"Strefy wykluczone: {exclude_rects}")
+        timings_ms["parseExcludedZones"] = _elapsed_ms(phase_start)
+        counters["excludedZones"] = len(exclude_rects)
 
+        phase_start = time.perf_counter()
         hidden_layer_debug = _build_hidden_layer_debug(str(plan_path), hidden_layers)
+        timings_ms["hiddenLayerDebug"] = _elapsed_ms(phase_start)
         
         # 4. Detekcja
+        detector_profile: dict = {}
+        phase_start = time.perf_counter()
         results = detect_symbols(
             plan_img,
             templates,
@@ -277,14 +318,24 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
             pdf_path=str(plan_path),
             pdf_dpi=300,
             hidden_layers=hidden_layers,
+            debug_profile=detector_profile,
         )
+        timings_ms["detectSymbolsTotal"] = _elapsed_ms(phase_start)
         
         # 5. Rysujemy ramki
+        phase_start = time.perf_counter()
         result_img = draw_results(plan_img, results)
+        timings_ms["drawResults"] = _elapsed_ms(phase_start)
         
         # 6. Konwersja wyniku do base64
+        phase_start = time.perf_counter()
         _, buffer_res = cv2.imencode('.jpg', result_img, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        timings_ms["encodeResultJpeg"] = _elapsed_ms(phase_start)
+        counters["resultJpegBytes"] = int(len(buffer_res))
+
+        phase_start = time.perf_counter()
         result_base64 = base64.b64encode(buffer_res).decode('utf-8')
+        timings_ms["base64Result"] = _elapsed_ms(phase_start)
         
         # Przygotowujemy dane o ramkach dla frontendu (opcjonalnie)
         # Na razie wysyłamy gotowy obraz i listę wyników
@@ -299,6 +350,7 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
             "hiddenLayerDebug": hidden_layer_debug,
         }
 
+        phase_start = time.perf_counter()
         formatted_results = []
         all_boxes = []
 
@@ -335,16 +387,40 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
                     "hiddenLayersUsed": analysis_context["hiddenLayersUsed"],
                     "color": r.color,
                 })
+        timings_ms["formatResultsAndBoxes"] = _elapsed_ms(phase_start)
+        counters["resultGroups"] = len(formatted_results)
+        counters["boxes"] = len(all_boxes)
+
+        timings_ms["totalBeforeSnapshot"] = _elapsed_ms(request_start)
+        timings_ms["total"] = timings_ms["totalBeforeSnapshot"]
+        performance = {
+            "backendTimingsMs": timings_ms,
+            "backendCounters": counters,
+            "detector": detector_profile,
+            "slowestStages": _slowest_stages(
+                {
+                    **timings_ms,
+                    **{
+                        f"detector.{name}": value
+                        for name, value in detector_profile.get("timingsMs", {}).items()
+                    },
+                }
+            ),
+        }
+        analysis_context["performance"] = performance
 
         response_payload = {
             "message": "Analiza zakończona",
             "analysisContext": analysis_context,
             "results": formatted_results,
             "boxes": all_boxes,
-            "resultImage": f"data:image/jpeg;base64,{result_base64}"
+            "resultImage": f"data:image/jpeg;base64,{result_base64}",
+            "performance": performance,
         }
 
+        snapshot_write_ms = None
         try:
+            phase_start = time.perf_counter()
             _write_analysis_snapshot(
                 analysis_context["analysisId"],
                 {
@@ -352,10 +428,31 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
                     "results": formatted_results,
                     "boxes": all_boxes,
                     "resultImageLength": len(response_payload["resultImage"]),
+                    "performance": performance,
                 },
             )
+            snapshot_write_ms = _elapsed_ms(phase_start)
         except OSError as snapshot_error:
             print(f"Nie udało się zapisać snapshotu analizy: {snapshot_error}")
+
+        if snapshot_write_ms is not None:
+            performance["backendTimingsMs"]["snapshotWrite"] = snapshot_write_ms
+        performance["backendTimingsMs"]["total"] = _elapsed_ms(request_start)
+        performance["slowestStages"] = _slowest_stages(
+            {
+                **performance["backendTimingsMs"],
+                **{
+                    f"detector.{name}": value
+                    for name, value in detector_profile.get("timingsMs", {}).items()
+                },
+            }
+        )
+        print(
+            "Analysis performance:"
+            f" analysis_id={analysis_context['analysisId']},"
+            f" total_ms={performance['backendTimingsMs']['total']:.0f},"
+            f" slowest={performance['slowestStages']}"
+        )
 
         return response_payload
         
