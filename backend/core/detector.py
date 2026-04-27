@@ -7,6 +7,7 @@ from __future__ import annotations
 import glob
 import os
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,6 +31,19 @@ ROTATIONS = [
     (270, cv2.ROTATE_90_COUNTERCLOCKWISE),
 ]
 SCALES = [0.90, 1.00, 1.10]
+FAST_DEFAULT_SCALES = [1.00]
+FAST_SCALES_BY_PREFIX = {
+    "06": SCALES,
+    "07": [0.90, 1.00, 1.10],
+    "09": SCALES,
+    "10": SCALES,
+    "11": SCALES,
+    "12": SCALES,
+    "13": [0.90, 1.00],
+    "14": [0.90, 1.00],
+    "16": [0.90],
+    "20": [1.00, 1.10],
+}
 
 THRESHOLD_PRECISE = 0.55
 THRESHOLD_DILATED = 0.45
@@ -68,6 +82,7 @@ SWITCH_PROMOTED_MIN_VERIFICATION = 0.62
 SWITCH_10_PROMOTED_MAX_VERIFICATION_DROP = 0.06
 SWITCH_12_PROMOTED_MAX_VERIFICATION_DROP = 0.18
 SWITCH_PARENT_FALLBACK_SEARCH_RADIUS = 18
+FAST_SWITCH_PARENT_FALLBACK_SEARCH_RADIUS = 12
 PROMOTED_PARENT_MIN_VERIFICATION = 0.68
 PROMOTED_PARENT_OVERRIDE_MARGIN = 0.16
 PROMOTED_PARENT_MIN_AREA_RATIO = 1.10
@@ -91,6 +106,10 @@ PDF_TEXT_MAX_TOKEN_LENGTH = 6
 LEGEND_KEYWORD = "LEGENDA"
 LEGEND_WIDTH_PT = 300
 LEGEND_HEIGHT_PT = 550
+
+DETECTOR_MODE_ENV = "ELECTROSCAN_DETECTOR_MODE"
+DETECTOR_MODE_FAST = "fast"
+DETECTOR_MODE_QUALITY = "quality"
 
 
 # Data structures
@@ -275,6 +294,25 @@ def _template_numeric_prefix(name: str) -> str | None:
     return match.group(1) if match else None
 
 
+def _detector_mode() -> str:
+    """Return the detector mode selected for this process."""
+
+    mode = os.getenv(DETECTOR_MODE_ENV, DETECTOR_MODE_FAST).strip().lower()
+    if mode == DETECTOR_MODE_QUALITY:
+        return DETECTOR_MODE_QUALITY
+    return DETECTOR_MODE_FAST
+
+
+def _variant_scales_for_prefix(prefix: str | None, detector_mode: str) -> list[float]:
+    """Return scales to scan for a template in the selected detector mode."""
+
+    if detector_mode == DETECTOR_MODE_QUALITY:
+        return SCALES
+    if prefix is None:
+        return FAST_DEFAULT_SCALES
+    return FAST_SCALES_BY_PREFIX.get(prefix, FAST_DEFAULT_SCALES)
+
+
 def _derive_text_tokens(name: str) -> list[str]:
     """Extract short text tokens that can be searched directly in the PDF."""
 
@@ -294,7 +332,11 @@ def _derive_text_tokens(name: str) -> list[str]:
     return [candidate]
 
 
-def _prepare_variants(template_id: int, template: TemplateInfo) -> list[TemplateVariant]:
+def _prepare_variants(
+    template_id: int,
+    template: TemplateInfo,
+    detector_mode: str,
+) -> list[TemplateVariant]:
     """Precompute all scale/rotation variants for one template."""
 
     variants: list[TemplateVariant] = []
@@ -302,7 +344,7 @@ def _prepare_variants(template_id: int, template: TemplateInfo) -> list[Template
     template_prefix = _template_numeric_prefix(Path(template.path).name)
     allow_mirror = template_prefix in MIRRORED_VARIANT_PREFIXES
 
-    for scale in SCALES:
+    for scale in _variant_scales_for_prefix(template_prefix, detector_mode):
         if scale != 1.0:
             new_w = max(1, int(round(base_mask.shape[1] * scale)))
             new_h = max(1, int(round(base_mask.shape[0] * scale)))
@@ -517,6 +559,18 @@ def _roi_mask(mask: np.ndarray, bbox: tuple[int, int, int, int]) -> np.ndarray |
     return roi
 
 
+def _cached_dilated_mask(
+    template_id: int,
+    plan_mask: np.ndarray,
+    cache: dict[int, np.ndarray],
+) -> np.ndarray:
+    """Return a cached one-pixel dilation of a full plan mask."""
+
+    if template_id not in cache:
+        cache[template_id] = cv2.dilate(plan_mask, DILATE_KERNEL, iterations=1)
+    return cache[template_id]
+
+
 def _hue_distance(hue_a: int, hue_b: int) -> int:
     """Circular hue distance in OpenCV's 0-180 HSV space."""
 
@@ -678,10 +732,11 @@ def _maybe_promote_socket_06_to_07(
     plan_image: np.ndarray,
     templates: list[TemplateInfo],
     plan_masks: dict[int, np.ndarray],
+    dilated_plan_masks: dict[int, np.ndarray],
     variants_lookup: dict[tuple[int, float, int, bool], TemplateVariant],
     promotions: dict[tuple[int, float, int, bool], list[TargetedPromotionRule]],
 ) -> CandidateHit:
-    """Replace a 06 hit with 07 when the 07-only extension pixels are present."""
+    """Apply cheap family promotions when parent-only extension pixels are present."""
 
     rules = promotions.get((hit.template_id, hit.scale, hit.rotation, hit.mirrored))
     if not rules:
@@ -699,11 +754,19 @@ def _maybe_promote_socket_06_to_07(
             continue
         parent_prefix = _template_numeric_prefix(Path(templates[rule.parent_template_id].path).name)
         if parent_prefix == "07":
-            promotion_plan_mask = cv2.dilate(parent_plan_mask, DILATE_KERNEL, iterations=1)
+            promotion_plan_mask = _cached_dilated_mask(
+                rule.parent_template_id,
+                parent_plan_mask,
+                dilated_plan_masks,
+            )
         else:
             promotion_plan_mask = parent_plan_mask
         extension_plan_mask = (
-            cv2.dilate(parent_plan_mask, DILATE_KERNEL, iterations=1)
+            _cached_dilated_mask(
+                rule.parent_template_id,
+                parent_plan_mask,
+                dilated_plan_masks,
+            )
             if parent_prefix in {"10", "12"}
             else promotion_plan_mask
         )
@@ -795,119 +858,153 @@ def _maybe_promote_socket_06_to_07(
                     best_promoted = promoted_hit
                     best_key = candidate_key
 
-    if best_promoted is not None:
-        return best_promoted
+    return best_promoted or hit
+
+
+def _maybe_promote_switch_parent_search(
+    hit: CandidateHit,
+    plan_image: np.ndarray,
+    templates: list[TemplateInfo],
+    plan_masks: dict[int, np.ndarray],
+    dilated_plan_masks: dict[int, np.ndarray],
+    variants_lookup: dict[tuple[int, float, int, bool], TemplateVariant],
+    promotions: dict[tuple[int, float, int, bool], list[TargetedPromotionRule]],
+    detector_mode: str,
+    diagnostics: dict[str, int],
+) -> CandidateHit:
+    """Run the expensive 11 -> 10/12 parent search only on prefiltered hits."""
+
+    if hit.transformed_mask is None:
+        return hit
 
     child_prefix = _template_numeric_prefix(Path(templates[hit.template_id].path).name)
     if child_prefix != "11":
         return hit
 
-    candidate_parent_ids = sorted(
-        {
-            rule.parent_template_id
-            for ruleset in promotions.values()
-            for rule in ruleset
-            if rule.child_template_id == hit.template_id
-        }
-    )
-    if not candidate_parent_ids:
+    rules = promotions.get((hit.template_id, hit.scale, hit.rotation, hit.mirrored), [])
+    if not rules:
         return hit
 
     child_center = _box_center(hit.bbox)
     child_area = max(1, hit.bbox[2] * hit.bbox[3])
+    search_radius = (
+        SWITCH_PARENT_FALLBACK_SEARCH_RADIUS
+        if detector_mode == DETECTOR_MODE_QUALITY
+        else FAST_SWITCH_PARENT_FALLBACK_SEARCH_RADIUS
+    )
     fallback_best: CandidateHit | None = None
     fallback_key: tuple[float, float, float] | None = None
+    diagnostics["parent_search_input_hits"] += 1
 
-    for parent_id in candidate_parent_ids:
-        parent_prefix = _template_numeric_prefix(Path(templates[parent_id].path).name)
-        parent_plan_mask = plan_masks.get(parent_id)
-        if parent_plan_mask is None:
+    for rule in rules:
+        parent_prefix = _template_numeric_prefix(Path(templates[rule.parent_template_id].path).name)
+        if parent_prefix not in {"10", "12"}:
+            continue
+        if detector_mode == DETECTOR_MODE_FAST and rule.scale != 1.0:
             continue
 
-        for variant_key, parent_variant in variants_lookup.items():
-            if variant_key[0] != parent_id:
-                continue
+        parent_variant = variants_lookup.get(
+            (rule.parent_template_id, rule.scale, rule.rotation, rule.mirrored)
+        )
+        parent_plan_mask = plan_masks.get(rule.parent_template_id)
+        if parent_variant is None or parent_plan_mask is None:
+            continue
 
-            parent_area = max(1, parent_variant.width * parent_variant.height)
-            if parent_area < child_area * PROMOTED_PARENT_MIN_AREA_RATIO:
-                continue
+        parent_area = max(1, parent_variant.width * parent_variant.height)
+        if parent_area < child_area * PROMOTED_PARENT_MIN_AREA_RATIO:
+            continue
 
-            base_x = int(round(child_center[0] - parent_variant.width / 2.0))
-            base_y = int(round(child_center[1] - parent_variant.height / 2.0))
+        extension_plan_mask = _cached_dilated_mask(
+            rule.parent_template_id,
+            parent_plan_mask,
+            dilated_plan_masks,
+        )
+        base_x = int(round(child_center[0] - parent_variant.width / 2.0))
+        base_y = int(round(child_center[1] - parent_variant.height / 2.0))
 
-            for delta_y in range(-SWITCH_PARENT_FALLBACK_SEARCH_RADIUS, SWITCH_PARENT_FALLBACK_SEARCH_RADIUS + 1):
-                for delta_x in range(-SWITCH_PARENT_FALLBACK_SEARCH_RADIUS, SWITCH_PARENT_FALLBACK_SEARCH_RADIUS + 1):
-                    parent_bbox = (
-                        base_x + delta_x,
-                        base_y + delta_y,
-                        parent_variant.width,
-                        parent_variant.height,
+        for delta_y in range(-search_radius, search_radius + 1):
+            for delta_x in range(-search_radius, search_radius + 1):
+                parent_bbox = (
+                    base_x + delta_x,
+                    base_y + delta_y,
+                    parent_variant.width,
+                    parent_variant.height,
+                )
+                extension_roi = _roi_mask(extension_plan_mask, parent_bbox)
+                if extension_roi is None or extension_roi.shape != parent_variant.transformed_mask.shape:
+                    continue
+
+                extra_overlap = int(cv2.countNonZero(cv2.bitwise_and(extension_roi, rule.extension_mask)))
+                extra_coverage = extra_overlap / max(1, rule.extension_pixels)
+                if extra_coverage < rule.min_extra_coverage:
+                    continue
+
+                parent_roi = _roi_mask(parent_plan_mask, parent_bbox)
+                if parent_roi is None or parent_roi.shape != parent_variant.transformed_mask.shape:
+                    continue
+
+                if not _center_inside_box(child_center, parent_bbox, margin_ratio=0.08):
+                    continue
+
+                inter_area, _, iom, _ = _bbox_metrics(hit.bbox, parent_bbox)
+                if inter_area <= 0 or iom < 0.40:
+                    continue
+
+                diagnostics["parent_search_candidates"] += 1
+                try:
+                    local_match = float(
+                        cv2.matchTemplate(
+                            parent_roi,
+                            parent_variant.transformed_mask,
+                            cv2.TM_CCORR_NORMED,
+                        )[0][0]
                     )
-                    parent_roi = _roi_mask(parent_plan_mask, parent_bbox)
-                    if parent_roi is None or parent_roi.shape != parent_variant.transformed_mask.shape:
-                        continue
+                except cv2.error:
+                    continue
 
-                    if not _center_inside_box(child_center, parent_bbox, margin_ratio=0.08):
-                        continue
+                promoted_hit = CandidateHit(
+                    template_id=rule.parent_template_id,
+                    scale=parent_variant.scale,
+                    rotation=parent_variant.rotation,
+                    mirrored=parent_variant.mirrored,
+                    transformed_mask=parent_variant.transformed_mask,
+                    pixel_count=parent_variant.pixel_count,
+                    bbox=parent_bbox,
+                    match_score=local_match,
+                    dominant_hsv=templates[rule.parent_template_id].dominant_hsv,
+                    source=f"template_parent_search_{hit.template_id}_to_{rule.parent_template_id}",
+                    promoted_from_template_id=hit.template_id,
+                )
+                if not _validate_template_hit(promoted_hit, parent_plan_mask, plan_image):
+                    continue
 
-                    inter_area, _, iom, _ = _bbox_metrics(hit.bbox, parent_bbox)
-                    if inter_area <= 0 or iom < 0.40:
-                        continue
+                max_drop = (
+                    SWITCH_12_PROMOTED_MAX_VERIFICATION_DROP
+                    if parent_prefix == "12"
+                    else SWITCH_10_PROMOTED_MAX_VERIFICATION_DROP
+                )
+                if (
+                    promoted_hit.purity < SWITCH_PROMOTED_MIN_PURITY
+                    or promoted_hit.context_purity < SWITCH_PROMOTED_MIN_CONTEXT_PURITY
+                    or promoted_hit.verification_score < SWITCH_PROMOTED_MIN_VERIFICATION
+                    or promoted_hit.verification_score < (hit.verification_score - max_drop)
+                ):
+                    continue
 
-                    try:
-                        local_match = float(
-                            cv2.matchTemplate(
-                                parent_roi,
-                                parent_variant.transformed_mask,
-                                cv2.TM_CCORR_NORMED,
-                            )[0][0]
-                        )
-                    except cv2.error:
-                        continue
+                if (
+                    parent_prefix == "10"
+                    and promoted_hit.verification_score + 0.02 < hit.verification_score
+                ):
+                    continue
 
-                    promoted_hit = CandidateHit(
-                        template_id=parent_id,
-                        scale=parent_variant.scale,
-                        rotation=parent_variant.rotation,
-                        mirrored=parent_variant.mirrored,
-                        transformed_mask=parent_variant.transformed_mask,
-                        pixel_count=parent_variant.pixel_count,
-                        bbox=parent_bbox,
-                        match_score=local_match,
-                        dominant_hsv=templates[parent_id].dominant_hsv,
-                        source=f"template_parent_search_{hit.template_id}_to_{parent_id}",
-                        promoted_from_template_id=hit.template_id,
-                    )
-                    if not _validate_template_hit(promoted_hit, parent_plan_mask, plan_image):
-                        continue
-
-                    max_drop = (
-                        SWITCH_12_PROMOTED_MAX_VERIFICATION_DROP
-                        if parent_prefix == "12"
-                        else SWITCH_10_PROMOTED_MAX_VERIFICATION_DROP
-                    )
-                    if (
-                        promoted_hit.purity < SWITCH_PROMOTED_MIN_PURITY
-                        or promoted_hit.context_purity < SWITCH_PROMOTED_MIN_CONTEXT_PURITY
-                        or promoted_hit.verification_score < SWITCH_PROMOTED_MIN_VERIFICATION
-                        or promoted_hit.verification_score < (hit.verification_score - max_drop)
-                    ):
-                        continue
-
-                    if (
-                        parent_prefix == "10"
-                        and promoted_hit.verification_score + 0.02 < hit.verification_score
-                    ):
-                        continue
-
-                    candidate_key = (
-                        float(promoted_hit.verification_score),
-                        float(promoted_hit.match_score),
-                        float(iom),
-                    )
-                    if fallback_key is None or candidate_key > fallback_key:
-                        fallback_best = promoted_hit
-                        fallback_key = candidate_key
+                candidate_key = (
+                    float(extra_coverage),
+                    float(promoted_hit.verification_score),
+                    float(promoted_hit.match_score),
+                )
+                if fallback_key is None or candidate_key > fallback_key:
+                    fallback_best = promoted_hit
+                    fallback_key = candidate_key
 
     return fallback_best or hit
 
@@ -1332,6 +1429,9 @@ def detect_symbols(
     if not templates:
         return []
 
+    detector_mode = _detector_mode()
+    timings: dict[str, float] = {}
+
     legend_rect = _estimate_legend_exclude_rect(
         pdf_path=pdf_path or "",
         image_shape=plan_image.shape,
@@ -1362,6 +1462,7 @@ def detect_symbols(
             cv2.rectangle(fallback, (ex, ey), (ex + ew, ey + eh), 0, -1)
         return fallback
 
+    phase_start = time.perf_counter()
     pdf_hits_by_template = _collect_pdf_text_hits(
         pdf_path=pdf_path or "",
         templates=templates,
@@ -1371,9 +1472,11 @@ def detect_symbols(
         exclude_rects=exclude_rects,
     )
     pdf_candidates = [hit for hits in pdf_hits_by_template.values() for hit in hits]
+    timings["pdf_text"] = time.perf_counter() - phase_start
 
+    phase_start = time.perf_counter()
     variants_by_template = {
-        template_id: _prepare_variants(template_id, template)
+        template_id: _prepare_variants(template_id, template, detector_mode)
         for template_id, template in enumerate(templates)
     }
     variants_lookup = {
@@ -1390,11 +1493,22 @@ def detect_symbols(
         template_id: _get_plan_mask(template)
         for template_id, template in enumerate(templates)
     }
+    plan_mask_foregrounds = {
+        template_id: int(cv2.countNonZero(plan_mask))
+        for template_id, plan_mask in plan_masks_by_template.items()
+    }
+    dilated_plan_masks_by_template: dict[int, np.ndarray] = {}
+    timings["prepare"] = time.perf_counter() - phase_start
 
     diagnostics = {
         "raw_peaks": 0,
+        "prepared_variants": sum(len(variants) for variants in variants_by_template.values()),
+        "skipped_empty_color_masks": 0,
         "validated_template_hits": 0,
         "promoted_targeted_hits": 0,
+        "parent_search_input_hits": 0,
+        "parent_search_candidates": 0,
+        "promoted_parent_search_hits": 0,
         "pdf_text_hits": len(pdf_candidates),
         "prefilter_hits": 0,
         "final_hits": 0,
@@ -1404,6 +1518,8 @@ def detect_symbols(
         template = templates[template_id]
         threshold = THRESHOLD_PRECISE if template.requires_precision else THRESHOLD_DILATED
         plan_mask = plan_masks_by_template[template_id]
+        if plan_mask_foregrounds.get(template_id, 0) < MIN_TEMPLATE_PIXELS:
+            return []
 
         template_hits: list[CandidateHit] = []
         for variant in variants_by_template.get(template_id, []):
@@ -1438,17 +1554,25 @@ def detect_symbols(
 
         return template_hits
 
-    template_ids_to_scan = list(variants_by_template.keys())
+    template_ids_to_scan = [
+        template_id
+        for template_id in variants_by_template
+        if plan_mask_foregrounds.get(template_id, 0) >= MIN_TEMPLATE_PIXELS
+    ]
+    diagnostics["skipped_empty_color_masks"] = len(variants_by_template) - len(template_ids_to_scan)
     raw_template_hits: list[CandidateHit] = []
+    phase_start = time.perf_counter()
     if template_ids_to_scan:
         num_workers = max(1, min(len(template_ids_to_scan), os.cpu_count() or 4))
         with ThreadPoolExecutor(max_workers=num_workers) as pool:
             for hits in pool.map(_scan_template, template_ids_to_scan):
                 raw_template_hits.extend(hits)
+    timings["scan"] = time.perf_counter() - phase_start
 
     diagnostics["raw_peaks"] = len(raw_template_hits)
 
     validated_candidates: list[CandidateHit] = list(pdf_candidates)
+    phase_start = time.perf_counter()
     for hit in raw_template_hits:
         plan_mask = plan_masks_by_template[hit.template_id]
         if _validate_template_hit(hit, plan_mask, plan_image):
@@ -1457,6 +1581,7 @@ def detect_symbols(
                 plan_image,
                 templates,
                 plan_masks_by_template,
+                dilated_plan_masks_by_template,
                 variants_lookup,
                 socket_07_promotions,
             )
@@ -1465,21 +1590,59 @@ def detect_symbols(
             validated_candidates.append(promoted_hit)
 
     diagnostics["validated_template_hits"] = len(validated_candidates) - len(pdf_candidates)
+    timings["validation_targeted"] = time.perf_counter() - phase_start
 
+    phase_start = time.perf_counter()
     prefiltered_candidates = _prefilter_candidates(validated_candidates)
     diagnostics["prefilter_hits"] = len(prefiltered_candidates)
+    timings["prefilter"] = time.perf_counter() - phase_start
 
-    final_hits = _cluster_candidates(prefiltered_candidates, parent_ids_by_child)
+    phase_start = time.perf_counter()
+    parent_search_candidates: list[CandidateHit] = []
+    for hit in prefiltered_candidates:
+        promoted_hit = _maybe_promote_switch_parent_search(
+            hit,
+            plan_image,
+            templates,
+            plan_masks_by_template,
+            dilated_plan_masks_by_template,
+            variants_lookup,
+            socket_07_promotions,
+            detector_mode,
+            diagnostics,
+        )
+        if promoted_hit.template_id != hit.template_id or promoted_hit.bbox != hit.bbox:
+            diagnostics["promoted_parent_search_hits"] += 1
+        parent_search_candidates.append(promoted_hit)
+    timings["parent_search"] = time.perf_counter() - phase_start
+
+    phase_start = time.perf_counter()
+    final_hits = _cluster_candidates(parent_search_candidates, parent_ids_by_child)
     diagnostics["final_hits"] = len(final_hits)
+    timings["clustering"] = time.perf_counter() - phase_start
 
     print(
         "Detection diagnostics:"
+        f" mode={detector_mode},"
+        f" prepared_variants={diagnostics['prepared_variants']},"
+        f" skipped_empty_color_masks={diagnostics['skipped_empty_color_masks']},"
         f" raw_peaks={diagnostics['raw_peaks']},"
         f" validated_template_hits={diagnostics['validated_template_hits']},"
         f" promoted_targeted_hits={diagnostics['promoted_targeted_hits']},"
+        f" parent_search_input_hits={diagnostics['parent_search_input_hits']},"
+        f" parent_search_candidates={diagnostics['parent_search_candidates']},"
+        f" promoted_parent_search_hits={diagnostics['promoted_parent_search_hits']},"
         f" pdf_text_hits={diagnostics['pdf_text_hits']},"
         f" after_prefilter={diagnostics['prefilter_hits']},"
-        f" final_clusters={diagnostics['final_hits']}"
+        f" final_clusters={diagnostics['final_hits']},"
+        f" timings_ms="
+        f"pdf_text:{timings['pdf_text'] * 1000:.0f}|"
+        f"prepare:{timings['prepare'] * 1000:.0f}|"
+        f"scan:{timings['scan'] * 1000:.0f}|"
+        f"validation_targeted:{timings['validation_targeted'] * 1000:.0f}|"
+        f"prefilter:{timings['prefilter'] * 1000:.0f}|"
+        f"parent_search:{timings['parent_search'] * 1000:.0f}|"
+        f"clustering:{timings['clustering'] * 1000:.0f}"
     )
 
     per_template: dict[int, list[Detection]] = {}
