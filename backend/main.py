@@ -4,6 +4,7 @@ import uuid
 import base64
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import cv2
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request
@@ -48,6 +49,24 @@ SESSION_META_SUFFIX = ".meta.json"
 UPLOAD_DIR.mkdir(exist_ok=True)
 TEMPLATES_DIR.mkdir(exist_ok=True)
 ANALYSIS_DIR.mkdir(exist_ok=True)
+
+SNAPSHOT_EXECUTOR = ThreadPoolExecutor(max_workers=1)
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+VERBOSE_LOGS = _env_flag("ELEKTROSCAN_VERBOSE_LOGS", default=True)
+DEFAULT_ANALYSIS_DEBUG = _env_flag("ELEKTROSCAN_ANALYSIS_DEBUG", default=True)
+
+
+def _log(message: str) -> None:
+    if VERBOSE_LOGS:
+        print(message)
 
 
 def _session_meta_path(session_id: str) -> Path:
@@ -203,7 +222,7 @@ async def api_extract_legend(session_id: str, body: ExtractRequest = None):
         raise HTTPException(status_code=404, detail="Nie znaleziono pliku sesji.")
         
     try:
-        print(f"Renderowanie planu do ekstrakcji (300 DPI)")
+        _log("Renderowanie planu do ekstrakcji (300 DPI)")
         hidden_layers = body.hidden_layers if body else []
         plan_img = pdf_to_png(str(file_path), dpi=300, hidden_layers=hidden_layers)
         
@@ -219,7 +238,7 @@ async def api_extract_legend(session_id: str, body: ExtractRequest = None):
                 except (KeyError, ValueError):
                     pass
         
-        print("Ekstrakcja legendy...")
+        _log("Ekstrakcja legendy...")
         if TEMPLATES_DIR.exists():
             shutil.rmtree(TEMPLATES_DIR)
         TEMPLATES_DIR.mkdir(exist_ok=True)
@@ -238,6 +257,7 @@ async def api_extract_legend(session_id: str, body: ExtractRequest = None):
             _, buffer_s = cv2.imencode('.png', s.image)
             img_b64 = base64.b64encode(buffer_s).decode('utf-8')
             patterns_list.append({
+                "id": s.name,
                 "name": s.name,
                 "imgBase64": f"data:image/png;base64,{img_b64}"
             })
@@ -256,6 +276,7 @@ from typing import Optional, List
 class AnalyzeRequest(BaseModel):
     excluded_zones: Optional[List[dict]] = []
     hidden_layers: Optional[List[str]] = []
+    include_debug: Optional[bool] = None
 
 @app.post("/api/analyze")
 async def api_analyze(session_id: str, body: AnalyzeRequest = None):
@@ -271,6 +292,7 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
     try:
         phase_start = time.perf_counter()
         hidden_layers = body.hidden_layers if body else []
+        include_debug = body.include_debug if body and body.include_debug is not None else DEFAULT_ANALYSIS_DEBUG
         session_meta = _read_session_meta(session_id)
         timings_ms["requestSetup"] = _elapsed_ms(phase_start)
 
@@ -300,12 +322,12 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
                     ))
                 except (KeyError, ValueError):
                     pass
-            print(f"Strefy wykluczone: {exclude_rects}")
+            _log(f"Strefy wykluczone: {exclude_rects}")
         timings_ms["parseExcludedZones"] = _elapsed_ms(phase_start)
         counters["excludedZones"] = len(exclude_rects)
 
         phase_start = time.perf_counter()
-        hidden_layer_debug = _build_hidden_layer_debug(str(plan_path), hidden_layers)
+        hidden_layer_debug = _build_hidden_layer_debug(str(plan_path), hidden_layers) if include_debug else None
         timings_ms["hiddenLayerDebug"] = _elapsed_ms(phase_start)
         
         # 4. Detekcja
@@ -318,7 +340,7 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
             pdf_path=str(plan_path),
             pdf_dpi=300,
             hidden_layers=hidden_layers,
-            debug_profile=detector_profile,
+            debug_profile=detector_profile if include_debug else None,
         )
         timings_ms["detectSymbolsTotal"] = _elapsed_ms(phase_start)
         
@@ -347,8 +369,9 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
             "sourcePdf": session_meta.get("sourcePdf", plan_path.name),
             "hiddenLayersUsed": hidden_layers,
             "excludedZonesUsed": exclude_rects,
-            "hiddenLayerDebug": hidden_layer_debug,
         }
+        if include_debug:
+            analysis_context["hiddenLayerDebug"] = hidden_layer_debug
 
         phase_start = time.perf_counter()
         formatted_results = []
@@ -363,7 +386,7 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
             })
             # Każda indywidualna detekcja (do Canvas)
             for det in r.detections:
-                all_boxes.append({
+                box_payload = {
                     "id": f"{r.symbol_name}_{det.x}_{det.y}",
                     "symbolName": r.symbol_name,
                     "x": det.x,
@@ -371,22 +394,26 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
                     "width": det.width,
                     "height": det.height,
                     "confidence": det.confidence,
-                    "verificationScore": det.verification_score,
-                    "source": det.source,
-                    "rotation": det.rotation,
-                    "scale": det.scale,
-                    "mirrored": det.mirrored,
-                    "coverage": det.coverage,
-                    "purity": det.purity,
-                    "contextPurity": det.context_purity,
-                    "colorSimilarity": det.color_similarity,
-                    "analysisId": analysis_context["analysisId"],
-                    "analysisGeneratedUtc": analysis_context["generatedAtUtc"],
-                    "analysisSession": analysis_context["sessionId"],
-                    "sourcePdf": analysis_context["sourcePdf"],
-                    "hiddenLayersUsed": analysis_context["hiddenLayersUsed"],
                     "color": r.color,
-                })
+                }
+                if include_debug:
+                    box_payload.update({
+                        "verificationScore": det.verification_score,
+                        "source": det.source,
+                        "rotation": det.rotation,
+                        "scale": det.scale,
+                        "mirrored": det.mirrored,
+                        "coverage": det.coverage,
+                        "purity": det.purity,
+                        "contextPurity": det.context_purity,
+                        "colorSimilarity": det.color_similarity,
+                        "analysisId": analysis_context["analysisId"],
+                        "analysisGeneratedUtc": analysis_context["generatedAtUtc"],
+                        "analysisSession": analysis_context["sessionId"],
+                        "sourcePdf": analysis_context["sourcePdf"],
+                        "hiddenLayersUsed": analysis_context["hiddenLayersUsed"],
+                    })
+                all_boxes.append(box_payload)
         timings_ms["formatResultsAndBoxes"] = _elapsed_ms(phase_start)
         counters["resultGroups"] = len(formatted_results)
         counters["boxes"] = len(all_boxes)
@@ -407,7 +434,8 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
                 }
             ),
         }
-        analysis_context["performance"] = performance
+        if include_debug:
+            analysis_context["performance"] = performance
 
         response_payload = {
             "message": "Analiza zakończona",
@@ -415,28 +443,31 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
             "results": formatted_results,
             "boxes": all_boxes,
             "resultImage": f"data:image/jpeg;base64,{result_base64}",
-            "performance": performance,
         }
+        if include_debug:
+            response_payload["performance"] = performance
 
-        snapshot_write_ms = None
+        snapshot_queued = False
         try:
             phase_start = time.perf_counter()
-            _write_analysis_snapshot(
+            snapshot_payload = {
+                "analysisContext": analysis_context,
+                "results": formatted_results,
+                "boxes": all_boxes,
+                "resultImageLength": len(response_payload["resultImage"]),
+                "performance": performance,
+            }
+            SNAPSHOT_EXECUTOR.submit(
+                _write_analysis_snapshot,
                 analysis_context["analysisId"],
-                {
-                    "analysisContext": analysis_context,
-                    "results": formatted_results,
-                    "boxes": all_boxes,
-                    "resultImageLength": len(response_payload["resultImage"]),
-                    "performance": performance,
-                },
+                snapshot_payload,
             )
-            snapshot_write_ms = _elapsed_ms(phase_start)
+            performance["backendTimingsMs"]["snapshotQueue"] = _elapsed_ms(phase_start)
+            snapshot_queued = True
         except OSError as snapshot_error:
             print(f"Nie udało się zapisać snapshotu analizy: {snapshot_error}")
 
-        if snapshot_write_ms is not None:
-            performance["backendTimingsMs"]["snapshotWrite"] = snapshot_write_ms
+        counters["snapshotQueued"] = 1 if snapshot_queued else 0
         performance["backendTimingsMs"]["total"] = _elapsed_ms(request_start)
         performance["slowestStages"] = _slowest_stages(
             {
@@ -470,6 +501,7 @@ async def api_get_templates():
                 _, buffer = cv2.imencode('.png', img)
                 img_b64 = base64.b64encode(buffer).decode('utf-8')
                 patterns_list.append({
+                    "id": file_path.stem,
                     "name": file_path.stem,
                     "imgBase64": f"data:image/png;base64,{img_b64}"
                 })

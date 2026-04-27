@@ -250,7 +250,8 @@ function App() {
     if (!pattern) return;
 
     try {
-      const response = await fetch(withNoCache(`/api/templates/${encodeURIComponent(pattern.name)}`), {
+      const templateId = pattern.id ?? pattern.name;
+      const response = await fetch(withNoCache(`/api/templates/${encodeURIComponent(templateId)}`), {
         method: 'DELETE',
         cache: 'no-store',
       });

@@ -19,6 +19,46 @@ import numpy as np
 
 # Configuration constants
 
+
+def _safe_cpu_count() -> int:
+    """Return a sane positive CPU count fallback."""
+
+    return max(1, int(os.cpu_count() or 1))
+
+
+def _default_detector_workers() -> int:
+    """Use available logical cores while keeping OpenCV internal threading low."""
+
+    return _safe_cpu_count()
+
+
+def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    """Read an integer env var safely."""
+
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return max(minimum, default)
+    try:
+        return max(minimum, int(raw))
+    except ValueError:
+        return max(minimum, default)
+
+
+DETECTOR_SCAN_MAX_WORKERS = _env_int(
+    "ELEKTROSCAN_DETECTOR_SCAN_WORKERS",
+    _default_detector_workers(),
+)
+DETECTOR_POSTPROCESS_MAX_WORKERS = _env_int(
+    "ELEKTROSCAN_DETECTOR_POSTPROCESS_WORKERS",
+    _default_detector_workers(),
+)
+OPENCV_NUM_THREADS = _env_int("ELEKTROSCAN_OPENCV_THREADS", 1)
+
+try:
+    cv2.setNumThreads(OPENCV_NUM_THREADS)
+except Exception:
+    pass
+
 HSV_LOWER = np.array([0, 30, 50])
 HSV_UPPER = np.array([180, 255, 255])
 
@@ -47,6 +87,13 @@ LOW_MATCH_STRICT_THRESHOLD = 0.58
 CONTEXT_MARGIN_RATIO = 0.40
 
 LOCAL_MAX_KERNEL_RATIO = 0.25
+
+ROI_COMPONENT_DILATE_PIXELS = 9
+ROI_MIN_COMPONENT_PIXELS = 6
+ROI_MAX_COMPONENTS = 1200
+ROI_MERGE_GAP_PIXELS = 4
+ROI_PADDING_RATIO = 1.15
+ROI_FULL_SCAN_AREA_RATIO = 0.70
 
 PRECISE_KEYWORDS = ["gniazdo", "wypust"]
 MIRRORED_VARIANT_PREFIXES = {"06", "07", "09", "10", "11", "12"}
@@ -78,6 +125,10 @@ NOISY_PARTIAL_PURITY_THRESHOLD = 0.88
 
 PREFILTER_NMS_MIN_CANDIDATES = 250
 PREFILTER_NMS_IOU_THRESHOLD = 0.85
+RAW_PREFILTER_MIN_CANDIDATES = 1200
+RAW_PREFILTER_IOU_THRESHOLD = 0.98
+RAW_PREFILTER_IOM_THRESHOLD = 0.995
+RAW_PREFILTER_CENTER_DISTANCE_RATIO = 0.04
 
 CLUSTER_IOU_THRESHOLD = 0.30
 CLUSTER_IOM_THRESHOLD = 0.72
@@ -517,6 +568,140 @@ def _roi_mask(mask: np.ndarray, bbox: tuple[int, int, int, int]) -> np.ndarray |
     return roi
 
 
+def _rect_area(rect: tuple[int, int, int, int]) -> int:
+    """Return integer area for an x/y/w/h rectangle."""
+
+    return max(0, int(rect[2])) * max(0, int(rect[3]))
+
+
+def _rects_touch_or_overlap(
+    left: tuple[int, int, int, int],
+    right: tuple[int, int, int, int],
+    gap: int = 0,
+) -> bool:
+    """Return True when two rectangles overlap or are close enough to merge."""
+
+    lx, ly, lw, lh = left
+    rx, ry, rw, rh = right
+    return not (
+        lx + lw + gap < rx
+        or rx + rw + gap < lx
+        or ly + lh + gap < ry
+        or ry + rh + gap < ly
+    )
+
+
+def _union_rect(
+    left: tuple[int, int, int, int],
+    right: tuple[int, int, int, int],
+) -> tuple[int, int, int, int]:
+    """Return the smallest x/y/w/h rectangle containing both inputs."""
+
+    lx, ly, lw, lh = left
+    rx, ry, rw, rh = right
+    x0 = min(lx, rx)
+    y0 = min(ly, ry)
+    x1 = max(lx + lw, rx + rw)
+    y1 = max(ly + lh, ry + rh)
+    return (x0, y0, x1 - x0, y1 - y0)
+
+
+def _merge_search_rois(
+    rois: list[tuple[int, int, int, int]],
+    gap: int = ROI_MERGE_GAP_PIXELS,
+) -> list[tuple[int, int, int, int]]:
+    """Merge overlapping search windows so template matching does not duplicate work."""
+
+    merged: list[tuple[int, int, int, int]] = []
+    for rect in sorted(rois, key=lambda item: (item[0], item[1], item[2] * item[3])):
+        absorbed = False
+        for idx, existing in enumerate(merged):
+            if _rects_touch_or_overlap(existing, rect, gap):
+                merged[idx] = _union_rect(existing, rect)
+                absorbed = True
+                break
+        if not absorbed:
+            merged.append(rect)
+
+    changed = True
+    while changed:
+        changed = False
+        compacted: list[tuple[int, int, int, int]] = []
+        for rect in merged:
+            absorbed = False
+            for idx, existing in enumerate(compacted):
+                if _rects_touch_or_overlap(existing, rect, gap):
+                    compacted[idx] = _union_rect(existing, rect)
+                    absorbed = True
+                    changed = True
+                    break
+            if not absorbed:
+                compacted.append(rect)
+        merged = compacted
+
+    return merged
+
+
+def _full_scan_roi(image_shape: tuple[int, int, int] | tuple[int, int]) -> tuple[int, int, int, int]:
+    """Return a full-image scan rectangle."""
+
+    return (0, 0, int(image_shape[1]), int(image_shape[0]))
+
+
+def _build_search_rois(
+    plan_mask: np.ndarray,
+    image_shape: tuple[int, int, int] | tuple[int, int],
+    max_template_width: int,
+    max_template_height: int,
+) -> tuple[list[tuple[int, int, int, int]], bool, int, int]:
+    """Build per-request scan windows around colored foreground instead of white space."""
+
+    full_roi = _full_scan_roi(image_shape)
+    full_area = max(1, _rect_area(full_roi))
+    foreground_pixels = int(cv2.countNonZero(plan_mask))
+    if foreground_pixels <= 0:
+        return [], False, 0, foreground_pixels
+
+    kernel_size = _odd_size(ROI_COMPONENT_DILATE_PIXELS)
+    seed_mask = cv2.dilate(
+        plan_mask,
+        np.ones((kernel_size, kernel_size), np.uint8),
+        iterations=1,
+    )
+    components, _, stats, _ = cv2.connectedComponentsWithStats(seed_mask, connectivity=8)
+    if components <= 1:
+        return [], False, 0, foreground_pixels
+    if components - 1 > ROI_MAX_COMPONENTS:
+        return [full_roi], True, full_area, foreground_pixels
+
+    pad_x = max(8, int(round(max_template_width * ROI_PADDING_RATIO)))
+    pad_y = max(8, int(round(max_template_height * ROI_PADDING_RATIO)))
+    rois: list[tuple[int, int, int, int]] = []
+
+    for component_id in range(1, components):
+        area = int(stats[component_id, cv2.CC_STAT_AREA])
+        if area < ROI_MIN_COMPONENT_PIXELS:
+            continue
+
+        x = int(stats[component_id, cv2.CC_STAT_LEFT])
+        y = int(stats[component_id, cv2.CC_STAT_TOP])
+        w = int(stats[component_id, cv2.CC_STAT_WIDTH])
+        h = int(stats[component_id, cv2.CC_STAT_HEIGHT])
+        clamped = _clamp_bbox((x - pad_x, y - pad_y, w + 2 * pad_x, h + 2 * pad_y), image_shape)
+        if clamped is not None:
+            rois.append(clamped)
+
+    if not rois:
+        return [], False, 0, foreground_pixels
+
+    merged_rois = _merge_search_rois(rois)
+    roi_area = sum(_rect_area(roi) for roi in merged_rois)
+    if roi_area >= int(full_area * ROI_FULL_SCAN_AREA_RATIO):
+        return [full_roi], True, full_area, foreground_pixels
+
+    return merged_rois, False, roi_area, foreground_pixels
+
+
 def _cached_dilated_mask(
     template_id: int,
     plan_mask: np.ndarray,
@@ -827,7 +1012,7 @@ def _maybe_promote_switch_parent_search(
     dilated_plan_masks: dict[int, np.ndarray],
     variants_lookup: dict[tuple[int, float, int, bool], TemplateVariant],
     promotions: dict[tuple[int, float, int, bool], list[TargetedPromotionRule]],
-    diagnostics: dict[str, int],
+    stats: dict[str, int] | None = None,
 ) -> CandidateHit:
     """Run the expensive 11 -> 10/12 parent search only on prefiltered hits."""
 
@@ -846,7 +1031,8 @@ def _maybe_promote_switch_parent_search(
     child_area = max(1, hit.bbox[2] * hit.bbox[3])
     fallback_best: CandidateHit | None = None
     fallback_key: tuple[float, float, float] | None = None
-    diagnostics["parent_search_input_hits"] += 1
+    if stats is not None:
+        stats["parent_search_input_hits"] = stats.get("parent_search_input_hits", 0) + 1
 
     for rule in rules:
         parent_prefix = _template_numeric_prefix(Path(templates[rule.parent_template_id].path).name)
@@ -900,7 +1086,8 @@ def _maybe_promote_switch_parent_search(
                 if inter_area <= 0 or iom < 0.40:
                     continue
 
-                diagnostics["parent_search_candidates"] += 1
+                if stats is not None:
+                    stats["parent_search_candidates"] = stats.get("parent_search_candidates", 0) + 1
                 try:
                     local_match = float(
                         cv2.matchTemplate(
@@ -1066,6 +1253,45 @@ def _prefilter_candidates(candidates: list[CandidateHit]) -> list[CandidateHit]:
 
     keep = set(indices.flatten().tolist())
     return [candidate for idx, candidate in enumerate(candidates) if idx in keep]
+
+
+def _raw_candidates_overlap_strongly(left: CandidateHit, right: CandidateHit) -> bool:
+    """Detect duplicate raw peaks for the same template before expensive validation."""
+
+    inter_area, iou, iom, center_distance = _bbox_metrics(left.bbox, right.bbox)
+    if inter_area <= 0:
+        return False
+
+    if iou >= RAW_PREFILTER_IOU_THRESHOLD:
+        return True
+
+    return (
+        iom >= RAW_PREFILTER_IOM_THRESHOLD
+        and center_distance <= RAW_PREFILTER_CENTER_DISTANCE_RATIO
+    )
+
+
+def _prefilter_raw_template_hits(candidates: list[CandidateHit]) -> list[CandidateHit]:
+    """Drop near-identical raw candidates only inside the same template family member."""
+
+    if len(candidates) < RAW_PREFILTER_MIN_CANDIDATES:
+        return candidates
+
+    grouped: dict[int, list[CandidateHit]] = {}
+    for candidate in candidates:
+        grouped.setdefault(candidate.template_id, []).append(candidate)
+
+    filtered: list[CandidateHit] = []
+    for template_hits in grouped.values():
+        kept: list[CandidateHit] = []
+        for candidate in sorted(template_hits, key=lambda hit: hit.match_score, reverse=True):
+            if any(_raw_candidates_overlap_strongly(candidate, existing) for existing in kept):
+                continue
+            kept.append(candidate)
+        filtered.extend(kept)
+
+    filtered.sort(key=lambda hit: (hit.bbox[1], hit.bbox[0], -hit.match_score))
+    return filtered
 
 
 def _candidate_rank_key(hit: CandidateHit) -> tuple[float, float, float, int]:
@@ -1447,11 +1673,32 @@ def detect_symbols(
         template_id: int(cv2.countNonZero(plan_mask))
         for template_id, plan_mask in plan_masks_by_template.items()
     }
+    max_variant_size_by_template = {
+        template_id: (
+            max((variant.width for variant in variants), default=templates[template_id].mask.shape[1]),
+            max((variant.height for variant in variants), default=templates[template_id].mask.shape[0]),
+        )
+        for template_id, variants in variants_by_template.items()
+    }
+    search_rois_by_template: dict[int, list[tuple[int, int, int, int]]] = {}
+    search_roi_stats_by_template: dict[int, tuple[bool, int, int]] = {}
+    for template_id, plan_mask in plan_masks_by_template.items():
+        max_width, max_height = max_variant_size_by_template[template_id]
+        rois, uses_full_scan, roi_area, foreground_pixels = _build_search_rois(
+            plan_mask,
+            plan_image.shape,
+            max_width,
+            max_height,
+        )
+        search_rois_by_template[template_id] = rois
+        search_roi_stats_by_template[template_id] = (uses_full_scan, roi_area, foreground_pixels)
     dilated_plan_masks_by_template: dict[int, np.ndarray] = {}
     timings["prepare"] = time.perf_counter() - phase_start
 
     diagnostics = {
         "raw_peaks": 0,
+        "raw_prefilter_hits": 0,
+        "raw_prefilter_removed": 0,
         "prepared_variants": sum(len(variants) for variants in variants_by_template.values()),
         "skipped_empty_color_masks": 0,
         "validated_template_hits": 0,
@@ -1463,13 +1710,18 @@ def detect_symbols(
         "prefilter_hits": 0,
         "pre_parent_clusters": 0,
         "final_hits": 0,
+        "search_rois": sum(len(rois) for rois in search_rois_by_template.values()),
+        "full_scan_templates": sum(1 for uses_full, _, _ in search_roi_stats_by_template.values() if uses_full),
+        "roi_area_pixels": sum(area for _, area, _ in search_roi_stats_by_template.values()),
+        "roi_foreground_pixels": sum(pixels for _, _, pixels in search_roi_stats_by_template.values()),
     }
 
     def _scan_template(template_id: int) -> list[CandidateHit]:
         template = templates[template_id]
         threshold = THRESHOLD_PRECISE if template.requires_precision else THRESHOLD_DILATED
         plan_mask = plan_masks_by_template[template_id]
-        if plan_mask_foregrounds.get(template_id, 0) < MIN_TEMPLATE_PIXELS:
+        search_rois = search_rois_by_template.get(template_id, [])
+        if plan_mask_foregrounds.get(template_id, 0) < MIN_TEMPLATE_PIXELS or not search_rois:
             return []
 
         template_hits: list[CandidateHit] = []
@@ -1477,17 +1729,34 @@ def detect_symbols(
             if variant.height > plan_mask.shape[0] or variant.width > plan_mask.shape[1]:
                 continue
 
-            match_result = cv2.matchTemplate(plan_mask, variant.transformed_mask, cv2.TM_CCOEFF_NORMED)
-            peaks = _find_local_maxima(
-                match_result,
-                threshold=threshold,
-                template_width=variant.width,
-                template_height=variant.height,
-            )
-            if len(peaks) > MAX_PEAKS_PER_VARIANT:
+            variant_peaks: list[tuple[int, int, float]] = []
+            too_many_peaks = False
+            for roi_x, roi_y, roi_w, roi_h in search_rois:
+                if variant.height > roi_h or variant.width > roi_w:
+                    continue
+
+                roi_plan_mask = plan_mask[roi_y : roi_y + roi_h, roi_x : roi_x + roi_w]
+                match_result = cv2.matchTemplate(
+                    roi_plan_mask,
+                    variant.transformed_mask,
+                    cv2.TM_CCOEFF_NORMED,
+                )
+                peaks = _find_local_maxima(
+                    match_result,
+                    threshold=threshold,
+                    template_width=variant.width,
+                    template_height=variant.height,
+                )
+                if peaks:
+                    variant_peaks.extend((roi_x + px, roi_y + py, score) for px, py, score in peaks)
+                if len(variant_peaks) > MAX_PEAKS_PER_VARIANT:
+                    too_many_peaks = True
+                    break
+
+            if too_many_peaks:
                 continue
 
-            for px, py, score in peaks:
+            for px, py, score in variant_peaks:
                 template_hits.append(
                     CandidateHit(
                         template_id=template_id,
@@ -1513,18 +1782,28 @@ def detect_symbols(
     diagnostics["skipped_empty_color_masks"] = len(variants_by_template) - len(template_ids_to_scan)
     raw_template_hits: list[CandidateHit] = []
     phase_start = time.perf_counter()
+    scan_workers = max(1, min(len(template_ids_to_scan), DETECTOR_SCAN_MAX_WORKERS))
     if template_ids_to_scan:
-        num_workers = max(1, min(len(template_ids_to_scan), os.cpu_count() or 4))
-        with ThreadPoolExecutor(max_workers=num_workers) as pool:
+        with ThreadPoolExecutor(max_workers=scan_workers) as pool:
             for hits in pool.map(_scan_template, template_ids_to_scan):
                 raw_template_hits.extend(hits)
+    else:
+        scan_workers = 0
     timings["scan"] = time.perf_counter() - phase_start
 
     diagnostics["raw_peaks"] = len(raw_template_hits)
+    phase_start = time.perf_counter()
+    raw_before_prefilter = len(raw_template_hits)
+    raw_template_hits = _prefilter_raw_template_hits(raw_template_hits)
+    diagnostics["raw_prefilter_hits"] = len(raw_template_hits)
+    diagnostics["raw_prefilter_removed"] = raw_before_prefilter - len(raw_template_hits)
+    timings["raw_prefilter"] = time.perf_counter() - phase_start
 
     validated_candidates: list[CandidateHit] = list(pdf_candidates)
     phase_start = time.perf_counter()
-    for hit in raw_template_hits:
+    postprocess_workers = max(1, DETECTOR_POSTPROCESS_MAX_WORKERS)
+
+    def _validate_and_promote_hit(hit: CandidateHit) -> tuple[CandidateHit, CandidateHit] | None:
         plan_mask = plan_masks_by_template[hit.template_id]
         if _validate_template_hit(hit, plan_mask, plan_image):
             promoted_hit = _maybe_promote_socket_06_to_07(
@@ -1536,9 +1815,21 @@ def detect_symbols(
                 variants_lookup,
                 socket_07_promotions,
             )
-            if promoted_hit.template_id != hit.template_id:
-                diagnostics["promoted_targeted_hits"] += 1
-            validated_candidates.append(promoted_hit)
+            return hit, promoted_hit
+        return None
+
+    validated_hits: list[CandidateHit] = []
+    validation_workers = max(1, min(len(raw_template_hits), postprocess_workers))
+    if raw_template_hits:
+        with ThreadPoolExecutor(max_workers=validation_workers) as pool:
+            for validation_result in pool.map(_validate_and_promote_hit, raw_template_hits):
+                if validation_result is None:
+                    continue
+                original_hit, promoted_hit = validation_result
+                if promoted_hit.template_id != original_hit.template_id or promoted_hit.bbox != original_hit.bbox:
+                    diagnostics["promoted_targeted_hits"] += 1
+                validated_hits.append(promoted_hit)
+    validated_candidates.extend(validated_hits)
 
     diagnostics["validated_template_hits"] = len(validated_candidates) - len(pdf_candidates)
     timings["validation_targeted"] = time.perf_counter() - phase_start
@@ -1554,8 +1845,8 @@ def detect_symbols(
     timings["pre_parent_clustering"] = time.perf_counter() - phase_start
 
     phase_start = time.perf_counter()
-    parent_search_candidates: list[CandidateHit] = []
-    for hit in pre_parent_candidates:
+    def _search_parent_hit(hit: CandidateHit) -> tuple[CandidateHit, dict[str, int]]:
+        local_stats: dict[str, int] = {}
         promoted_hit = _maybe_promote_switch_parent_search(
             hit,
             plan_image,
@@ -1564,11 +1855,20 @@ def detect_symbols(
             dilated_plan_masks_by_template,
             variants_lookup,
             socket_07_promotions,
-            diagnostics,
+            local_stats,
         )
-        if promoted_hit.template_id != hit.template_id or promoted_hit.bbox != hit.bbox:
-            diagnostics["promoted_parent_search_hits"] += 1
-        parent_search_candidates.append(promoted_hit)
+        return promoted_hit, local_stats
+
+    parent_search_candidates: list[CandidateHit] = []
+    parent_search_workers = max(1, min(len(pre_parent_candidates), postprocess_workers))
+    if pre_parent_candidates:
+        with ThreadPoolExecutor(max_workers=parent_search_workers) as pool:
+            for hit, (promoted_hit, local_stats) in zip(pre_parent_candidates, pool.map(_search_parent_hit, pre_parent_candidates)):
+                diagnostics["parent_search_input_hits"] += local_stats.get("parent_search_input_hits", 0)
+                diagnostics["parent_search_candidates"] += local_stats.get("parent_search_candidates", 0)
+                if promoted_hit.template_id != hit.template_id or promoted_hit.bbox != hit.bbox:
+                    diagnostics["promoted_parent_search_hits"] += 1
+                parent_search_candidates.append(promoted_hit)
     timings["parent_search"] = time.perf_counter() - phase_start
 
     phase_start = time.perf_counter()
@@ -1586,6 +1886,22 @@ def detect_symbols(
             {
                 "timingsMs": timings_ms,
                 "counters": {key: int(value) for key, value in diagnostics.items()},
+                "threading": {
+                    "scanWorkers": int(scan_workers),
+                    "configuredScanWorkers": int(DETECTOR_SCAN_MAX_WORKERS),
+                    "validationWorkers": int(validation_workers if raw_template_hits else 0),
+                    "parentSearchWorkers": int(parent_search_workers if pre_parent_candidates else 0),
+                    "configuredPostprocessWorkers": int(DETECTOR_POSTPROCESS_MAX_WORKERS),
+                    "opencvThreads": int(OPENCV_NUM_THREADS),
+                    "cpuCount": int(_safe_cpu_count()),
+                },
+                "searchRoi": {
+                    "totalRois": int(diagnostics["search_rois"]),
+                    "fullScanTemplates": int(diagnostics["full_scan_templates"]),
+                    "roiAreaPixels": int(diagnostics["roi_area_pixels"]),
+                    "foregroundPixels": int(diagnostics["roi_foreground_pixels"]),
+                    "fullImageAreaPixels": int(plan_image.shape[0] * plan_image.shape[1]),
+                },
                 "slowestPhase": max(timings_ms.items(), key=lambda item: item[1])[0]
                 if timings_ms
                 else None,
@@ -1597,6 +1913,7 @@ def detect_symbols(
         f" prepared_variants={diagnostics['prepared_variants']},"
         f" skipped_empty_color_masks={diagnostics['skipped_empty_color_masks']},"
         f" raw_peaks={diagnostics['raw_peaks']},"
+        f" raw_after_prefilter={diagnostics['raw_prefilter_hits']}(-{diagnostics['raw_prefilter_removed']}),"
         f" validated_template_hits={diagnostics['validated_template_hits']},"
         f" promoted_targeted_hits={diagnostics['promoted_targeted_hits']},"
         f" parent_search_input_hits={diagnostics['parent_search_input_hits']},"
@@ -1606,10 +1923,13 @@ def detect_symbols(
         f" after_prefilter={diagnostics['prefilter_hits']},"
         f" pre_parent_clusters={diagnostics['pre_parent_clusters']},"
         f" final_clusters={diagnostics['final_hits']},"
+        f" rois={diagnostics['search_rois']} full_scan_templates={diagnostics['full_scan_templates']},"
+        f" threads=scan:{scan_workers}/{DETECTOR_SCAN_MAX_WORKERS}|post:{postprocess_workers}/{DETECTOR_POSTPROCESS_MAX_WORKERS}|opencv:{OPENCV_NUM_THREADS},"
         f" timings_ms="
         f"pdf_text:{timings_ms['pdf_text']:.0f}|"
         f"prepare:{timings_ms['prepare']:.0f}|"
         f"scan:{timings_ms['scan']:.0f}|"
+        f"raw_prefilter:{timings_ms['raw_prefilter']:.0f}|"
         f"validation_targeted:{timings_ms['validation_targeted']:.0f}|"
         f"prefilter:{timings_ms['prefilter']:.0f}|"
         f"pre_parent_clustering:{timings_ms['pre_parent_clustering']:.0f}|"
