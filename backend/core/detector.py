@@ -31,19 +31,6 @@ ROTATIONS = [
     (270, cv2.ROTATE_90_COUNTERCLOCKWISE),
 ]
 SCALES = [0.90, 1.00, 1.10]
-FAST_DEFAULT_SCALES = [1.00]
-FAST_SCALES_BY_PREFIX = {
-    "06": SCALES,
-    "07": [0.90, 1.00, 1.10],
-    "09": SCALES,
-    "10": SCALES,
-    "11": SCALES,
-    "12": SCALES,
-    "13": [0.90, 1.00],
-    "14": [0.90, 1.00],
-    "16": [0.90],
-    "20": [1.00, 1.10],
-}
 
 THRESHOLD_PRECISE = 0.55
 THRESHOLD_DILATED = 0.45
@@ -82,7 +69,6 @@ SWITCH_PROMOTED_MIN_VERIFICATION = 0.62
 SWITCH_10_PROMOTED_MAX_VERIFICATION_DROP = 0.06
 SWITCH_12_PROMOTED_MAX_VERIFICATION_DROP = 0.18
 SWITCH_PARENT_FALLBACK_SEARCH_RADIUS = 18
-FAST_SWITCH_PARENT_FALLBACK_SEARCH_RADIUS = 12
 PROMOTED_PARENT_MIN_VERIFICATION = 0.68
 PROMOTED_PARENT_OVERRIDE_MARGIN = 0.16
 PROMOTED_PARENT_MIN_AREA_RATIO = 1.10
@@ -106,11 +92,6 @@ PDF_TEXT_MAX_TOKEN_LENGTH = 6
 LEGEND_KEYWORD = "LEGENDA"
 LEGEND_WIDTH_PT = 300
 LEGEND_HEIGHT_PT = 550
-
-DETECTOR_MODE_ENV = "ELECTROSCAN_DETECTOR_MODE"
-DETECTOR_MODE_FAST = "fast"
-DETECTOR_MODE_QUALITY = "quality"
-
 
 # Data structures
 
@@ -294,25 +275,6 @@ def _template_numeric_prefix(name: str) -> str | None:
     return match.group(1) if match else None
 
 
-def _detector_mode() -> str:
-    """Return the detector mode selected for this process."""
-
-    mode = os.getenv(DETECTOR_MODE_ENV, DETECTOR_MODE_FAST).strip().lower()
-    if mode == DETECTOR_MODE_QUALITY:
-        return DETECTOR_MODE_QUALITY
-    return DETECTOR_MODE_FAST
-
-
-def _variant_scales_for_prefix(prefix: str | None, detector_mode: str) -> list[float]:
-    """Return scales to scan for a template in the selected detector mode."""
-
-    if detector_mode == DETECTOR_MODE_QUALITY:
-        return SCALES
-    if prefix is None:
-        return FAST_DEFAULT_SCALES
-    return FAST_SCALES_BY_PREFIX.get(prefix, FAST_DEFAULT_SCALES)
-
-
 def _derive_text_tokens(name: str) -> list[str]:
     """Extract short text tokens that can be searched directly in the PDF."""
 
@@ -332,11 +294,7 @@ def _derive_text_tokens(name: str) -> list[str]:
     return [candidate]
 
 
-def _prepare_variants(
-    template_id: int,
-    template: TemplateInfo,
-    detector_mode: str,
-) -> list[TemplateVariant]:
+def _prepare_variants(template_id: int, template: TemplateInfo) -> list[TemplateVariant]:
     """Precompute all scale/rotation variants for one template."""
 
     variants: list[TemplateVariant] = []
@@ -344,7 +302,7 @@ def _prepare_variants(
     template_prefix = _template_numeric_prefix(Path(template.path).name)
     allow_mirror = template_prefix in MIRRORED_VARIANT_PREFIXES
 
-    for scale in _variant_scales_for_prefix(template_prefix, detector_mode):
+    for scale in SCALES:
         if scale != 1.0:
             new_w = max(1, int(round(base_mask.shape[1] * scale)))
             new_h = max(1, int(round(base_mask.shape[0] * scale)))
@@ -869,7 +827,6 @@ def _maybe_promote_switch_parent_search(
     dilated_plan_masks: dict[int, np.ndarray],
     variants_lookup: dict[tuple[int, float, int, bool], TemplateVariant],
     promotions: dict[tuple[int, float, int, bool], list[TargetedPromotionRule]],
-    detector_mode: str,
     diagnostics: dict[str, int],
 ) -> CandidateHit:
     """Run the expensive 11 -> 10/12 parent search only on prefiltered hits."""
@@ -887,11 +844,6 @@ def _maybe_promote_switch_parent_search(
 
     child_center = _box_center(hit.bbox)
     child_area = max(1, hit.bbox[2] * hit.bbox[3])
-    search_radius = (
-        SWITCH_PARENT_FALLBACK_SEARCH_RADIUS
-        if detector_mode == DETECTOR_MODE_QUALITY
-        else FAST_SWITCH_PARENT_FALLBACK_SEARCH_RADIUS
-    )
     fallback_best: CandidateHit | None = None
     fallback_key: tuple[float, float, float] | None = None
     diagnostics["parent_search_input_hits"] += 1
@@ -899,8 +851,6 @@ def _maybe_promote_switch_parent_search(
     for rule in rules:
         parent_prefix = _template_numeric_prefix(Path(templates[rule.parent_template_id].path).name)
         if parent_prefix not in {"10", "12"}:
-            continue
-        if detector_mode == DETECTOR_MODE_FAST and rule.scale != 1.0:
             continue
 
         parent_variant = variants_lookup.get(
@@ -922,8 +872,8 @@ def _maybe_promote_switch_parent_search(
         base_x = int(round(child_center[0] - parent_variant.width / 2.0))
         base_y = int(round(child_center[1] - parent_variant.height / 2.0))
 
-        for delta_y in range(-search_radius, search_radius + 1):
-            for delta_x in range(-search_radius, search_radius + 1):
+        for delta_y in range(-SWITCH_PARENT_FALLBACK_SEARCH_RADIUS, SWITCH_PARENT_FALLBACK_SEARCH_RADIUS + 1):
+            for delta_x in range(-SWITCH_PARENT_FALLBACK_SEARCH_RADIUS, SWITCH_PARENT_FALLBACK_SEARCH_RADIUS + 1):
                 parent_bbox = (
                     base_x + delta_x,
                     base_y + delta_y,
@@ -1429,7 +1379,6 @@ def detect_symbols(
     if not templates:
         return []
 
-    detector_mode = _detector_mode()
     timings: dict[str, float] = {}
 
     legend_rect = _estimate_legend_exclude_rect(
@@ -1476,7 +1425,7 @@ def detect_symbols(
 
     phase_start = time.perf_counter()
     variants_by_template = {
-        template_id: _prepare_variants(template_id, template, detector_mode)
+        template_id: _prepare_variants(template_id, template)
         for template_id, template in enumerate(templates)
     }
     variants_lookup = {
@@ -1608,7 +1557,6 @@ def detect_symbols(
             dilated_plan_masks_by_template,
             variants_lookup,
             socket_07_promotions,
-            detector_mode,
             diagnostics,
         )
         if promoted_hit.template_id != hit.template_id or promoted_hit.bbox != hit.bbox:
@@ -1623,7 +1571,6 @@ def detect_symbols(
 
     print(
         "Detection diagnostics:"
-        f" mode={detector_mode},"
         f" prepared_variants={diagnostics['prepared_variants']},"
         f" skipped_empty_color_masks={diagnostics['skipped_empty_color_masks']},"
         f" raw_peaks={diagnostics['raw_peaks']},"
