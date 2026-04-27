@@ -277,6 +277,7 @@ class AnalyzeRequest(BaseModel):
     excluded_zones: Optional[List[dict]] = []
     hidden_layers: Optional[List[str]] = []
     include_debug: Optional[bool] = None
+    include_image: Optional[bool] = None
 
 @app.post("/api/analyze")
 async def api_analyze(session_id: str, body: AnalyzeRequest = None):
@@ -293,6 +294,7 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
         phase_start = time.perf_counter()
         hidden_layers = body.hidden_layers if body else []
         include_debug = body.include_debug if body and body.include_debug is not None else DEFAULT_ANALYSIS_DEBUG
+        include_image = body.include_image if body and body.include_image is not None else True
         session_meta = _read_session_meta(session_id)
         timings_ms["requestSetup"] = _elapsed_ms(phase_start)
 
@@ -344,20 +346,26 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
         )
         timings_ms["detectSymbolsTotal"] = _elapsed_ms(phase_start)
         
-        # 5. Rysujemy ramki
-        phase_start = time.perf_counter()
-        result_img = draw_results(plan_img, results)
-        timings_ms["drawResults"] = _elapsed_ms(phase_start)
-        
-        # 6. Konwersja wyniku do base64
-        phase_start = time.perf_counter()
-        _, buffer_res = cv2.imencode('.jpg', result_img, [cv2.IMWRITE_JPEG_QUALITY, 80])
-        timings_ms["encodeResultJpeg"] = _elapsed_ms(phase_start)
-        counters["resultJpegBytes"] = int(len(buffer_res))
+        result_image_payload: str | None = None
+        if include_image:
+            phase_start = time.perf_counter()
+            result_img = draw_results(plan_img, results)
+            timings_ms["drawResults"] = _elapsed_ms(phase_start)
 
-        phase_start = time.perf_counter()
-        result_base64 = base64.b64encode(buffer_res).decode('utf-8')
-        timings_ms["base64Result"] = _elapsed_ms(phase_start)
+            phase_start = time.perf_counter()
+            _, buffer_res = cv2.imencode('.jpg', result_img, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            timings_ms["encodeResultJpeg"] = _elapsed_ms(phase_start)
+            counters["resultJpegBytes"] = int(len(buffer_res))
+
+            phase_start = time.perf_counter()
+            result_base64 = base64.b64encode(buffer_res).decode('utf-8')
+            result_image_payload = f"data:image/jpeg;base64,{result_base64}"
+            timings_ms["base64Result"] = _elapsed_ms(phase_start)
+        else:
+            timings_ms["drawResults"] = 0.0
+            timings_ms["encodeResultJpeg"] = 0.0
+            timings_ms["base64Result"] = 0.0
+            counters["resultJpegBytes"] = 0
         
         # Przygotowujemy dane o ramkach dla frontendu (opcjonalnie)
         # Na razie wysyłamy gotowy obraz i listę wyników
@@ -442,7 +450,7 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
             "analysisContext": analysis_context,
             "results": formatted_results,
             "boxes": all_boxes,
-            "resultImage": f"data:image/jpeg;base64,{result_base64}",
+            "resultImage": result_image_payload,
         }
         if include_debug:
             response_payload["performance"] = performance
@@ -454,7 +462,7 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
                 "analysisContext": analysis_context,
                 "results": formatted_results,
                 "boxes": all_boxes,
-                "resultImageLength": len(response_payload["resultImage"]),
+                "resultImageLength": len(response_payload["resultImage"] or ""),
                 "performance": performance,
             }
             SNAPSHOT_EXECUTOR.submit(

@@ -166,6 +166,7 @@ function App() {
 
   const handleDetect = async () => {
     if (!sessionId) return;
+    const detectStartedAt = performance.now();
     detectRequestSeqRef.current += 1;
     const requestSeq = detectRequestSeqRef.current;
     detectAbortRef.current?.abort();
@@ -179,6 +180,7 @@ function App() {
     setAnalysisContext(null);
     setFocusedBoxId(null);
     try {
+      const fetchStartedAt = performance.now();
       const response = await fetch(withNoCache(`/api/analyze?session_id=${sessionId}`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -191,17 +193,32 @@ function App() {
             width: Math.round(z.width),
             height: Math.round(z.height),
           })),
-          hidden_layers: layers.filter(l => !l.visible).map(l => l.name)
+          hidden_layers: layers.filter(l => !l.visible).map(l => l.name),
+          include_image: false,
         })
       });
+      const responseReceivedAt = performance.now();
       if (!response.ok) throw new Error('Błąd serwera');
       const data = await response.json();
+      const jsonParsedAt = performance.now();
       if (requestSeq !== detectRequestSeqRef.current) return;
       setResults(data.results);
       setBoxes(data.boxes || []);
       setAnalysisContext(data.analysisContext || null);
-      setPdfPreview(data.resultImage);
+      if (data.resultImage) setPdfPreview(data.resultImage);
       setFocusedBoxId(null);
+      window.setTimeout(() => {
+        const uiSettledAt = performance.now();
+        console.info('[ElektroScan timing]', {
+          totalMs: Math.round(uiSettledAt - detectStartedAt),
+          requestWaitMs: Math.round(responseReceivedAt - fetchStartedAt),
+          jsonParseMs: Math.round(jsonParsedAt - responseReceivedAt),
+          reactApplyApproxMs: Math.round(uiSettledAt - jsonParsedAt),
+          backendMs: Math.round(data.performance?.backendTimingsMs?.total ?? 0),
+          detectorMs: Math.round(data.performance?.backendTimingsMs?.detectSymbolsTotal ?? 0),
+          boxes: data.boxes?.length ?? 0,
+        });
+      }, 0);
     } catch (error) {
       if ((error as Error).name === 'AbortError') return;
       console.error(error);
