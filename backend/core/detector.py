@@ -13,9 +13,24 @@ from concurrent.futures import ThreadPoolExecutor
 import cv2
 import numpy as np
 
-from core.detector_clustering import _cluster_candidates, _prefilter_candidates, _prefilter_raw_template_hits
+from core.detector_clustering import _bbox_metrics, _cluster_candidates, _prefilter_candidates, _prefilter_raw_template_hits
 from core.detector_config import (
     DEFAULT_PDF_DPI,
+    DEBUG_ACCEPTED_UNCERTAIN_CANDIDATES_LIMIT,
+    DEBUG_ACCEPTED_UNCERTAIN_MAX_CONTEXT_PURITY,
+    DEBUG_ACCEPTED_UNCERTAIN_MAX_SCORE,
+    DEBUG_ACCEPTED_UNCERTAIN_NEARBY_PX,
+    DEBUG_CANDIDATES_LIMIT,
+    DEBUG_CONFLICT_CANDIDATES_LIMIT,
+    DEBUG_CONFLICT_MAX_SCORE_DROP,
+    DEBUG_CONFLICT_MIN_IOM,
+    DEBUG_NEAR_UNCERTAIN_COMPONENT_PX,
+    DEBUG_REJECTED_CANDIDATES_LIMIT,
+    DEBUG_REJECTED_MIN_MATCH,
+    DEBUG_UNEXPLAINED_CANDIDATES_LIMIT,
+    DEBUG_UNEXPLAINED_MAX_AREA,
+    DEBUG_UNEXPLAINED_MIN_AREA,
+    DEBUG_UNEXPLAINED_PER_UNCERTAIN_BOX,
     DETECTOR_POSTPROCESS_MAX_WORKERS,
     DETECTOR_SCAN_MAX_WORKERS,
     LABEL_CONTENT_SCAN_MIN_PIXELS,
@@ -58,6 +73,331 @@ def _is_content_scan_eligible(variant: TemplateVariant) -> bool:
         return False
 
     return True
+
+
+def _hit_score(hit: CandidateHit) -> float:
+    """Return the best available confidence-like score for debug ranking."""
+
+    return float(hit.verification_score or hit.content_score or hit.match_score)
+
+
+def _bbox_center(bbox: tuple[int, int, int, int]) -> tuple[float, float]:
+    x, y, w, h = [int(value) for value in bbox]
+    return (x + w / 2.0, y + h / 2.0)
+
+
+def _debug_candidate_from_hit(
+    hit: CandidateHit,
+    templates: list[TemplateInfo],
+    reason: str,
+    *,
+    related_hit: CandidateHit | None = None,
+) -> dict:
+    """Serialize a non-final candidate for HITL/debug overlays."""
+
+    x, y, w, h = [int(value) for value in hit.bbox]
+    payload = {
+        "id": f"debug_{reason}_{hit.template_id}_{x}_{y}_{w}_{h}_{hit.rotation}_{int(hit.scale * 100)}_{int(hit.mirrored)}",
+        "reason": reason,
+        "symbolName": templates[hit.template_id].name,
+        "x": x,
+        "y": y,
+        "width": w,
+        "height": h,
+        "confidence": round(float(hit.match_score), 3),
+        "verificationScore": round(float(hit.verification_score), 3),
+        "coverage": round(float(hit.coverage), 3),
+        "purity": round(float(hit.purity), 3),
+        "contextPurity": round(float(hit.context_purity), 3),
+        "colorSimilarity": round(float(hit.color_similarity), 3),
+        "rotation": int(hit.rotation),
+        "scale": round(float(hit.scale), 3),
+        "mirrored": bool(hit.mirrored),
+        "source": hit.source,
+        "isTextLabel": bool(hit.is_text_label),
+        "contentScore": round(float(hit.content_score), 3),
+    }
+    if related_hit is not None:
+        rx, ry, rw, rh = [int(value) for value in related_hit.bbox]
+        payload["relatedFinal"] = {
+            "symbolName": templates[related_hit.template_id].name,
+            "bbox": [rx, ry, rw, rh],
+            "verificationScore": round(float(related_hit.verification_score), 3),
+            "source": related_hit.source,
+        }
+    return payload
+
+
+def _debug_candidate_from_component(
+    component_bbox: tuple[int, int, int, int],
+    area: int,
+) -> dict:
+    """Serialize an unexplained foreground component for HITL/debug overlays."""
+
+    x, y, w, h = component_bbox
+    return {
+        "id": f"debug_unexplained_component_{x}_{y}_{w}_{h}",
+        "reason": "unexplained_component",
+        "symbolName": "possible_missed",
+        "x": int(x),
+        "y": int(y),
+        "width": int(w),
+        "height": int(h),
+        "confidence": 0.0,
+        "verificationScore": 0.0,
+        "coverage": 0.0,
+        "purity": 0.0,
+        "contextPurity": 0.0,
+        "colorSimilarity": 0.0,
+        "rotation": 0,
+        "scale": 1.0,
+        "mirrored": False,
+        "source": "unexplained_component",
+        "area": int(area),
+    }
+
+
+def _bbox_center_inside(
+    inner_bbox: tuple[int, int, int, int],
+    outer_bbox: tuple[int, int, int, int],
+) -> bool:
+    """Return True when the inner bbox center falls inside outer bbox."""
+
+    x, y, w, h = [int(value) for value in inner_bbox]
+    ox, oy, ow, oh = [int(value) for value in outer_bbox]
+    cx = x + w / 2.0
+    cy = y + h / 2.0
+    return ox <= cx <= ox + ow and oy <= cy <= oy + oh
+
+
+def _is_symbol_like_unexplained_component(
+    bbox: tuple[int, int, int, int],
+    area: int,
+) -> bool:
+    """Filter debug-only components down to compact, symbol-like shapes."""
+
+    _, _, w, h = [int(value) for value in bbox]
+    if w <= 3 or h <= 3:
+        return False
+
+    bbox_area = max(1, w * h)
+    density = float(area) / float(bbox_area)
+    aspect = max(w / max(1, h), h / max(1, w))
+
+    # Long, flat connected components are usually circuit text labels or notes.
+    if aspect >= 3.2 and min(w, h) < 24:
+        return False
+
+    # Very sparse huge strokes are usually architectural/background remnants.
+    if bbox_area > 4500 and density < 0.16:
+        return False
+
+    return True
+
+
+def _unexplained_component_score(
+    bbox: tuple[int, int, int, int],
+    area: int,
+) -> float:
+    """Rank compact debug components ahead of long annotation fragments."""
+
+    _, _, w, h = [int(value) for value in bbox]
+    aspect = max(w / max(1, h), h / max(1, w))
+    bbox_area = max(1, w * h)
+    density = float(area) / float(bbox_area)
+    return float(area) * density / max(1.0, aspect)
+
+
+def _accepted_uncertainty_score(hit: CandidateHit, final_hits: list[CandidateHit]) -> float:
+    """Rank accepted detections that are worth human review in crowded areas."""
+
+    score = _hit_score(hit)
+    cx, cy = _bbox_center(hit.bbox)
+    nearby = 0
+    for other in final_hits:
+        if other is hit:
+            continue
+        ox, oy = _bbox_center(other.bbox)
+        if abs(cx - ox) <= DEBUG_ACCEPTED_UNCERTAIN_NEARBY_PX and abs(cy - oy) <= DEBUG_ACCEPTED_UNCERTAIN_NEARBY_PX:
+            nearby += 1
+
+    if nearby == 0:
+        return 0.0
+
+    low_score = max(0.0, DEBUG_ACCEPTED_UNCERTAIN_MAX_SCORE - score)
+    low_context = max(0.0, DEBUG_ACCEPTED_UNCERTAIN_MAX_CONTEXT_PURITY - float(hit.context_purity)) * 2.0
+    low_coverage = max(0.0, 0.70 - float(hit.coverage)) * 0.50
+    quality_signal = low_score + low_context + low_coverage
+    if quality_signal <= 0.0:
+        return 0.0
+
+    crowding = min(nearby, 4) * 0.04
+    return quality_signal + crowding
+
+
+def _collect_debug_candidates(
+    *,
+    rejected_hits: list[CandidateHit],
+    validated_candidates: list[CandidateHit],
+    final_hits: list[CandidateHit],
+    templates: list[TemplateInfo],
+    plan_image: np.ndarray,
+    exclude_rects: list[tuple[int, int, int, int]],
+) -> list[dict]:
+    """Build non-final hints for HITL without changing accepted detections."""
+
+    debug_candidates: list[dict] = []
+    seen: set[tuple[str, int, int, int, int, str]] = set()
+
+    def add(payload: dict) -> None:
+        key = (
+            str(payload.get("symbolName", "")),
+            int(payload.get("x", 0)),
+            int(payload.get("y", 0)),
+            int(payload.get("width", 0)),
+            int(payload.get("height", 0)),
+            str(payload.get("reason", "")),
+        )
+        if key in seen:
+            return
+        seen.add(key)
+        debug_candidates.append(payload)
+
+    rejected_count = 0
+    for candidate in sorted(rejected_hits, key=_hit_score, reverse=True):
+        if len(debug_candidates) >= DEBUG_CANDIDATES_LIMIT or rejected_count >= DEBUG_REJECTED_CANDIDATES_LIMIT:
+            break
+        if candidate.match_score < DEBUG_REJECTED_MIN_MATCH:
+            continue
+        reason = "rejected_low_content" if candidate.is_text_label else "rejected_candidate"
+        add(_debug_candidate_from_hit(candidate, templates, reason))
+        rejected_count += 1
+
+    accepted_uncertain_count = 0
+    accepted_uncertain_hits = [
+        (_accepted_uncertainty_score(hit, final_hits), hit)
+        for hit in final_hits
+        if not hit.is_text_label
+    ]
+    for uncertainty, hit in sorted(accepted_uncertain_hits, key=lambda item: item[0], reverse=True):
+        if (
+            len(debug_candidates) >= DEBUG_CANDIDATES_LIMIT
+            or accepted_uncertain_count >= DEBUG_ACCEPTED_UNCERTAIN_CANDIDATES_LIMIT
+        ):
+            break
+        if uncertainty <= 0.0:
+            break
+        add(_debug_candidate_from_hit(hit, templates, "accepted_uncertain", related_hit=hit))
+        accepted_uncertain_count += 1
+
+    if len(debug_candidates) < DEBUG_CANDIDATES_LIMIT:
+        explained = np.zeros(plan_image.shape[:2], dtype=np.uint8)
+        uncertain_halos = np.zeros(plan_image.shape[:2], dtype=np.uint8)
+        uncertain_boxes: list[tuple[int, int, int, int]] = []
+        for hit in final_hits:
+            x, y, w, h = [int(value) for value in hit.bbox]
+            uncertainty = _accepted_uncertainty_score(hit, final_hits)
+            if uncertainty > 0.0:
+                pad = DEBUG_NEAR_UNCERTAIN_COMPONENT_PX
+                cv2.rectangle(
+                    uncertain_halos,
+                    (max(0, x - pad), max(0, y - pad)),
+                    (min(plan_image.shape[1], x + w + pad), min(plan_image.shape[0], y + h + pad)),
+                    255,
+                    -1,
+                )
+                uncertain_boxes.append((x, y, w, h))
+            else:
+                cv2.rectangle(explained, (x, y), (x + w, y + h), 255, -1)
+        for ex, ey, ew, eh in exclude_rects:
+            cv2.rectangle(explained, (ex, ey), (ex + ew, ey + eh), 255, -1)
+
+        plan_mask = _hsv_mask(plan_image, dilate=False)
+        unexplained = cv2.bitwise_and(plan_mask, cv2.bitwise_not(explained))
+        components, _, stats, _ = cv2.connectedComponentsWithStats(unexplained, connectivity=8)
+        components_payloads: list[tuple[float, dict]] = []
+        near_uncertain_payloads: dict[int, list[tuple[float, dict]]] = {
+            index: [] for index in range(len(uncertain_boxes))
+        }
+        for component_id in range(1, components):
+            area = int(stats[component_id, cv2.CC_STAT_AREA])
+            if area < DEBUG_UNEXPLAINED_MIN_AREA or area > DEBUG_UNEXPLAINED_MAX_AREA:
+                continue
+            x = int(stats[component_id, cv2.CC_STAT_LEFT])
+            y = int(stats[component_id, cv2.CC_STAT_TOP])
+            w = int(stats[component_id, cv2.CC_STAT_WIDTH])
+            h = int(stats[component_id, cv2.CC_STAT_HEIGHT])
+            component_bbox = (x, y, w, h)
+            cx, cy = _bbox_center(component_bbox)
+            near_uncertain_indexes = [
+                index
+                for index, uncertain_box in enumerate(uncertain_boxes)
+                if abs(cx - _bbox_center(uncertain_box)[0]) <= DEBUG_NEAR_UNCERTAIN_COMPONENT_PX
+                and abs(cy - _bbox_center(uncertain_box)[1]) <= DEBUG_NEAR_UNCERTAIN_COMPONENT_PX
+            ]
+            near_uncertain = bool(near_uncertain_indexes)
+            if not near_uncertain and not _is_symbol_like_unexplained_component(component_bbox, area):
+                continue
+            if near_uncertain and (w <= 3 or h <= 3):
+                continue
+            score = _unexplained_component_score(component_bbox, area) + (1000.0 if near_uncertain else 0.0)
+            payload = _debug_candidate_from_component(component_bbox, area)
+            components_payloads.append((score, payload))
+            for index in near_uncertain_indexes:
+                near_uncertain_payloads[index].append((score, payload))
+
+        unexplained_count = 0
+        for payloads in near_uncertain_payloads.values():
+            for _, payload in sorted(payloads, key=lambda item: item[0], reverse=True)[:DEBUG_UNEXPLAINED_PER_UNCERTAIN_BOX]:
+                if (
+                    len(debug_candidates) >= DEBUG_CANDIDATES_LIMIT
+                    or unexplained_count >= DEBUG_UNEXPLAINED_CANDIDATES_LIMIT
+                ):
+                    break
+                add(payload)
+                unexplained_count += 1
+            if (
+                len(debug_candidates) >= DEBUG_CANDIDATES_LIMIT
+                or unexplained_count >= DEBUG_UNEXPLAINED_CANDIDATES_LIMIT
+            ):
+                break
+
+        for _, payload in sorted(components_payloads, key=lambda item: item[0], reverse=True):
+            if (
+                len(debug_candidates) >= DEBUG_CANDIDATES_LIMIT
+                or unexplained_count >= DEBUG_UNEXPLAINED_CANDIDATES_LIMIT
+            ):
+                break
+            add(payload)
+            unexplained_count += 1
+
+    conflict_count = 0
+    for candidate in sorted(validated_candidates, key=_hit_score, reverse=True):
+        if len(debug_candidates) >= DEBUG_CANDIDATES_LIMIT or conflict_count >= DEBUG_CONFLICT_CANDIDATES_LIMIT:
+            break
+        for final_hit in final_hits:
+            if candidate is final_hit:
+                continue
+            if candidate.template_id == final_hit.template_id and candidate.bbox == final_hit.bbox:
+                continue
+            _, _, iom, _ = _bbox_metrics(candidate.bbox, final_hit.bbox)
+            if iom < DEBUG_CONFLICT_MIN_IOM:
+                continue
+            candidate_score = _hit_score(candidate)
+            final_score = _hit_score(final_hit)
+            if candidate_score + DEBUG_CONFLICT_MAX_SCORE_DROP < final_score:
+                continue
+            if _bbox_center_inside(candidate.bbox, final_hit.bbox) and candidate_score <= final_score + 0.03:
+                continue
+            if candidate.template_id == final_hit.template_id:
+                reason = "partial_ghost"
+            else:
+                reason = "overlap_conflict"
+            add(_debug_candidate_from_hit(candidate, templates, reason, related_hit=final_hit))
+            conflict_count += 1
+            break
+
+    return debug_candidates[:DEBUG_CANDIDATES_LIMIT]
 
 
 def detect_symbols(
@@ -376,7 +716,7 @@ def detect_symbols(
     phase_start = time.perf_counter()
     postprocess_workers = max(1, DETECTOR_POSTPROCESS_MAX_WORKERS)
 
-    def _validate_and_promote_hit(hit: CandidateHit) -> tuple[CandidateHit, CandidateHit] | None:
+    def _validate_and_promote_hit(hit: CandidateHit) -> tuple[CandidateHit, CandidateHit, CandidateHit | None]:
         plan_mask = plan_masks_by_template[hit.template_id]
         if _validate_template_hit(hit, plan_mask, plan_image):
             promoted_hit = _maybe_promote_socket_06_to_07(
@@ -388,17 +728,21 @@ def detect_symbols(
                 variants_lookup,
                 socket_07_promotions,
             )
-            return hit, promoted_hit
-        return None
+            return hit, promoted_hit, None
+        return hit, hit, hit
 
     validated_hits: list[CandidateHit] = []
+    rejected_hits: list[CandidateHit] = []
     validation_workers = max(1, min(len(raw_template_hits), postprocess_workers))
     if raw_template_hits:
         with ThreadPoolExecutor(max_workers=validation_workers) as pool:
             for validation_result in pool.map(_validate_and_promote_hit, raw_template_hits):
                 if validation_result is None:
                     continue
-                original_hit, promoted_hit = validation_result
+                original_hit, promoted_hit, rejected_hit = validation_result
+                if rejected_hit is not None:
+                    rejected_hits.append(rejected_hit)
+                    continue
                 if promoted_hit.template_id != original_hit.template_id or promoted_hit.bbox != original_hit.bbox:
                     diagnostics["promoted_targeted_hits"] += 1
                 validated_hits.append(promoted_hit)
@@ -449,6 +793,22 @@ def detect_symbols(
     diagnostics["final_hits"] = len(final_hits)
     timings["clustering"] = time.perf_counter() - phase_start
 
+    phase_start = time.perf_counter()
+    debug_candidates = (
+        _collect_debug_candidates(
+            rejected_hits=rejected_hits,
+            validated_candidates=prefiltered_candidates,
+            final_hits=final_hits,
+            templates=templates,
+            plan_image=plan_image,
+            exclude_rects=exclude_rects,
+        )
+        if debug_profile is not None
+        else []
+    )
+    diagnostics["debug_candidates"] = len(debug_candidates)
+    timings["debug_candidates"] = time.perf_counter() - phase_start
+
     timings_ms = {
         name: round(seconds * 1000.0, 3)
         for name, seconds in timings.items()
@@ -475,6 +835,7 @@ def detect_symbols(
                     "foregroundPixels": int(diagnostics["roi_foreground_pixels"]),
                     "fullImageAreaPixels": int(plan_image.shape[0] * plan_image.shape[1]),
                 },
+                "debugCandidates": debug_candidates,
                 "slowestPhase": max(timings_ms.items(), key=lambda item: item[1])[0]
                 if timings_ms
                 else None,

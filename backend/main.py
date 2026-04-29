@@ -458,6 +458,7 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
         }
         if include_debug:
             response_payload["performance"] = performance
+            response_payload["debugCandidates"] = detector_profile.get("debugCandidates", [])
 
         snapshot_queued = False
         try:
@@ -466,6 +467,7 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
                 "analysisContext": analysis_context,
                 "results": formatted_results,
                 "boxes": all_boxes,
+                "debugCandidates": detector_profile.get("debugCandidates", []) if include_debug else [],
                 "resultImageLength": len(response_payload["resultImage"] or ""),
                 "performance": performance,
             }

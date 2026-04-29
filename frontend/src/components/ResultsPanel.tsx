@@ -27,6 +27,7 @@ interface Box {
   analysisSession?: string;
   sourcePdf?: string;
   hiddenLayersUsed?: string[];
+  reason?: string;
 }
 
 interface ResultGroup {
@@ -41,6 +42,11 @@ interface ResultsPanelProps {
   focusedBoxId?: string | null;
   onFocusBox?: (id: string) => void;
   onRejectBox: (id: string) => void;
+  onChangeBoxSymbol?: (id: string, symbolName: string) => void;
+  symbolNames?: string[];
+  debugCandidates?: Box[];
+  onAcceptDebugCandidate?: (box: Box) => void;
+  onDismissDebugCandidate?: (id: string) => void;
   onTemplateUploaded?: () => void;
 }
 
@@ -50,6 +56,11 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
   focusedBoxId,
   onFocusBox,
   onRejectBox,
+  onChangeBoxSymbol,
+  symbolNames = [],
+  debugCandidates = [],
+  onAcceptDebugCandidate,
+  onDismissDebugCandidate,
   onTemplateUploaded,
 }) => {
   const [activeTab, setActiveTab] = useState<'correction' | 'cost'>('correction');
@@ -120,6 +131,25 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
   };
 
   const empty = results.length === 0;
+  const allSymbolNames = Array.from(new Set([...symbolNames, ...results.map(result => result.name)])).sort();
+  const reasonLabel = (reason?: string) => {
+    switch (reason) {
+      case 'overlap_conflict':
+        return 'konflikt';
+      case 'partial_ghost':
+        return 'ghost';
+      case 'rejected_low_content':
+        return 'niska tresc';
+      case 'unexplained_component':
+        return 'brak?';
+      case 'accepted_uncertain':
+        return 'sprawdź';
+      case 'rejected_candidate':
+        return 'możliwy';
+      default:
+        return 'debug';
+    }
+  };
 
   return (
     <div className="results-panel">
@@ -219,6 +249,59 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
                 />
               </div>
 
+              {debugCandidates.length > 0 && (
+                <div className="card" style={{ padding: 12, borderColor: 'rgba(239,68,68,0.35)' }}>
+                  <div className="flex-row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
+                    <span className="text-xs" style={{ color: '#fca5a5', textTransform: 'uppercase', fontWeight: 800 }}>
+                      HITL / do sprawdzenia
+                    </span>
+                    <span className="text-xs" style={{ color: '#fca5a5', fontWeight: 800 }}>{debugCandidates.length}</span>
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 180, overflowY: 'auto' }}>
+                    {debugCandidates.slice(0, 20).map(candidate => (
+                      <div
+                        key={candidate.id}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 6,
+                          padding: '6px 0',
+                          borderTop: '1px solid rgba(255,255,255,0.06)',
+                        }}
+                      >
+                        <button
+                          onClick={() => onFocusBox?.(candidate.id)}
+                          style={{ flex: 1, background: 'none', border: 'none', color: 'var(--text-primary)', textAlign: 'left', cursor: 'pointer' }}
+                        >
+                          <div style={{ fontSize: 11, fontWeight: 800, color: '#fca5a5' }}>
+                            {reasonLabel(candidate.reason)} · {candidate.symbolName.split('_')[0]}
+                          </div>
+                          <div className="text-xs text-muted">x:{candidate.x} y:{candidate.y}</div>
+                        </button>
+                        {onAcceptDebugCandidate && candidate.reason !== 'accepted_uncertain' && (
+                          <button
+                            onClick={() => onAcceptDebugCandidate(candidate)}
+                            title="Dodaj jako reczny box"
+                            style={{ border: 'none', background: '#22c55e', color: '#fff', borderRadius: 4, padding: '3px 6px', fontSize: 10, fontWeight: 800, cursor: 'pointer' }}
+                          >
+                            +
+                          </button>
+                        )}
+                        {onDismissDebugCandidate && (
+                          <button
+                            onClick={() => onDismissDebugCandidate(candidate.id)}
+                            title="Ukryj sugestie"
+                            style={{ border: 'none', background: '#111827', color: '#fff', borderRadius: 4, padding: '3px 6px', fontSize: 10, fontWeight: 800, cursor: 'pointer' }}
+                          >
+                            ×
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* Accordion z grupami */}
               {results.map(group => {
                 const groupBoxes = boxesBySymbol[group.name] || [];
@@ -312,6 +395,27 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
                               <span className="text-xs text-muted" style={{ flex: 1 }}>
                                 x:{box.x} y:{box.y}
                               </span>
+                              {onChangeBoxSymbol && allSymbolNames.length > 0 && (
+                                <select
+                                  value={box.symbolName}
+                                  onClick={e => e.stopPropagation()}
+                                  onChange={e => onChangeBoxSymbol(box.id, e.target.value)}
+                                  title="Zmien klase symbolu"
+                                  style={{
+                                    maxWidth: 92,
+                                    background: 'var(--bg-main)',
+                                    color: 'var(--text-primary)',
+                                    border: '1px solid var(--border-light)',
+                                    borderRadius: 4,
+                                    fontSize: 10,
+                                    padding: '2px 4px',
+                                  }}
+                                >
+                                  {allSymbolNames.map(name => (
+                                    <option key={name} value={name}>{name.split('_')[0]}</option>
+                                  ))}
+                                </select>
+                              )}
                               {/* Odrzuć */}
                               <button
                                 onClick={e => { e.stopPropagation(); onRejectBox(box.id); }}

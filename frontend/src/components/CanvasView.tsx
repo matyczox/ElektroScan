@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect } from 'react';
-import { ZoomIn, ZoomOut, Maximize, Move, Slash, X } from 'lucide-react';
+import { AlertTriangle, Plus, ZoomIn, ZoomOut, Maximize, Move, Slash, X } from 'lucide-react';
 
 interface Box {
   id: string;
@@ -24,6 +24,13 @@ interface Box {
   analysisSession?: string;
   sourcePdf?: string;
   hiddenLayersUsed?: string[];
+  reason?: string;
+  relatedFinal?: {
+    symbolName?: string;
+    bbox?: [number, number, number, number];
+    verificationScore?: number;
+    source?: string;
+  };
 }
 
 interface ExcludedZone {
@@ -56,8 +63,11 @@ interface AnalysisContext {
 interface CanvasViewProps {
   imageSrc: string | null;
   boxes?: Box[];
+  debugCandidates?: Box[];
   analysisContext?: AnalysisContext | null;
   onBoxClick?: (id: string) => void;
+  onAcceptDebugCandidate?: (box: Box) => void;
+  onDismissDebugCandidate?: (id: string) => void;
   focusedBoxId?: string | null;
   excludedZones?: ExcludedZone[];
   onAddExcludedZone?: (x: number, y: number, w: number, h: number) => void;
@@ -69,8 +79,11 @@ interface CanvasViewProps {
 export const CanvasView: React.FC<CanvasViewProps> = ({
   imageSrc,
   boxes = [],
+  debugCandidates = [],
   analysisContext,
   onBoxClick,
+  onAcceptDebugCandidate,
+  onDismissDebugCandidate,
   focusedBoxId,
   excludedZones = [],
   onAddExcludedZone,
@@ -99,6 +112,7 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
   // Pulsowanie wybranej ramki
   const [pulsingId, setPulsingId] = useState<string | null>(null);
   const [copiedBoxId, setCopiedBoxId] = useState<string | null>(null);
+  const [hoveredDebugId, setHoveredDebugId] = useState<string | null>(null);
 
   useEffect(() => {
     if (imageSrc) {
@@ -115,7 +129,7 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
   // Kiedy focusedBoxId się zmienia → animuj pan do tej ramki
   useEffect(() => {
     if (!focusedBoxId || !containerRef.current) return;
-    const box = boxes.find(b => b.id === focusedBoxId);
+    const box = boxes.find(b => b.id === focusedBoxId) ?? debugCandidates.find(b => b.id === focusedBoxId);
     if (!box) return;
 
     const container = containerRef.current;
@@ -217,6 +231,15 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
       .map(candidate =>
         `${candidate.symbolName}@${candidate.x},${candidate.y},${candidate.width},${candidate.height}#${candidate.analysisId ?? analysisContext?.analysisId ?? 'n/a'}`
       );
+    const nearbyDebugCandidates = debugCandidates
+      .filter(candidate => {
+        const centerDx = Math.abs((candidate.x + candidate.width / 2) - (box.x + box.width / 2));
+        const centerDy = Math.abs((candidate.y + candidate.height / 2) - (box.y + box.height / 2));
+        return centerDx <= 110 && centerDy <= 110;
+      })
+      .map(candidate =>
+        `${candidate.reason ?? 'debug'}:${candidate.symbolName}@${candidate.x},${candidate.y},${candidate.width},${candidate.height}#${candidate.analysisId ?? analysisContext?.analysisId ?? 'n/a'}`
+      );
     const hiddenLayers = box.hiddenLayersUsed?.length
       ? box.hiddenLayersUsed.join(" | ")
       : analysisContext?.hiddenLayersUsed?.length
@@ -242,6 +265,8 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
       `scale=${formatDebugValue(box.scale)}`,
       `mirrored=${box.mirrored ? 'true' : 'false'}`,
       `source=${box.source ?? 'template'}`,
+      `reason=${box.reason ?? 'accepted_detection'}`,
+      `related_final=${box.relatedFinal ? `${box.relatedFinal.symbolName ?? 'n/a'}@${(box.relatedFinal.bbox ?? []).join(',')}#${formatDebugValue(box.relatedFinal.verificationScore)}` : '(none)'}`,
       `analysis_id=${box.analysisId ?? analysisContext?.analysisId ?? 'n/a'}`,
       `analysis_generated_utc=${box.analysisGeneratedUtc ?? analysisContext?.generatedAtUtc ?? 'n/a'}`,
       `analysis_session=${box.analysisSession ?? analysisContext?.sessionId ?? 'n/a'}`,
@@ -252,6 +277,8 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
       `hidden_layers_repr=${hiddenLayerReprs}`,
       `frontend_boxes_count=${boxes.length}`,
       `frontend_nearby_boxes=${nearbyBoxes.join(' || ') || '(none)'}`,
+      `frontend_debug_candidates_count=${debugCandidates.length}`,
+      `frontend_nearby_debug_candidates=${nearbyDebugCandidates.join(' || ') || '(none)'}`,
       `box_id=${box.id}`,
     ];
     return lines.join('\n');
@@ -268,6 +295,25 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
       }, 1600);
     } catch (error) {
       console.error('Nie udało się skopiować debug info boxa', error);
+    }
+  };
+
+  const debugReasonLabel = (reason?: string) => {
+    switch (reason) {
+      case 'overlap_conflict':
+        return 'Konflikt';
+      case 'partial_ghost':
+        return 'Ghost';
+      case 'rejected_low_content':
+        return 'Treść';
+      case 'unexplained_component':
+        return 'Brak?';
+      case 'accepted_uncertain':
+        return 'Sprawdź';
+      case 'rejected_candidate':
+        return 'Może';
+      default:
+        return 'Sprawdź';
     }
   };
 
@@ -303,6 +349,21 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
         >
           <Slash size={14} />
           {isZoneMode ? 'Rysuj...' : 'Strefa'}
+        </button>
+        <button
+          className="btn-secondary"
+          onClick={() => setIsManualMode(value => !value)}
+          title="Dodaj symbol ręcznie"
+          style={{
+            borderColor: isManualMode ? 'var(--accent-gold)' : undefined,
+            color: isManualMode ? 'var(--accent-gold)' : undefined,
+            padding: '6px 10px',
+            fontSize: 11,
+            fontWeight: 700,
+          }}
+        >
+          <Plus size={14} />
+          {isManualMode ? 'Kliknij plan' : 'Dodaj'}
         </button>
         <div style={{ width: 1, background: 'var(--border-light)', margin: '0 2px', alignSelf: 'stretch' }} />
         <button className="btn-secondary" style={{ padding: '6px 10px' }}
@@ -429,6 +490,133 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
                   <div style={{
                     position: 'absolute',
                     top: box.height + 4,
+                    left: 0,
+                    background: 'rgba(15, 23, 42, 0.92)',
+                    color: '#fff',
+                    fontSize: 10,
+                    fontWeight: 700,
+                    padding: '2px 6px',
+                    borderRadius: 4,
+                    whiteSpace: 'nowrap',
+                    pointerEvents: 'none',
+                    zIndex: 5,
+                  }}>
+                    Debug skopiowany
+                  </div>
+                )}
+              </div>
+            );
+          })}
+
+          {/* Debug / HITL candidates */}
+          {debugCandidates.map(candidate => {
+            const isFocused = focusedBoxId === candidate.id || pulsingId === candidate.id;
+            const isHovered = hoveredDebugId === candidate.id;
+            const isMissed = candidate.reason === 'unexplained_component';
+            const isUncertain = candidate.reason === 'accepted_uncertain';
+            const color = isMissed ? '#f97316' : '#ef4444';
+            return (
+              <div
+                key={`${analysisContext?.analysisId ?? 'na'}:${candidate.id}`}
+                onMouseEnter={() => setHoveredDebugId(candidate.id)}
+                onMouseLeave={() => setHoveredDebugId(current => current === candidate.id ? null : current)}
+                onClick={e => {
+                  e.stopPropagation();
+                  void copyBoxDebug(candidate);
+                }}
+                title={`HITL/debug: ${debugReasonLabel(candidate.reason)}\n${candidate.symbolName}\nKlik kopiuje debug`}
+                style={{
+                  position: 'absolute',
+                  left: candidate.x,
+                  top: candidate.y,
+                  width: candidate.width,
+                  height: candidate.height,
+                  border: `${isMissed ? 3 : 2}px dashed ${color}`,
+                  backgroundColor: isFocused || isHovered
+                    ? (isMissed ? 'rgba(249,115,22,0.20)' : 'rgba(239,68,68,0.16)')
+                    : (isMissed ? 'rgba(249,115,22,0.10)' : 'rgba(239,68,68,0.035)'),
+                  boxShadow: isFocused || isHovered ? `0 0 12px ${color}55` : 'none',
+                  cursor: 'pointer',
+                  boxSizing: 'border-box',
+                  opacity: isFocused || isHovered ? 1 : (isMissed ? 0.95 : 0.72),
+                  zIndex: isMissed ? 12 : isUncertain ? 9 : 10,
+                }}
+              >
+                <div style={{
+                  position: 'absolute',
+                  top: -19,
+                  left: -2,
+                  background: color,
+                  color: '#fff',
+                  fontSize: 9,
+                  fontWeight: 'bold',
+                  padding: '1px 5px',
+                  borderRadius: 2,
+                  whiteSpace: 'nowrap',
+                  pointerEvents: 'none',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 3,
+                }}>
+                  <AlertTriangle size={10} />
+                  {debugReasonLabel(candidate.reason)}
+                </div>
+                {(isFocused || isHovered) && (onAcceptDebugCandidate || onDismissDebugCandidate) && (
+                  <div
+                    style={{
+                      position: 'absolute',
+                      top: candidate.height + 4,
+                      left: 0,
+                      display: 'flex',
+                      gap: 4,
+                      transform: `scale(${1 / scale})`,
+                      transformOrigin: '0 0',
+                      zIndex: 8,
+                    }}
+                    onClick={e => e.stopPropagation()}
+                  >
+                    {onAcceptDebugCandidate && candidate.reason !== 'accepted_uncertain' && (
+                      <button
+                        onClick={() => onAcceptDebugCandidate(candidate)}
+                        style={{
+                          border: 'none',
+                          borderRadius: 4,
+                          padding: '3px 6px',
+                          background: '#22c55e',
+                          color: '#fff',
+                          fontSize: 10,
+                          fontWeight: 800,
+                          cursor: 'pointer',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        Dodaj
+                      </button>
+                    )}
+                    {onDismissDebugCandidate && (
+                      <button
+                        onClick={() => onDismissDebugCandidate(candidate.id)}
+                        style={{
+                          border: 'none',
+                          borderRadius: 4,
+                          padding: '3px 6px',
+                          background: '#111827',
+                          color: '#fff',
+                          fontSize: 10,
+                          fontWeight: 800,
+                          cursor: 'pointer',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        Ukryj
+                      </button>
+                    )}
+                  </div>
+                )}
+                {copiedBoxId === candidate.id && (
+                  <div style={{
+                    position: 'absolute',
+                    top: candidate.height + 4,
                     left: 0,
                     background: 'rgba(15, 23, 42, 0.92)',
                     color: '#fff',
