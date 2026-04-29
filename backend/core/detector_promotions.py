@@ -119,11 +119,15 @@ def _maybe_promote_socket_06_to_07(
                     rotation=rule.rotation,
                     mirrored=rule.mirrored,
                     transformed_mask=parent_variant.transformed_mask,
+                    content_mask=parent_variant.content_mask,
                     pixel_count=parent_variant.pixel_count,
+                    content_pixel_count=parent_variant.content_pixel_count,
+                    content_bbox=parent_variant.content_bbox,
                     bbox=parent_bbox,
                     match_score=local_match,
                     dominant_hsv=templates[rule.parent_template_id].dominant_hsv,
                     source=f"template_promoted_{rule.child_template_id}_to_{rule.parent_template_id}",
+                    is_text_label=templates[rule.parent_template_id].is_text_label,
                     promoted_from_template_id=hit.template_id,
                 )
                 if not _validate_template_hit(promoted_hit, promotion_plan_mask, plan_image):
@@ -274,11 +278,15 @@ def _maybe_promote_switch_parent_search(
                     rotation=parent_variant.rotation,
                     mirrored=parent_variant.mirrored,
                     transformed_mask=parent_variant.transformed_mask,
+                    content_mask=parent_variant.content_mask,
                     pixel_count=parent_variant.pixel_count,
+                    content_pixel_count=parent_variant.content_pixel_count,
+                    content_bbox=parent_variant.content_bbox,
                     bbox=parent_bbox,
                     match_score=local_match,
                     dominant_hsv=templates[rule.parent_template_id].dominant_hsv,
                     source=f"template_parent_search_{hit.template_id}_to_{rule.parent_template_id}",
+                    is_text_label=templates[rule.parent_template_id].is_text_label,
                     promoted_from_template_id=hit.template_id,
                 )
                 if not _validate_template_hit(promoted_hit, parent_plan_mask, plan_image):

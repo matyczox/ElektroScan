@@ -22,6 +22,9 @@ from core.detector_config import (
     RAW_PREFILTER_IOM_THRESHOLD,
     RAW_PREFILTER_IOU_THRESHOLD,
     RAW_PREFILTER_MIN_CANDIDATES,
+    TEXT_LABEL_FULLER_AREA_RATIO,
+    TEXT_LABEL_FULLER_MAX_CONTENT_DROP,
+    TEXT_LABEL_FULLER_MAX_VERIFICATION_DROP,
 )
 from core.detector_models import CandidateHit
 from core.detector_masks import _hue_distance
@@ -121,7 +124,10 @@ def _prefilter_candidates(candidates: list[CandidateHit]) -> list[CandidateHit]:
         return candidates
 
     boxes = [list(hit.bbox) for hit in candidates]
-    scores = [float(hit.verification_score or hit.match_score) for hit in candidates]
+    scores = [
+        float(hit.content_score if hit.is_text_label and hit.content_score > 0.0 else hit.verification_score or hit.match_score)
+        for hit in candidates
+    ]
 
     indices = cv2.dnn.NMSBoxes(
         boxes,
@@ -138,6 +144,9 @@ def _prefilter_candidates(candidates: list[CandidateHit]) -> list[CandidateHit]:
 
 def _raw_candidates_overlap_strongly(left: CandidateHit, right: CandidateHit) -> bool:
     """Detect duplicate raw peaks for the same template before expensive validation."""
+
+    if left.is_text_label or right.is_text_label:
+        return False
 
     inter_area, iou, iom, center_distance = _bbox_metrics(left.bbox, right.bbox)
     if inter_area <= 0:
@@ -175,14 +184,119 @@ def _prefilter_raw_template_hits(candidates: list[CandidateHit]) -> list[Candida
     return filtered
 
 
+def _suppress_same_template_ghosts(candidates: list[CandidateHit]) -> list[CandidateHit]:
+    """Remove weak interior ghosts surrounded by stronger hits of the same template."""
+
+    grouped: dict[int, list[CandidateHit]] = {}
+    for candidate in candidates:
+        grouped.setdefault(candidate.template_id, []).append(candidate)
+
+    suppressed: set[int] = set()
+    index_by_identity = {id(candidate): idx for idx, candidate in enumerate(candidates)}
+
+    for template_hits in grouped.values():
+        if len(template_hits) < 4:
+            continue
+
+        for candidate in template_hits:
+            if candidate.context_purity >= 0.34:
+                continue
+
+            cx, cy = _box_center(candidate.bbox)
+            candidate_diag = max(1.0, float(np.hypot(candidate.bbox[2], candidate.bbox[3])))
+            stronger: list[CandidateHit] = []
+            overlapping_stronger = 0
+
+            for other in template_hits:
+                if other is candidate:
+                    continue
+                if other.verification_score < candidate.verification_score + 0.08:
+                    continue
+
+                ox, oy = _box_center(other.bbox)
+                if float(np.hypot(cx - ox, cy - oy)) > candidate_diag * 1.65:
+                    continue
+
+                inter_area, _, _, _ = _bbox_metrics(candidate.bbox, other.bbox)
+                if inter_area > 0:
+                    overlapping_stronger += 1
+                stronger.append(other)
+
+            if len(stronger) < 3 or overlapping_stronger < 2:
+                continue
+
+            min_x = min(hit.bbox[0] for hit in stronger)
+            min_y = min(hit.bbox[1] for hit in stronger)
+            max_x = max(hit.bbox[0] + hit.bbox[2] for hit in stronger)
+            max_y = max(hit.bbox[1] + hit.bbox[3] for hit in stronger)
+            union_box = (min_x, min_y, max_x - min_x, max_y - min_y)
+            if _center_inside_box((cx, cy), union_box, margin_ratio=0.08):
+                suppressed.add(index_by_identity[id(candidate)])
+
+    if not suppressed:
+        return candidates
+
+    return [candidate for idx, candidate in enumerate(candidates) if idx not in suppressed]
+
+
 def _candidate_rank_key(hit: CandidateHit) -> tuple[float, float, float, int]:
     """Return the default winner ranking inside a cluster."""
+
+    if hit.is_text_label:
+        return (
+            float(hit.content_score),
+            float(hit.verification_score),
+            float(hit.match_score),
+            1 if hit.source == "pdf_text" else 0,
+        )
 
     return (
         float(hit.verification_score),
         float(hit.color_similarity),
         float(hit.match_score),
         1 if hit.source == "pdf_text" else 0,
+    )
+
+
+def _maybe_prefer_fuller_text_label(
+    group_hits: list[CandidateHit],
+    base_winner: CandidateHit,
+) -> CandidateHit:
+    """Prefer a fuller framed label over a smaller partial text overlap."""
+
+    if not base_winner.is_text_label:
+        return base_winner
+
+    base_area = max(1, base_winner.bbox[2] * base_winner.bbox[3])
+    contenders: list[CandidateHit] = []
+
+    for hit in group_hits:
+        if hit is base_winner or not hit.is_text_label:
+            continue
+
+        area = max(1, hit.bbox[2] * hit.bbox[3])
+        if area < base_area * TEXT_LABEL_FULLER_AREA_RATIO:
+            continue
+
+        if hit.content_score + TEXT_LABEL_FULLER_MAX_CONTENT_DROP < base_winner.content_score:
+            continue
+
+        if hit.verification_score + TEXT_LABEL_FULLER_MAX_VERIFICATION_DROP < base_winner.verification_score:
+            continue
+
+        contenders.append(hit)
+
+    if not contenders:
+        return base_winner
+
+    return max(
+        contenders + [base_winner],
+        key=lambda hit: (
+            max(1, hit.bbox[2] * hit.bbox[3]),
+            float(hit.content_score),
+            float(hit.verification_score),
+            float(hit.match_score),
+        ),
     )
 
 
@@ -193,6 +307,7 @@ def _select_cluster_winner(
     """Pick one winner per cluster, preferring promoted fuller symbols over simpler cores."""
 
     base_winner = max(group_hits, key=_candidate_rank_key)
+    base_winner = _maybe_prefer_fuller_text_label(group_hits, base_winner)
     override_candidates: list[CandidateHit] = []
 
     for hit in group_hits:
@@ -231,6 +346,10 @@ def _cluster_candidates(
 ) -> list[CandidateHit]:
     """Cluster class-agnostic overlaps and keep one winner per physical place."""
 
+    if not candidates:
+        return []
+
+    candidates = _suppress_same_template_ghosts(candidates)
     if not candidates:
         return []
 

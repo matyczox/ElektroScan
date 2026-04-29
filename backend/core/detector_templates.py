@@ -24,7 +24,7 @@ from core.detector_config import (
     SWITCH_FAMILY_MIN_CHILD_COVERAGE,
     SWITCH_FAMILY_MIN_CROP_PURITY,
 )
-from core.detector_masks import _dominant_hsv_color, _hsv_mask
+from core.detector_masks import _dominant_hsv_color, _extract_label_content_mask, _hsv_mask, _mask_bbox
 from core.detector_models import TargetedPromotionRule, TemplateInfo, TemplateVariant
 
 
@@ -47,9 +47,8 @@ def _derive_text_tokens(name: str) -> list[str]:
     normalized = _normalize_template_name(name)
     candidate = normalized.strip().upper()
 
-    # Only enable PDF-text lookup for templates that are themselves short text
-    # labels, e.g. "MSW". Extracted legend names are long descriptive phrases,
-    # and splitting them into fragments like "TM" or "INT" causes false routing.
+    # Only enable PDF-text lookup for templates whose whole name is a short
+    # alphanumeric label. Descriptive legend names are intentionally ignored.
     if not re.fullmatch(r"[A-Z0-9]+", candidate):
         return []
     if not (PDF_TEXT_MIN_TOKEN_LENGTH <= len(candidate) <= PDF_TEXT_MAX_TOKEN_LENGTH):
@@ -66,23 +65,38 @@ def _prepare_variants(template_id: int, template: TemplateInfo) -> list[Template
     variants: list[TemplateVariant] = []
     base_mask = template.mask
     template_prefix = _template_numeric_prefix(Path(template.path).name)
-    allow_mirror = template_prefix in MIRRORED_VARIANT_PREFIXES
+    allow_mirror = template.is_text_label or template_prefix in MIRRORED_VARIANT_PREFIXES
 
     for scale in SCALES:
         if scale != 1.0:
             new_w = max(1, int(round(base_mask.shape[1] * scale)))
             new_h = max(1, int(round(base_mask.shape[0] * scale)))
             scaled_mask = cv2.resize(base_mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+            scaled_content_mask = (
+                cv2.resize(template.content_mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+                if template.content_mask is not None
+                else None
+            )
         else:
             scaled_mask = base_mask
+            scaled_content_mask = template.content_mask
 
         mask_sources = [(False, scaled_mask)]
         if allow_mirror:
             mask_sources.append((True, cv2.flip(scaled_mask, 1)))
 
         for mirrored, source_mask in mask_sources:
+            source_content_mask = scaled_content_mask
+            if mirrored and source_content_mask is not None:
+                source_content_mask = cv2.flip(source_content_mask, 1)
+
             for rotation, rotate_code in ROTATIONS:
                 rot_mask = cv2.rotate(source_mask, rotate_code) if rotate_code is not None else source_mask
+                rot_content_mask = (
+                    cv2.rotate(source_content_mask, rotate_code)
+                    if rotate_code is not None and source_content_mask is not None
+                    else source_content_mask
+                )
                 pixel_count = int(cv2.countNonZero(rot_mask))
                 if pixel_count == 0:
                     continue
@@ -94,7 +108,10 @@ def _prepare_variants(template_id: int, template: TemplateInfo) -> list[Template
                         rotation=rotation,
                         mirrored=mirrored,
                         transformed_mask=rot_mask,
+                        content_mask=rot_content_mask,
                         pixel_count=pixel_count,
+                        content_pixel_count=int(cv2.countNonZero(rot_content_mask)) if rot_content_mask is not None else 0,
+                        content_bbox=_mask_bbox(rot_content_mask) if rot_content_mask is not None else None,
                         width=int(rot_mask.shape[1]),
                         height=int(rot_mask.shape[0]),
                     )
@@ -217,6 +234,12 @@ def load_templates(folder: str) -> list[TemplateInfo]:
         name_lower = name.lower()
         requires_precision = any(keyword in name_lower for keyword in PRECISE_KEYWORDS)
 
+        precise_mask = _hsv_mask(img, dilate=False)
+        content_mask = _extract_label_content_mask(precise_mask)
+        content_pixel_count = int(cv2.countNonZero(content_mask)) if content_mask is not None else 0
+        if content_mask is not None:
+            requires_precision = False
+
         mask = _hsv_mask(img, dilate=not requires_precision)
         pixel_count = int(cv2.countNonZero(mask))
 
@@ -233,6 +256,10 @@ def load_templates(folder: str) -> list[TemplateInfo]:
                 image_bgr=img,
                 dominant_hsv=_dominant_hsv_color(img),
                 text_tokens=_derive_text_tokens(name),
+                content_mask=content_mask,
+                content_pixel_count=content_pixel_count,
+                content_bbox=_mask_bbox(content_mask) if content_mask is not None else None,
+                is_text_label=content_mask is not None,
             )
         )
 

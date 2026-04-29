@@ -14,6 +14,15 @@ from core.detector_config import (
     DILATE_KERNEL,
     HSV_LOWER,
     HSV_UPPER,
+    LABEL_CONTENT_MAX_RATIO,
+    LABEL_CONTENT_MIN_PIXELS,
+    LABEL_CONTENT_MIN_RATIO,
+    LABEL_CONTENT_MIN_SCORE,
+    LABEL_CONTENT_SCORE_WEIGHT,
+    LABEL_FULL_WIDTH_CONTENT_MIN_SCORE,
+    LABEL_LINE_MIN_RATIO,
+    LABEL_TEMPLATE_MIN_ASPECT_RATIO,
+    LABEL_TEMPLATE_MIN_WIDTH,
     LOCAL_MAX_KERNEL_RATIO,
     LOW_MATCH_STRICT_THRESHOLD,
     MAX_CENTROID_OFFSET_RATIO,
@@ -152,6 +161,150 @@ def _find_local_maxima(
     peaks = [(int(x), int(y), float(match_result[y, x])) for y, x in zip(ys, xs)]
     peaks.sort(key=lambda item: item[2], reverse=True)
     return peaks
+
+
+def _mask_bbox(mask: np.ndarray) -> tuple[int, int, int, int] | None:
+    """Return the tight bbox around foreground pixels in a binary mask."""
+
+    ys, xs = np.where(mask > 0)
+    if len(xs) == 0 or len(ys) == 0:
+        return None
+
+    x0 = int(xs.min())
+    y0 = int(ys.min())
+    x1 = int(xs.max()) + 1
+    y1 = int(ys.max()) + 1
+    return (x0, y0, x1 - x0, y1 - y0)
+
+
+def _tight_mask_crop(mask: np.ndarray | None) -> np.ndarray | None:
+    """Crop a mask to its foreground bbox."""
+
+    if mask is None:
+        return None
+
+    bbox = _mask_bbox(mask)
+    if bbox is None:
+        return None
+
+    x, y, w, h = bbox
+    return mask[y : y + h, x : x + w]
+
+
+def _extract_label_content_mask(mask: np.ndarray) -> np.ndarray | None:
+    """Extract glyph-like content from a label by removing long frame/line strokes."""
+
+    height, width = mask.shape[:2]
+    if width < LABEL_TEMPLATE_MIN_WIDTH:
+        return None
+    if width / max(1, height) < LABEL_TEMPLATE_MIN_ASPECT_RATIO:
+        return None
+
+    foreground_pixels = int(cv2.countNonZero(mask))
+    if foreground_pixels <= 0:
+        return None
+
+    def collect_components(raw_content: np.ndarray, suffix_mode: bool) -> np.ndarray | None:
+        components, labels, stats, _ = cv2.connectedComponentsWithStats(raw_content, connectivity=8)
+        if suffix_mode and components <= 2:
+            return None
+
+        content = np.zeros_like(mask)
+        for component_id in range(1, components):
+            x = int(stats[component_id, cv2.CC_STAT_LEFT])
+            y = int(stats[component_id, cv2.CC_STAT_TOP])
+            w = int(stats[component_id, cv2.CC_STAT_WIDTH])
+            h = int(stats[component_id, cv2.CC_STAT_HEIGHT])
+            area = int(stats[component_id, cv2.CC_STAT_AREA])
+            if area < LABEL_CONTENT_MIN_PIXELS:
+                continue
+
+            center_x_ratio = (x + (w / 2.0)) / max(1, width)
+            if suffix_mode and center_x_ratio < 0.35:
+                continue
+
+            aspect = w / max(1, h)
+            inverse_aspect = h / max(1, w)
+            if aspect > 7.0 and h <= 3:
+                continue
+            if inverse_aspect > 7.0 and w <= 3:
+                continue
+            if w >= int(width * 0.92) or h >= int(height * 0.92):
+                continue
+
+            content[labels == component_id] = 255
+
+        content_pixels = int(cv2.countNonZero(content))
+        if content_pixels < LABEL_CONTENT_MIN_PIXELS:
+            return None
+
+        content_ratio = content_pixels / max(1, foreground_pixels)
+        if not (LABEL_CONTENT_MIN_RATIO <= content_ratio <= LABEL_CONTENT_MAX_RATIO):
+            return None
+
+        content_bbox = _mask_bbox(content)
+        if content_bbox is None:
+            return None
+
+        content_x, _, content_w, _ = content_bbox
+        if (
+            not suffix_mode
+            and content_x <= int(width * 0.10)
+            and content_w < int(width * 0.55)
+        ):
+            return None
+
+        return content
+
+    horizontal_len = max(5, min(width, int(round(width * 0.42))))
+    vertical_len = max(7, min(height, int(round(height * 0.72))))
+    horizontal = cv2.morphologyEx(
+        mask,
+        cv2.MORPH_OPEN,
+        np.ones((1, horizontal_len), np.uint8),
+    )
+    vertical = cv2.morphologyEx(
+        mask,
+        cv2.MORPH_OPEN,
+        np.ones((vertical_len, 1), np.uint8),
+    )
+    line_mask = cv2.bitwise_or(horizontal, vertical)
+    line_ratio = int(cv2.countNonZero(line_mask)) / max(1, foreground_pixels)
+    if line_ratio >= LABEL_LINE_MIN_RATIO:
+        content = collect_components(cv2.bitwise_and(mask, cv2.bitwise_not(line_mask)), suffix_mode=False)
+        if content is not None:
+            return content
+
+    return collect_components(mask, suffix_mode=True)
+
+
+def _label_content_score(
+    roi: np.ndarray,
+    template_content_mask: np.ndarray | None,
+    template_content_pixels: int,
+) -> float:
+    """Score how well the ROI matches the template glyph mask, ignoring frame strokes."""
+
+    if template_content_mask is None or template_content_pixels <= 0:
+        return 0.0
+    if roi.shape != template_content_mask.shape:
+        return 0.0
+
+    content_bbox = _mask_bbox(template_content_mask)
+    if content_bbox is None:
+        return 0.0
+
+    intersection = int(cv2.countNonZero(cv2.bitwise_and(roi, template_content_mask)))
+    coverage = intersection / max(1, template_content_pixels)
+
+    x, y, w, h = content_bbox
+    roi_content_window = roi[y : y + h, x : x + w]
+    foreground = int(cv2.countNonZero(roi_content_window))
+    if foreground <= 0:
+        return 0.0
+
+    purity = intersection / max(1, foreground)
+    return max(0.0, min(1.0, (0.60 * coverage) + (0.40 * purity)))
 
 
 def _roi_mask(mask: np.ndarray, bbox: tuple[int, int, int, int]) -> np.ndarray | None:
@@ -457,6 +610,28 @@ def _validate_template_hit(
         + 0.20 * context_purity
     )
 
+    content_score = 0.0
+    if hit.is_text_label:
+        content_score = _label_content_score(roi, hit.content_mask, hit.content_pixel_count)
+        content_threshold = LABEL_CONTENT_MIN_SCORE
+        if hit.content_bbox is not None:
+            content_width_ratio = hit.content_bbox[2] / max(1, hit.bbox[2])
+            if (
+                content_width_ratio >= 0.80
+                and hit.source == "template"
+                and hit.match_score >= 0.66
+                and coverage >= 0.64
+                and purity >= 0.74
+            ):
+                content_threshold = LABEL_FULL_WIDTH_CONTENT_MIN_SCORE
+
+        if content_score < content_threshold:
+            return False
+        verification_score = (
+            (1.0 - LABEL_CONTENT_SCORE_WEIGHT) * verification_score
+            + LABEL_CONTENT_SCORE_WEIGHT * content_score
+        )
+
     if verification_score < MIN_VERIFICATION_SCORE:
         return False
 
@@ -465,4 +640,5 @@ def _validate_template_hit(
     hit.context_purity = round(context_purity, 4)
     hit.color_similarity = round(color_similarity, 4)
     hit.verification_score = round(verification_score, 4)
+    hit.content_score = round(content_score, 4)
     return True

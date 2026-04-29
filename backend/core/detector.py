@@ -18,10 +18,13 @@ from core.detector_config import (
     DEFAULT_PDF_DPI,
     DETECTOR_POSTPROCESS_MAX_WORKERS,
     DETECTOR_SCAN_MAX_WORKERS,
+    LABEL_CONTENT_SCAN_MIN_PIXELS,
     MAX_PEAKS_PER_VARIANT,
+    MAX_TEXT_CONTENT_PEAKS_PER_VARIANT,
     MIN_TEMPLATE_PIXELS,
     OPENCV_NUM_THREADS,
     PRECISE_KEYWORDS,
+    TEXT_CONTENT_THRESHOLD,
     THRESHOLD_DILATED,
     THRESHOLD_PRECISE,
     _safe_cpu_count,
@@ -31,12 +34,30 @@ from core.detector_masks import (
     _color_mask_for_template,
     _find_local_maxima,
     _hsv_mask,
+    _tight_mask_crop,
     _validate_template_hit,
 )
-from core.detector_models import CandidateHit, Detection, DetectionResult, TemplateInfo
+from core.detector_models import CandidateHit, Detection, DetectionResult, TemplateInfo, TemplateVariant
 from core.detector_pdf import _collect_pdf_text_hits, _estimate_legend_exclude_rect
 from core.detector_promotions import _maybe_promote_socket_06_to_07, _maybe_promote_switch_parent_search
 from core.detector_templates import _build_socket_07_promotions, _prepare_variants, load_templates
+
+
+def _is_content_scan_eligible(variant: TemplateVariant) -> bool:
+    """Keep OCR-like scans limited to useful label glyph masks."""
+
+    if variant.content_mask is None or variant.content_bbox is None:
+        return False
+    if variant.content_pixel_count < LABEL_CONTENT_SCAN_MIN_PIXELS:
+        return False
+
+    content_crop = _tight_mask_crop(variant.content_mask)
+    if content_crop is None:
+        return False
+    if content_crop.shape == variant.transformed_mask.shape:
+        return False
+
+    return True
 
 
 def detect_symbols(
@@ -245,7 +266,8 @@ def detect_symbols(
                     break
 
             if too_many_peaks:
-                continue
+                variant_peaks.sort(key=lambda item: item[2], reverse=True)
+                variant_peaks = variant_peaks[:MAX_PEAKS_PER_VARIANT]
 
             for px, py, score in variant_peaks:
                 template_hits.append(
@@ -255,11 +277,71 @@ def detect_symbols(
                         rotation=variant.rotation,
                         mirrored=variant.mirrored,
                         transformed_mask=variant.transformed_mask,
+                        content_mask=variant.content_mask,
                         pixel_count=variant.pixel_count,
+                        content_pixel_count=variant.content_pixel_count,
+                        content_bbox=variant.content_bbox,
                         bbox=(px, py, variant.width, variant.height),
                         match_score=score,
                         dominant_hsv=template.dominant_hsv,
                         source="template",
+                        is_text_label=template.is_text_label,
+                    )
+                )
+
+            if not template.is_text_label or not _is_content_scan_eligible(variant):
+                continue
+
+            content_crop = _tight_mask_crop(variant.content_mask)
+            if content_crop is None or variant.content_bbox is None:
+                continue
+
+            content_x, content_y, content_w, content_h = variant.content_bbox
+            content_peaks: list[tuple[int, int, float]] = []
+            too_many_content_peaks = False
+            for roi_x, roi_y, roi_w, roi_h in search_rois:
+                if content_h > roi_h or content_w > roi_w:
+                    continue
+
+                roi_plan_mask = plan_mask[roi_y : roi_y + roi_h, roi_x : roi_x + roi_w]
+                match_result = cv2.matchTemplate(
+                    roi_plan_mask,
+                    content_crop,
+                    cv2.TM_CCOEFF_NORMED,
+                )
+                peaks = _find_local_maxima(
+                    match_result,
+                    threshold=TEXT_CONTENT_THRESHOLD,
+                    template_width=content_w,
+                    template_height=content_h,
+                )
+                if peaks:
+                    content_peaks.extend((roi_x + px, roi_y + py, score) for px, py, score in peaks)
+                if len(content_peaks) > MAX_TEXT_CONTENT_PEAKS_PER_VARIANT:
+                    too_many_content_peaks = True
+                    break
+
+            if too_many_content_peaks:
+                content_peaks.sort(key=lambda item: item[2], reverse=True)
+                content_peaks = content_peaks[:MAX_TEXT_CONTENT_PEAKS_PER_VARIANT]
+
+            for px, py, score in content_peaks:
+                template_hits.append(
+                    CandidateHit(
+                        template_id=template_id,
+                        scale=variant.scale,
+                        rotation=variant.rotation,
+                        mirrored=variant.mirrored,
+                        transformed_mask=variant.content_mask,
+                        content_mask=variant.content_mask,
+                        pixel_count=variant.content_pixel_count,
+                        content_pixel_count=variant.content_pixel_count,
+                        content_bbox=variant.content_bbox,
+                        bbox=(px - content_x, py - content_y, variant.width, variant.height),
+                        match_score=score,
+                        dominant_hsv=template.dominant_hsv,
+                        source="template_content",
+                        is_text_label=True,
                     )
                 )
 
@@ -447,6 +529,19 @@ def detect_symbols(
             context_purity=round(hit.context_purity, 3),
             color_similarity=round(hit.color_similarity, 3),
             verification_score=round(hit.verification_score, 3),
+            is_text_label=hit.is_text_label,
+            content_score=round(hit.content_score, 3),
+            content_bbox=(
+                (
+                    x + hit.content_bbox[0],
+                    y + hit.content_bbox[1],
+                    hit.content_bbox[2],
+                    hit.content_bbox[3],
+                )
+                if hit.content_bbox is not None
+                else None
+            ),
+            content_source=hit.source if hit.is_text_label else "",
         )
         per_template.setdefault(hit.template_id, []).append(detection)
 
