@@ -20,15 +20,14 @@ Kluczowa zmiana vs poprzednia wersja:
   Dzięki temu detector widzi sam symbol, a nie 'symbol + otoczenie'.
 """
 
-import cv2
-import numpy as np
-import fitz  # PyMuPDF
-import os
 import re
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
+import cv2
+import fitz  # PyMuPDF
+import numpy as np
 
 # ── Stałe ──────────────────────────────────────────────────────────────────
 
@@ -51,9 +50,9 @@ SYMBOL_PADDING = 2
 MIN_PIXEL_DENSITY = 0.05  # 5% — celowo nisko, żeby nie odrzucać cienkich symboli
 
 # Tolerancje dopasowania tekstu z PDF (w punktach PDF)
-TEXT_TOLERANCE_Y = 15   # ±15 pt w pionie
+TEXT_TOLERANCE_Y = 15  # ±15 pt w pionie
 TEXT_MAX_DISTANCE_X = 250  # max 250 pt w prawo
-TEXT_MIN_OVERLAP_X = -15   # lekkie najście tekstu na symbol dozwolone
+TEXT_MIN_OVERLAP_X = -15  # lekkie najście tekstu na symbol dozwolone
 
 # Maksymalna długość nazwy pliku
 MAX_FILENAME_LENGTH = 80
@@ -61,15 +60,16 @@ MAX_FILENAME_LENGTH = 80
 
 # ── Pomocnicze ─────────────────────────────────────────────────────────────
 
+
 def _sanitize_filename(text: str) -> str:
     """Czyści tekst do bezpiecznej nazwy pliku (ASCII, underscory)."""
-    text = text.strip().replace('\n', '_')
-    text = re.sub(r'[^\w\s-]', '', text)
-    text = re.sub(r'\s+', '_', text)
+    text = text.strip().replace("\n", "_")
+    text = re.sub(r"[^\w\s-]", "", text)
+    text = re.sub(r"\s+", "_", text)
     # Transliteracja polskich znaków (cv2.imwrite nie radzi z Unicode na Windows)
-    _PL = str.maketrans('ąćęłńóśźżĄĆĘŁŃÓŚŹŻ', 'acelnoszzACELNOSZZ')
+    _PL = str.maketrans("ąćęłńóśźżĄĆĘŁŃÓŚŹŻ", "acelnoszzACELNOSZZ")
     text = text.translate(_PL)
-    return text[:MAX_FILENAME_LENGTH].strip('_')
+    return text[:MAX_FILENAME_LENGTH].strip("_")
 
 
 def _hsv_mask(image_bgr: np.ndarray) -> np.ndarray:
@@ -81,6 +81,7 @@ def _hsv_mask(image_bgr: np.ndarray) -> np.ndarray:
 @dataclass
 class ExtractedSymbol:
     """Wynik ekstrakcji jednego symbolu z legendy."""
+
     name: str
     image: np.ndarray  # BGR z CZARNYM tłem (tylko kolorowe piksele symbolu)
     index: int
@@ -93,21 +94,18 @@ def get_pdf_layers(pdf_path: str) -> list[dict]:
     """
     doc = fitz.open(pdf_path)
     layers = []
-    
+
     # Próbujemy pobrać konfigurację warstw
     try:
         ui_configs = doc.layer_ui_configs()
         if ui_configs:
             for conf in ui_configs:
                 # conf to dict, np. {'text': 'Warstwa 1', 'depth': 0, 'on': True, ...}
-                if 'text' in conf:
-                    layers.append({
-                        "name": conf["text"],
-                        "visible": conf.get("on", True)
-                    })
+                if "text" in conf:
+                    layers.append({"name": conf["text"], "visible": conf.get("on", True)})
     except Exception as e:
         print(f"Błąd odczytu warstw: {e}")
-        
+
     return layers
 
 
@@ -202,7 +200,10 @@ def _prepare_doc_with_hidden_layers(
         print(f"Błąd ukrywania warstw: {e}")
         return doc
 
-def pdf_to_png(pdf_path: str, page: int = 0, dpi: int = 300, hidden_layers: list[str] = None) -> np.ndarray:
+
+def pdf_to_png(
+    pdf_path: str, page: int = 0, dpi: int = 300, hidden_layers: list[str] = None
+) -> np.ndarray:
     """
     Konwertuje stronę PDF do obrazu OpenCV (BGR).
     Pozwala na wyłączenie wybranych warstw (hidden_layers) przed renderowaniem.
@@ -222,7 +223,7 @@ def extract_legend(
     legend_keyword: str = "LEGENDA",
     legend_width_pt: float = 300,
     legend_height_pt: float = 550,
-    exclude_rects: list[tuple[int, int, int, int]] = None
+    exclude_rects: list[tuple[int, int, int, int]] = None,
 ) -> list[ExtractedSymbol]:
     """
     Wyciąga wzorce symboli z legendy planu elektrycznego.
@@ -290,7 +291,7 @@ def extract_legend(
         # Operujemy na ORYGINALNEJ masce (nie sklejonej) żeby znaleźć
         # dokładne granice kolorowych pikseli — sklejona maska jest zbyt
         # 'napompowana' przez MORPH_CLOSE i dałaby za duży bbox.
-        roi_mask = color_mask[y:y+h, x:x+w]
+        roi_mask = color_mask[y : y + h, x : x + w]
         colored_pixels = cv2.findNonZero(roi_mask)
 
         if colored_pixels is None:
@@ -365,16 +366,18 @@ def extract_legend(
 
         # ── Zapis (cv2.imencode + write_bytes zamiast imwrite dla Unicode) ──
         file_path = output_path / filename
-        ok, buf = cv2.imencode('.png', symbol_image)
+        ok, buf = cv2.imencode(".png", symbol_image)
         if ok:
             file_path.write_bytes(buf.tobytes())
 
-        results.append(ExtractedSymbol(
-            name=safe_name,
-            image=symbol_image,
-            index=counter,
-            pixel_count=pixel_count,
-        ))
+        results.append(
+            ExtractedSymbol(
+                name=safe_name,
+                image=symbol_image,
+                index=counter,
+                pixel_count=pixel_count,
+            )
+        )
         counter += 1
 
     return results

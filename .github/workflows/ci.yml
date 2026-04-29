@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  push:
+    branches: [main, codex-test-niewiadoma-optymalizacja]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-backend:
+    name: Lint — Python
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install lint deps
+        run: pip install black==24.4.2 isort==5.13.2 flake8==7.1.0
+
+      - name: black
+        run: black --check .
+
+      - name: isort
+        run: isort --check-only .
+
+      - name: flake8
+        run: flake8 .
+
+  test-backend:
+    name: Testy — Python
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install apt deps for OpenCV
+        run: sudo apt-get install -y --no-install-recommends libglib2.0-0
+
+      - name: Install Python deps
+        run: |
+          pip install -r requirements.txt
+          pip install pytest==8.2.2 pytest-cov==5.0.0
+
+      - name: pytest
+        run: pytest tests/unit/ --tb=short -q --cov=core --cov-report=term-missing
+
+  lint-frontend:
+    name: Lint — TypeScript
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: npm ci
+        run: npm ci
+
+      - name: tsc
+        run: npx tsc -p tsconfig.app.json --noEmit
+
+      - name: eslint
+        run: npx eslint src/
+
+      - name: prettier
+        run: npx prettier --check src/
+
+  test-frontend:
+    name: Testy — Frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: npm ci
+        run: npm ci
+
+      - name: vitest
+        run: npx vitest run
+
+  docker-build:
+    name: Docker Build Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build backend image
+        run: docker build -t elektroscan-backend ./backend
+
+      - name: Build frontend image
+        run: docker build -t elektroscan-frontend ./frontend

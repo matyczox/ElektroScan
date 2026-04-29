@@ -1,0 +1,49 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(venv/bin/python*)",
+      "Bash(venv/bin/black*)",
+      "Bash(venv/bin/isort*)",
+      "Bash(venv/bin/flake8*)",
+      "Bash(venv/bin/mypy*)",
+      "Bash(venv/bin/pytest*)",
+      "Bash(venv/bin/uvicorn*)",
+      "Bash(python3 -m compileall*)",
+      "Bash(python3 -m pytest*)",
+      "Bash(npm run*)",
+      "Bash(npm test*)",
+      "Bash(npx tsc*)",
+      "Bash(npx vitest*)",
+      "Bash(git status)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git branch*)",
+      "Bash(git show*)",
+      "Bash(git stash list*)",
+      "Bash(find . -name*)",
+      "Bash(find backend*)",
+      "Bash(find frontend*)",
+      "Bash(grep*)",
+      "Bash(ls*)",
+      "Bash(cat*)",
+      "Bash(wc*)",
+      "Bash(head*)",
+      "Bash(tail*)",
+      "Bash(docker compose logs*)",
+      "Bash(docker compose ps*)",
+      "Bash(docker images*)"
+    ],
+    "deny": [
+      "Bash(git push*)",
+      "Bash(git reset --hard*)",
+      "Bash(git checkout -- *)",
+      "Bash(git clean*)",
+      "Bash(rm -rf*)",
+      "Bash(docker compose down*)",
+      "Bash(docker compose up*)",
+      "Bash(pip install*)",
+      "Bash(npm install*)",
+      "Bash(npm ci*)"
+    ]
+  }
+}

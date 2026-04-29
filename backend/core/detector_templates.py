@@ -11,8 +11,8 @@ import cv2
 import numpy as np
 
 from core.detector_config import (
-    MIRRORED_VARIANT_PREFIXES,
     MIN_TEMPLATE_PIXELS,
+    MIRRORED_VARIANT_PREFIXES,
     PDF_TEXT_MAX_TOKEN_LENGTH,
     PDF_TEXT_MIN_TOKEN_LENGTH,
     PRECISE_KEYWORDS,
@@ -24,7 +24,12 @@ from core.detector_config import (
     SWITCH_FAMILY_MIN_CHILD_COVERAGE,
     SWITCH_FAMILY_MIN_CROP_PURITY,
 )
-from core.detector_masks import _dominant_hsv_color, _extract_label_content_mask, _hsv_mask, _mask_bbox
+from core.detector_masks import (
+    _dominant_hsv_color,
+    _extract_label_content_mask,
+    _hsv_mask,
+    _mask_bbox,
+)
 from core.detector_models import TargetedPromotionRule, TemplateInfo, TemplateVariant
 
 
@@ -91,7 +96,9 @@ def _prepare_variants(template_id: int, template: TemplateInfo) -> list[Template
                 source_content_mask = cv2.flip(source_content_mask, 1)
 
             for rotation, rotate_code in ROTATIONS:
-                rot_mask = cv2.rotate(source_mask, rotate_code) if rotate_code is not None else source_mask
+                rot_mask = (
+                    cv2.rotate(source_mask, rotate_code) if rotate_code is not None else source_mask
+                )
                 rot_content_mask = (
                     cv2.rotate(source_content_mask, rotate_code)
                     if rotate_code is not None and source_content_mask is not None
@@ -110,8 +117,14 @@ def _prepare_variants(template_id: int, template: TemplateInfo) -> list[Template
                         transformed_mask=rot_mask,
                         content_mask=rot_content_mask,
                         pixel_count=pixel_count,
-                        content_pixel_count=int(cv2.countNonZero(rot_content_mask)) if rot_content_mask is not None else 0,
-                        content_bbox=_mask_bbox(rot_content_mask) if rot_content_mask is not None else None,
+                        content_pixel_count=(
+                            int(cv2.countNonZero(rot_content_mask))
+                            if rot_content_mask is not None
+                            else 0
+                        ),
+                        content_bbox=(
+                            _mask_bbox(rot_content_mask) if rot_content_mask is not None else None
+                        ),
                         width=int(rot_mask.shape[1]),
                         height=int(rot_mask.shape[0]),
                     )
@@ -137,8 +150,22 @@ def _build_socket_07_promotions(
     family_specs = [
         ("06", "07", 0.95, 0.82, SOCKET_07_EXTRA_MIN_COVERAGE, False),
         ("09", "07", 0.82, 0.90, SOCKET_07_EXTRA_MIN_COVERAGE, False),
-        ("11", "10", SWITCH_FAMILY_MIN_CHILD_COVERAGE, SWITCH_FAMILY_MIN_CROP_PURITY, SWITCH_10_EXTRA_MIN_COVERAGE, True),
-        ("11", "12", SWITCH_FAMILY_MIN_CHILD_COVERAGE, SWITCH_FAMILY_MIN_CROP_PURITY, SWITCH_12_EXTRA_MIN_COVERAGE, True),
+        (
+            "11",
+            "10",
+            SWITCH_FAMILY_MIN_CHILD_COVERAGE,
+            SWITCH_FAMILY_MIN_CROP_PURITY,
+            SWITCH_10_EXTRA_MIN_COVERAGE,
+            True,
+        ),
+        (
+            "11",
+            "12",
+            SWITCH_FAMILY_MIN_CHILD_COVERAGE,
+            SWITCH_FAMILY_MIN_CROP_PURITY,
+            SWITCH_12_EXTRA_MIN_COVERAGE,
+            True,
+        ),
     ]
 
     for (
@@ -156,14 +183,25 @@ def _build_socket_07_promotions(
         parent_variants = list(variants_by_template.get(parent_id, []))
 
         for child_variant in variants_by_template.get(child_id, []):
-            child_key = (child_id, child_variant.scale, child_variant.rotation, child_variant.mirrored)
+            child_key = (
+                child_id,
+                child_variant.scale,
+                child_variant.rotation,
+                child_variant.mirrored,
+            )
             for parent_mirrored in (False, True):
                 for parent_variant in parent_variants:
-                    if not allow_rotation_mismatch and parent_variant.rotation != child_variant.rotation:
+                    if (
+                        not allow_rotation_mismatch
+                        and parent_variant.rotation != child_variant.rotation
+                    ):
                         continue
                     if parent_variant.mirrored != parent_mirrored:
                         continue
-                    if child_variant.width > parent_variant.width or child_variant.height > parent_variant.height:
+                    if (
+                        child_variant.width > parent_variant.width
+                        or child_variant.height > parent_variant.height
+                    ):
                         continue
 
                     result = cv2.matchTemplate(
@@ -180,7 +218,9 @@ def _build_socket_07_promotions(
                     if crop.shape != child_variant.transformed_mask.shape:
                         continue
 
-                    intersection = int(cv2.countNonZero(cv2.bitwise_and(crop, child_variant.transformed_mask)))
+                    intersection = int(
+                        cv2.countNonZero(cv2.bitwise_and(crop, child_variant.transformed_mask))
+                    )
                     child_coverage = intersection / max(1, child_variant.pixel_count)
                     crop_pixels = int(cv2.countNonZero(crop))
                     crop_purity = intersection / max(1, crop_pixels)

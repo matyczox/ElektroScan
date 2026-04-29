@@ -2,6 +2,8 @@ node_modules/
 dist/
 .env
 .venv/
+venv/
+backend/analysis_debug/
 __pycache__/
 *.pyc
 uploads/

@@ -7,7 +7,6 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-
 DEFAULT_FOCUS_PREFIXES = ("06", "07", "10", "11", "12")
 
 
@@ -187,7 +186,9 @@ def compare_snapshots(
         golden_count = golden_counts.get(symbol, 0)
         candidate_count = candidate_counts.get(symbol, 0)
         delta = candidate_count - golden_count
-        lines.append(f"  {symbol}: golden={golden_count} candidate={candidate_count} delta={delta:+d}")
+        lines.append(
+            f"  {symbol}: golden={golden_count} candidate={candidate_count} delta={delta:+d}"
+        )
 
     focus_missing = [
         golden_boxes[index]
@@ -212,7 +213,9 @@ def compare_snapshots(
 
     lines.extend(["", f"Class conflicts near golden focus boxes: {len(class_conflicts)}"])
     for golden_box, candidate_box, distance in class_conflicts[:20]:
-        lines.append(f"  - golden {_box_label(golden_box)} -> candidate {_box_label(candidate_box)} dist={distance:.1f}")
+        lines.append(
+            f"  - golden {_box_label(golden_box)} -> candidate {_box_label(candidate_box)} dist={distance:.1f}"  # noqa: E501
+        )
     if len(class_conflicts) > 20:
         lines.append(f"  ... {len(class_conflicts) - 20} more")
 

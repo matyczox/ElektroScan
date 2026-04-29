@@ -26,8 +26,8 @@ from core.detector_config import (
     TEXT_LABEL_FULLER_MAX_CONTENT_DROP,
     TEXT_LABEL_FULLER_MAX_VERIFICATION_DROP,
 )
-from core.detector_models import CandidateHit
 from core.detector_masks import _hue_distance
+from core.detector_models import CandidateHit
 
 
 def _bbox_metrics(
@@ -94,7 +94,9 @@ def _should_cluster(hit_a: CandidateHit, hit_b: CandidateHit) -> bool:
 
     center_a = _box_center(hit_a.bbox)
     center_b = _box_center(hit_b.bbox)
-    centers_nested = _center_inside_box(center_a, hit_b.bbox) or _center_inside_box(center_b, hit_a.bbox)
+    centers_nested = _center_inside_box(center_a, hit_b.bbox) or _center_inside_box(
+        center_b, hit_a.bbox
+    )
 
     if (
         hit_a.dominant_hsv is not None
@@ -111,7 +113,11 @@ def _should_cluster(hit_a: CandidateHit, hit_b: CandidateHit) -> bool:
     if iou >= CLUSTER_IOU_THRESHOLD and center_distance <= CLUSTER_CENTER_DISTANCE_RATIO:
         return True
 
-    if iom >= CLUSTER_IOM_THRESHOLD and centers_nested and center_distance <= (CLUSTER_CENTER_DISTANCE_RATIO * 1.15):
+    if (
+        iom >= CLUSTER_IOM_THRESHOLD
+        and centers_nested
+        and center_distance <= (CLUSTER_CENTER_DISTANCE_RATIO * 1.15)
+    ):
         return True
 
     return False
@@ -125,7 +131,11 @@ def _prefilter_candidates(candidates: list[CandidateHit]) -> list[CandidateHit]:
 
     boxes = [list(hit.bbox) for hit in candidates]
     scores = [
-        float(hit.content_score if hit.is_text_label and hit.content_score > 0.0 else hit.verification_score or hit.match_score)
+        float(
+            hit.content_score
+            if hit.is_text_label and hit.content_score > 0.0
+            else hit.verification_score or hit.match_score
+        )
         for hit in candidates
     ]
 
@@ -281,7 +291,10 @@ def _maybe_prefer_fuller_text_label(
         if hit.content_score + TEXT_LABEL_FULLER_MAX_CONTENT_DROP < base_winner.content_score:
             continue
 
-        if hit.verification_score + TEXT_LABEL_FULLER_MAX_VERIFICATION_DROP < base_winner.verification_score:
+        if (
+            hit.verification_score + TEXT_LABEL_FULLER_MAX_VERIFICATION_DROP
+            < base_winner.verification_score
+        ):
             continue
 
         contenders.append(hit)
