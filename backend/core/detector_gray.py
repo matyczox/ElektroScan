@@ -35,6 +35,14 @@ from core.detector_config import (
     GRAY_RAW_SCAN_MIN_TEMPLATE_AREA,
     GRAY_RAW_SCAN_MIN_TEMPLATE_PIXELS,
     GRAY_RAW_SCAN_THRESHOLD,
+    GRAY_RECT_FRAME_MAX_CENTER_DENSITY,
+    GRAY_RECT_FRAME_MAX_DENSITY,
+    GRAY_RECT_FRAME_MAX_RAW_SCAN_SCALE,
+    GRAY_RECT_FRAME_MIN_ASPECT,
+    GRAY_RECT_FRAME_MIN_DENSITY,
+    GRAY_RECT_FRAME_MIN_RAW_SCAN_SCALE,
+    GRAY_RECT_FRAME_STRONG_EDGE_COVERAGE,
+    GRAY_RECT_FRAME_WEAK_EDGE_COVERAGE,
     GRAY_SEARCH_COMPONENT_PADDING_RATIO,
     GRAY_SEARCH_COMPONENT_DILATE_ITERATIONS,
     GRAY_SEARCH_MAX_ROIS,
@@ -120,6 +128,45 @@ def gray_template_pixels(template: TemplateInfo) -> int:
     return int(getattr(template, "pixel_count", 0) or cv2.countNonZero(template.mask))
 
 
+def _edge_band_densities(mask: np.ndarray) -> tuple[float, float, float, float, float]:
+    height, width = mask.shape[:2]
+    band = max(2, min(height, width) // 5)
+
+    def density(region: np.ndarray) -> float:
+        return cv2.countNonZero(region) / max(1, region.size)
+
+    inner = mask[band : height - band, band : width - band]
+    center_density = density(inner) if inner.size else 0.0
+    return (
+        density(mask[:band, :]),
+        density(mask[height - band :, :]),
+        density(mask[:, :band]),
+        density(mask[:, width - band :]),
+        center_density,
+    )
+
+
+def is_gray_rect_frame_template(template: TemplateInfo) -> bool:
+    """Detect hollow elongated frame templates whose signal is long strokes."""
+
+    height, width = template.mask.shape[:2]
+    aspect = max(width / max(1, height), height / max(1, width))
+    density = gray_template_pixels(template) / max(1, width * height)
+    if aspect < GRAY_RECT_FRAME_MIN_ASPECT:
+        return False
+    if density < GRAY_RECT_FRAME_MIN_DENSITY or density > GRAY_RECT_FRAME_MAX_DENSITY:
+        return False
+
+    edge_scores = _edge_band_densities(template.mask)
+    edge_coverages = edge_scores[:4]
+    center_density = edge_scores[4]
+    return (
+        sum(score >= GRAY_RECT_FRAME_STRONG_EDGE_COVERAGE for score in edge_coverages) >= 3
+        and all(score >= GRAY_RECT_FRAME_WEAK_EDGE_COVERAGE for score in edge_coverages)
+        and center_density <= GRAY_RECT_FRAME_MAX_CENTER_DENSITY
+    )
+
+
 def use_relaxed_gray_scan_threshold(template: TemplateInfo) -> bool:
     """Relax gray scan threshold only for genuinely large framed templates."""
 
@@ -131,8 +178,24 @@ def use_raw_gray_scan_mask(template: TemplateInfo) -> bool:
 
     return (
         use_relaxed_gray_scan_threshold(template)
+        or is_gray_rect_frame_template(template)
         or gray_template_pixels(template) >= GRAY_RAW_SCAN_MIN_TEMPLATE_PIXELS
     )
+
+
+def should_scan_gray_variant(
+    template: TemplateInfo,
+    variant_scale: float,
+    scan_mask_kind: str,
+) -> bool:
+    """Keep raw-frame scans focused on real-size frame variants."""
+
+    if scan_mask_kind == "zone_raw" and is_gray_rect_frame_template(template):
+        return (
+            variant_scale >= GRAY_RECT_FRAME_MIN_RAW_SCAN_SCALE
+            and variant_scale <= GRAY_RECT_FRAME_MAX_RAW_SCAN_SCALE
+        )
+    return True
 
 
 def use_lenient_gray_elongated_scan_threshold(template: TemplateInfo) -> bool:

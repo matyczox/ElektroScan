@@ -68,6 +68,11 @@ def scan_template_candidates(
             threshold = gray_strategy.gray_scan_threshold(template, threshold)
 
         scan_mask = scan_masks_by_template[template_id]
+        scan_mask_kind = (
+            scan_mask_kinds_by_template.get(template_id, "unknown")
+            if scan_mask_kinds_by_template is not None
+            else "unknown"
+        )
         search_rois = search_rois_by_template.get(template_id, [])
         if plan_mask_foregrounds.get(template_id, 0) < MIN_TEMPLATE_PIXELS or not search_rois:
             return []
@@ -78,6 +83,12 @@ def scan_template_candidates(
 
         template_hits: list[CandidateHit] = []
         for variant in variants_by_template.get(template_id, []):
+            if detector_profile == "gray" and not gray_strategy.should_scan_gray_variant(
+                template,
+                variant.scale,
+                scan_mask_kind,
+            ):
+                continue
             if variant.height > scan_mask.shape[0] or variant.width > scan_mask.shape[1]:
                 continue
 

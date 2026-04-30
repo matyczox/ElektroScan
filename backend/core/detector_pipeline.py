@@ -455,6 +455,7 @@ def _detect_symbols_pipeline(
         postprocess_workers=postprocess_workers,
         progress_callback=_progress,
         gray_evidence_mask=gray_evidence_mask if detector_profile == "gray" else None,
+        gray_relaxed_evidence_mask=gray_zone_mask if detector_profile == "gray" else None,
     )
     validated_hits = validation_result.validated_hits
     rejection_reasons = validation_result.rejection_reasons

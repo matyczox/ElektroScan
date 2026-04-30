@@ -18,6 +18,15 @@ from core.detector_config import (
     GRAY_LARGE_SCALE_PARTIAL_MIN_CONTEXT,
     GRAY_LARGE_SCALE_PARTIAL_MIN_PURITY,
     GRAY_LARGE_SCALE_PARTIAL_MIN_SCALE,
+    GRAY_RECT_FRAME_MAX_CENTER_DENSITY,
+    GRAY_RECT_FRAME_MAX_DENSITY,
+    GRAY_RECT_FRAME_MIN_ASPECT,
+    GRAY_RECT_FRAME_MIN_DENSITY,
+    GRAY_RECT_FRAME_LONG_EDGE_MIN_RUN,
+    GRAY_RECT_FRAME_SHORT_EDGE_STRONG_RUN,
+    GRAY_RECT_FRAME_SHORT_EDGE_WEAK_RUN,
+    GRAY_RECT_FRAME_STRONG_EDGE_COVERAGE,
+    GRAY_RECT_FRAME_WEAK_EDGE_COVERAGE,
     GRAY_SMALL_SCALE_COMPACT_MAX_ASPECT,
     GRAY_SMALL_SCALE_COMPACT_MIN_COVERAGE,
     GRAY_SMALL_SCALE_ELONGATED_ASPECT,
@@ -598,6 +607,79 @@ def _mask_centroid(mask: np.ndarray) -> tuple[float, float] | None:
     )
 
 
+def _is_gray_rect_frame_candidate(hit: CandidateHit) -> bool:
+    if hit.transformed_mask is None:
+        return False
+
+    width, height = hit.bbox[2], hit.bbox[3]
+    aspect = max(width / max(1, height), height / max(1, width))
+    density = hit.pixel_count / max(1, width * height)
+    return (
+        hit.dominant_hsv is None
+        and aspect >= GRAY_RECT_FRAME_MIN_ASPECT
+        and GRAY_RECT_FRAME_MIN_DENSITY <= density <= GRAY_RECT_FRAME_MAX_DENSITY
+    )
+
+
+def _gray_rect_frame_evidence_ok(roi: np.ndarray, template_mask: np.ndarray) -> bool:
+    """Check that a hollow frame has real ink on its perimeter and an empty middle."""
+
+    height, width = template_mask.shape[:2]
+    band = max(2, min(height, width) // 5)
+    intersection = cv2.bitwise_and(roi, template_mask)
+    edge_slices = (
+        (slice(0, band), slice(None)),
+        (slice(height - band, height), slice(None)),
+        (slice(None), slice(0, band)),
+        (slice(None), slice(width - band, width)),
+    )
+
+    edge_coverages: list[float] = []
+    for edge_slice in edge_slices:
+        template_pixels = cv2.countNonZero(template_mask[edge_slice])
+        intersection_pixels = cv2.countNonZero(intersection[edge_slice])
+        edge_coverages.append(intersection_pixels / max(1, template_pixels))
+
+    inner = roi[band : height - band, band : width - band]
+    center_density = cv2.countNonZero(inner) / max(1, inner.size) if inner.size else 0.0
+
+    def max_run(values: np.ndarray) -> int:
+        best = 0
+        current = 0
+        for value in values.astype(bool, copy=False).tolist():
+            if value:
+                current += 1
+                best = max(best, current)
+            else:
+                current = 0
+        return best
+
+    top_run = max_run((intersection[:band, :] > 0).any(axis=0)) / max(1, width)
+    bottom_run = max_run((intersection[height - band : height, :] > 0).any(axis=0)) / max(1, width)
+    left_run = max_run((intersection[:, :band] > 0).any(axis=1)) / max(1, height)
+    right_run = max_run((intersection[:, width - band : width] > 0).any(axis=1)) / max(1, height)
+
+    if width >= height:
+        long_edges = (top_run, bottom_run)
+        short_edges = (left_run, right_run)
+    else:
+        long_edges = (left_run, right_run)
+        short_edges = (top_run, bottom_run)
+
+    continuous_frame = (
+        min(long_edges) >= GRAY_RECT_FRAME_LONG_EDGE_MIN_RUN
+        and max(short_edges) >= GRAY_RECT_FRAME_SHORT_EDGE_STRONG_RUN
+        and min(short_edges) >= GRAY_RECT_FRAME_SHORT_EDGE_WEAK_RUN
+    )
+
+    return (
+        sum(score >= GRAY_RECT_FRAME_STRONG_EDGE_COVERAGE for score in edge_coverages) >= 3
+        and all(score >= GRAY_RECT_FRAME_WEAK_EDGE_COVERAGE for score in edge_coverages)
+        and center_density <= GRAY_RECT_FRAME_MAX_CENTER_DENSITY
+        and continuous_frame
+    )
+
+
 def _context_purity(
     plan_mask: np.ndarray,
     bbox: tuple[int, int, int, int],
@@ -632,6 +714,7 @@ def _validate_template_hit(
     reasons: dict[str, int] | None = None,
     plan_hsv: np.ndarray | None = None,
     evidence_mask: np.ndarray | None = None,
+    relaxed_evidence_mask: np.ndarray | None = None,
 ) -> bool:
     """Validate a candidate by foreground overlap, purity and hue consistency.
 
@@ -680,9 +763,25 @@ def _validate_template_hit(
         _record("noisy_partial")
         return False
 
+    is_gray_rect_frame = _is_gray_rect_frame_candidate(hit)
+    effective_evidence_mask = (
+        relaxed_evidence_mask
+        if is_gray_rect_frame and relaxed_evidence_mask is not None
+        else evidence_mask
+    )
+    if is_gray_rect_frame:
+        frame_roi = roi
+        if effective_evidence_mask is not None:
+            evidence_roi = _roi_mask(effective_evidence_mask, hit.bbox)
+            if evidence_roi is not None and evidence_roi.shape == hit.transformed_mask.shape:
+                frame_roi = evidence_roi
+        if not _gray_rect_frame_evidence_ok(frame_roi, hit.transformed_mask):
+            _record("gray_rect_frame_evidence")
+            return False
+
     gray_evidence_failed = False
-    if hit.dominant_hsv is None and evidence_mask is not None:
-        evidence_roi = _roi_mask(evidence_mask, hit.bbox)
+    if hit.dominant_hsv is None and effective_evidence_mask is not None:
+        evidence_roi = _roi_mask(effective_evidence_mask, hit.bbox)
         if evidence_roi is None or evidence_roi.shape != hit.transformed_mask.shape:
             gray_evidence_failed = True
         else:

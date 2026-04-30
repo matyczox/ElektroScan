@@ -37,6 +37,7 @@ def validate_template_candidates(
     postprocess_workers: int,
     progress_callback: Callable[[str, float, str], None],
     gray_evidence_mask: np.ndarray | None = None,
+    gray_relaxed_evidence_mask: np.ndarray | None = None,
 ) -> ValidationResult:
     """Validate raw template hits and apply cheap targeted promotions."""
 
@@ -54,6 +55,9 @@ def validate_template_candidates(
             reasons=local_reasons,
             plan_hsv=plan_hsv,
             evidence_mask=gray_evidence_mask if hit.dominant_hsv is None else None,
+            relaxed_evidence_mask=(
+                gray_relaxed_evidence_mask if hit.dominant_hsv is None else None
+            ),
         ):
             promoted_hit = _maybe_promote_socket_06_to_07(
                 hit,
