@@ -64,6 +64,16 @@ interface AnalysisContext {
   };
 }
 
+interface GrayDebugInfo {
+  zoneThreshold: number;
+  evidenceThreshold: number;
+  zonePixels: number;
+  evidencePixels: number;
+  roiCount: number;
+  roiRefs: number;
+  templates: number;
+}
+
 interface CanvasViewProps {
   imageSrc: string | null;
   boxes?: Box[];
@@ -80,6 +90,10 @@ interface CanvasViewProps {
   onSetPlanZone?: (x: number, y: number, w: number, h: number) => void;
   onClearPlanZone?: () => void;
   onInspectZone?: (x: number, y: number, w: number, h: number) => void;
+  grayDebugOverlayImage?: string | null;
+  grayDebugInfo?: GrayDebugInfo | null;
+  onToggleGrayDebugZones?: () => void;
+  isGrayDebugLoading?: boolean;
   symbolNames?: string[];
   onAddManualBox?: (box: Omit<Box, 'id' | 'color'> & { symbolName: string }) => void;
 }
@@ -100,6 +114,10 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
   onSetPlanZone,
   onClearPlanZone,
   onInspectZone,
+  grayDebugOverlayImage = null,
+  grayDebugInfo = null,
+  onToggleGrayDebugZones,
+  isGrayDebugLoading = false,
   symbolNames = [],
   onAddManualBox,
 }) => {
@@ -392,6 +410,21 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
         </button>
         <button
           className="btn-secondary"
+          onClick={onToggleGrayDebugZones}
+          title="Pokaz czarne strefy i ROI skanowania gray"
+          style={{
+            borderColor: grayDebugOverlayImage ? '#f97316' : undefined,
+            color: grayDebugOverlayImage ? '#f97316' : undefined,
+            padding: '6px 10px',
+            fontSize: 11,
+            fontWeight: 700,
+          }}
+        >
+          <Layers size={14} />
+          {isGrayDebugLoading ? 'Licze...' : grayDebugOverlayImage ? 'Ukryj strefy' : 'Strefy'}
+        </button>
+        <button
+          className="btn-secondary"
           onClick={() => setIsManualMode(value => !value)}
           title="Dodaj symbol rÄ™cznie"
           style={{
@@ -462,6 +495,47 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
           }}
         >
           <img src={imageSrc} alt="Plan view" className="plan-image" draggable={false} />
+
+          {grayDebugOverlayImage && (
+            <img
+              src={grayDebugOverlayImage}
+              alt="Gray debug zones overlay"
+              draggable={false}
+              style={{
+                position: 'absolute',
+                left: 0,
+                top: 0,
+                width: '100%',
+                height: '100%',
+                pointerEvents: 'none',
+                imageRendering: 'auto',
+              }}
+            />
+          )}
+
+          {grayDebugOverlayImage && grayDebugInfo && (
+            <div
+              style={{
+                position: 'absolute',
+                left: 12,
+                top: 12,
+                background: 'rgba(15,23,42,0.88)',
+                color: '#e5e7eb',
+                border: '1px solid rgba(249,115,22,0.45)',
+                borderRadius: 8,
+                padding: '7px 9px',
+                fontSize: 11,
+                lineHeight: 1.35,
+                pointerEvents: 'none',
+                maxWidth: 340,
+              }}
+            >
+              <strong style={{ color: '#fb923c' }}>Gray strefy</strong>
+              <div>zielone: zone &lt;{grayDebugInfo.zoneThreshold}, pomaranczowe: evidence &lt;{grayDebugInfo.evidenceThreshold}</div>
+              <div>ROI: {grayDebugInfo.roiCount} unikalnych / {grayDebugInfo.roiRefs} lacznie, templates {grayDebugInfo.templates}</div>
+              <div>piksele: zone {grayDebugInfo.zonePixels}, evidence {grayDebugInfo.evidencePixels}</div>
+            </div>
+          )}
 
           {/* Strefy Wykluczone (lista) */}
           {excludedZones.map((zone, idx) => (

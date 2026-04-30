@@ -33,7 +33,8 @@ from core.detector_config import (
     GRAY_SMALL_SCALE_SUSPICIOUS_PURITY,
     GRAY_SMALL_SCALE_THRESHOLD,
     GRAY_STRONG_GEOMETRY_MIN_COVERAGE,
-    GRAY_STRONG_GEOMETRY_MIN_PURITY,
+    GRAY_STRONG_GEOMETRY_MIN_MATCH,
+    GRAY_STRONG_RESCUE_MIN_PURITY,
     GRAY_SUPPRESS_HORIZONTAL_KERNEL_PX,
     GRAY_SUPPRESS_VERTICAL_KERNEL_PX,
     HSV_LOWER,
@@ -679,21 +680,20 @@ def _validate_template_hit(
         _record("noisy_partial")
         return False
 
+    gray_evidence_failed = False
     if hit.dominant_hsv is None and evidence_mask is not None:
         evidence_roi = _roi_mask(evidence_mask, hit.bbox)
         if evidence_roi is None or evidence_roi.shape != hit.transformed_mask.shape:
-            _record("gray_dark_evidence")
-            return False
-        evidence_intersection = int(
-            cv2.countNonZero(cv2.bitwise_and(evidence_roi, hit.transformed_mask))
-        )
-        evidence_coverage = evidence_intersection / max(1, hit.pixel_count)
-        if (
-            evidence_intersection < GRAY_DARK_EVIDENCE_MIN_PIXELS
-            or evidence_coverage < GRAY_DARK_EVIDENCE_MIN_COVERAGE
-        ):
-            _record("gray_dark_evidence")
-            return False
+            gray_evidence_failed = True
+        else:
+            evidence_intersection = int(
+                cv2.countNonZero(cv2.bitwise_and(evidence_roi, hit.transformed_mask))
+            )
+            evidence_coverage = evidence_intersection / max(1, hit.pixel_count)
+            gray_evidence_failed = (
+                evidence_intersection < GRAY_DARK_EVIDENCE_MIN_PIXELS
+                or evidence_coverage < GRAY_DARK_EVIDENCE_MIN_COVERAGE
+            )
 
     if hit.dominant_hsv is None:
         template_area = max(1, hit.bbox[2] * hit.bbox[3])
@@ -740,6 +740,7 @@ def _validate_template_hit(
         _record("gray_small_scale_anomaly")
         return False
 
+    is_sparse_elongated = False
     strong_gray_elongated_geometry = False
     if hit.dominant_hsv is None and hit.scale <= GRAY_SMALL_SCALE_THRESHOLD:
         template_area = max(1, hit.bbox[2] * hit.bbox[3])
@@ -757,6 +758,9 @@ def _validate_template_hit(
             )
         if is_sparse_elongated and coverage < GRAY_SMALL_SCALE_ELONGATED_MIN_COVERAGE:
             _record("gray_small_scale_elongated_coverage")
+            return False
+        if is_sparse_elongated and hit.match_score < GRAY_STRONG_GEOMETRY_MIN_MATCH:
+            _record("gray_elongated_low_match")
             return False
         if (
             aspect <= GRAY_SMALL_SCALE_COMPACT_MAX_ASPECT
@@ -805,9 +809,16 @@ def _validate_template_hit(
 
     strong_gray_geometry = (
         hit.dominant_hsv is None
+        and hit.match_score >= GRAY_STRONG_GEOMETRY_MIN_MATCH
         and coverage >= GRAY_STRONG_GEOMETRY_MIN_COVERAGE
-        and purity >= GRAY_STRONG_GEOMETRY_MIN_PURITY
-    ) or strong_gray_elongated_geometry
+        and purity >= GRAY_STRONG_RESCUE_MIN_PURITY
+    ) or (
+        strong_gray_elongated_geometry
+        and hit.match_score >= GRAY_STRONG_GEOMETRY_MIN_MATCH
+    )
+    if gray_evidence_failed and not strong_gray_geometry:
+        _record("gray_dark_evidence")
+        return False
     if (
         hit.match_score < LOW_MATCH_STRICT_THRESHOLD
         and context_purity < MIN_CONTEXT_PURITY

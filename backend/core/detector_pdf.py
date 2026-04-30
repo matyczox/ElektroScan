@@ -215,11 +215,12 @@ def _collect_pdf_text_exclude_rects(
             height_px = (y1 - y0) * scale
             aspect = max(width_px / max(1.0, height_px), height_px / max(1.0, width_px))
 
+            long_edge = max(width_px, height_px)
             looks_like_description = (
-                alnum_len >= 8
-                or " " in clean_text
-                or (alnum_len >= 6 and aspect >= 2.2)
-                or width_px >= 65
+                alnum_len >= 10
+                or (" " in clean_text and alnum_len >= 8)
+                or (alnum_len >= 6 and aspect >= 2.2 and long_edge >= 120)
+                or width_px >= 120
             )
             if not looks_like_description:
                 continue
@@ -296,15 +297,17 @@ def _estimate_title_block_exclude_rects(
             if (max_y - min_y) > image_h * 0.20:
                 rects.append((min_x, min_y, max_x - min_x, max_y - min_y))
 
-        # Bottom title strip.
-        bottom_boundary = int(image_h * 0.74)
+        # Bottom title strip. Keep this conservative: on dense floor plans,
+        # normal room labels and symbols can occupy the lower quarter of the
+        # drawing, so treating that as a title block hides real detections.
+        bottom_boundary = int(image_h * 0.93)
         bottom_rects = [rect for rect in text_rects if rect[1] + rect[3] / 2 >= bottom_boundary]
         if len(bottom_rects) >= 10:
             min_x = max(0, min(x for x, _y, _w, _h in bottom_rects) - 16)
             min_y = max(0, min(y for _x, y, _w, _h in bottom_rects) - 16)
             max_x = min(image_w, max(x + w for x, _y, w, _h in bottom_rects) + 16)
             max_y = image_h
-            if (max_x - min_x) > image_w * 0.22:
+            if min_y >= image_h * 0.90 and (max_x - min_x) > image_w * 0.22:
                 rects.append((min_x, min_y, max_x - min_x, max_y - min_y))
 
     except Exception as exc:  # pragma: no cover - depends on PDF structure

@@ -131,6 +131,19 @@ interface RoiInspection {
   candidates: RoiCandidate[];
 }
 
+interface GrayDebugZones {
+  overlayImage: string;
+  imageWidth: number;
+  imageHeight: number;
+  zoneThreshold: number;
+  evidenceThreshold: number;
+  zonePixels: number;
+  evidencePixels: number;
+  roiCount: number;
+  roiRefs: number;
+  templates: number;
+}
+
 function App() {
   const [file, setFile] = useState<File | null>(null);
   const [pdfPreview, setPdfPreview] = useState<string | null>(null);
@@ -151,6 +164,8 @@ function App() {
   const [analysisProgress, setAnalysisProgress] = useState<AnalysisProgress | null>(null);
   const [roiInspection, setRoiInspection] = useState<RoiInspection | null>(null);
   const [isInspectingRoi, setIsInspectingRoi] = useState(false);
+  const [grayDebugZones, setGrayDebugZones] = useState<GrayDebugZones | null>(null);
+  const [isLoadingGrayZones, setIsLoadingGrayZones] = useState(false);
   const detectRequestSeqRef = useRef(0);
   const detectAbortRef = useRef<AbortController | null>(null);
 
@@ -186,6 +201,7 @@ function App() {
     setPdfDiagnostics(null);
     setAnalysisProgress(null);
     setRoiInspection(null);
+    setGrayDebugZones(null);
     
     setIsProcessing(true);
     setProgressText('Ładowanie podglądu PDF...');
@@ -419,6 +435,40 @@ function App() {
     setPdfDiagnostics(null);
     setAnalysisProgress(null);
     setRoiInspection(null);
+    setGrayDebugZones(null);
+  };
+
+  const handleToggleGrayZones = async () => {
+    if (grayDebugZones) {
+      setGrayDebugZones(null);
+      return;
+    }
+    if (!sessionId) return;
+    setIsLoadingGrayZones(true);
+    setProgressText('Liczenie czarnych stref...');
+    try {
+      const response = await fetch(withNoCache(`/api/gray-debug-zones?session_id=${sessionId}`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
+        body: JSON.stringify({
+          hidden_layers: layers.filter(l => !l.visible).map(l => l.name),
+          detector_profile: detectorProfile,
+          excluded_zones: excludedZones,
+          legend_zone: legendZone ? { page: 0, x: legendZone.x, y: legendZone.y, width: legendZone.width, height: legendZone.height } : null,
+          plan_zone: planZone ? { page: 0, x: planZone.x, y: planZone.y, width: planZone.width, height: planZone.height } : null,
+        }),
+      });
+      if (!response.ok) throw new Error('Blad podgladu stref gray');
+      const data = await response.json();
+      setGrayDebugZones(data);
+    } catch (error) {
+      console.error(error);
+      alert('Nie udalo sie policzyc czarnych stref.');
+    } finally {
+      setIsLoadingGrayZones(false);
+      setProgressText('');
+    }
   };
 
   const handleInspectRoi = async (x: number, y: number, width: number, height: number) => {
@@ -545,7 +595,7 @@ function App() {
         onDetect={handleDetect}
         onClear={handleClear}
         onClearTemplates={handleClearTemplates}
-        isProcessing={isProcessing || isInspectingRoi}
+        isProcessing={isProcessing || isInspectingRoi || isLoadingGrayZones}
         progressText={progressText}
         analysisProgress={analysisProgress}
         patterns={patterns}
@@ -582,6 +632,10 @@ function App() {
         symbolNames={patterns.map(p => p.name)}
         onAddManualBox={handleAddManualBox}
         onInspectZone={handleInspectRoi}
+        grayDebugOverlayImage={grayDebugZones?.overlayImage ?? null}
+        grayDebugInfo={grayDebugZones}
+        onToggleGrayDebugZones={handleToggleGrayZones}
+        isGrayDebugLoading={isLoadingGrayZones}
       />
 
       {roiInspection && (

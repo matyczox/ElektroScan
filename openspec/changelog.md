@@ -61,6 +61,23 @@ Ten plik służy do logowania ważnych zmian i decyzji projektowych. Nie zastęp
 
 <!-- Dodawaj nowe wpisy na górze listy, po tej linii -->
 
+## 2026-04-30 - Gray Viking: dark ink zones i trace faz
+
+**Dotyczy:** `backend/core/detector_gray.py`, `backend/core/detector_masks.py`,
+`backend/core/detector_pipeline.py`, Inspektor ROI, OpenSpec
+**Zmiana:** Gray PDF dostal ciemne strefy tuszu kalibrowane z legendy, skanowanie
+po `zone_raw` / `zone_suppressed`, fair peak budget per ROI dla wydluzonych
+symboli, naprawe slepego odejmowania legendy w `format_results` oraz lagodniejsza
+walidacje strong geometry przy pelnym `coverage`.
+**Dlaczego:** Inspektor ROI pokazywal `PASS`, ale finalna analiza gubila trafienia
+w pozniejszych fazach. Problemem nie byl jeden magiczny threshold, tylko fazy:
+budget, globalny limit peakow, final formatting i zbyt twarde purity dla gray.
+**Ryzyko:** Nadal mozliwe false-positive albo missy na innych szarych PDF. Nie
+uogolniac wyniku Vikinga bez kolejnych testow.
+**Zlote przypadki:** Viking gray: brakujace `04` ok. `6490,710`, `7469,4316`,
+`3742,5948`; `05` ok. `8019,3324`, `4516,5850`, `2255,5851`; `07` ok.
+`5789,1121`; `06` ok. `4520,4372`.
+
 ## 2026-04-29 — Wdrożenie Docker, linting, testów i GitHub Actions CI
 
 **Dotyczy:** infrastruktura, `backend/`, `frontend/`, `.github/`

@@ -72,6 +72,30 @@ npm run build
 
 Plik roboczy: `VIKING-BRONISZE-ELE-Rzuty-E8.pdf`.
 
+Aktualny stan po pracy 2026-04-30 wieczorem:
+
+- Viking gray jest blisko uzywalnego stanu dla pierwszego PDF. Ostatni lokalny
+  run po poprawkach dal okolo `77` finalnych detekcji.
+- Ostatni lokalny test diagnostyczny: okolo `23.7s`, `77` finalnych detekcji,
+  rozklad `01:1, 02:8, 03:15, 04:12, 05:13, 06:12, 07:16`.
+- Najwazniejsza lekcja: Inspektor ROI nie jest tylko podgladem. Jest lokalna
+  prawda diagnostyczna. Jesli Inspektor pokazuje mocny `PASS`, a final go nie
+  pokazuje, trzeba sledzic hit przez fazy: `scan_raw -> raw_budget ->
+  raw_prefilter -> validation -> clustering -> format_results`.
+- Nie zgadywac progow w ciemno. Najpierw ustalic, w ktorej fazie hit ginie.
+- Dwa trywialne, ale krytyczne bledy juz znalezione:
+  - `format_results` robil slepe `count - 1` za legende, gdy `legend_rect`
+    bylo puste. Dla gray to chowalo poprawne detekcje, mimo ze walidacja je
+    przepuscila. Gray ma uzywac jawnych wykluczen legendy/tekstu/plan zone, a
+    nie slepego odejmowania.
+  - wydluzone symbole `04/05` potrafily nie dojsc do pozniejszych ROI, bo
+    wariant wypelnial globalny limit peakow na wczesniejszych miejscach.
+    Dla gray elongated nalezy stosowac fair limit per ROI.
+  - prawdziwe `06` z pelna geometria potrafilo odpasc na `low_match_strict`,
+    bo tekst/sciana zanizaly `purity` do okolic `0.45`. Dla gray strong
+    geometry uzywac progow rescue, nie twardego progu `0.50`.
+- Poprawki sa gray-only albo pilnowane przez `detector_profile == "gray"`.
+
 Co juz wiadomo:
 
 - Szary Viking zaczal lapac sporo symboli po rozszerzeniu skali do okolic `0.50`.
@@ -104,6 +128,18 @@ Preferowany nastepny eksperyment:
 - Nie obnizac globalnie progow dla wszystkich symboli, bo to zwieksza false
   positives.
 - Najpierw logowac i porownywac w Inspektorze ROI, potem dopiero zmieniac final.
+
+Aktualne heurystyki, ktore dzialaja dobrze na Viking gray:
+
+- Progi czerni sa kalibrowane z ciemnych pikseli legendy.
+- `zone_raw` / `zone_suppressed` sa uzywane do skanowania gray zamiast calej
+  jasnoszarej maski planu.
+- `gray_dark_evidence` ma blokowac hity zbudowane z jasnych linii planu.
+- Mocny gray hit to nie tylko wysoki `match`, ale przede wszystkim pelna
+  geometria: wysokie `coverage`, sensowne `purity`, sensowny `context`.
+- Dla symboli sklejonych z tekstem/sciana `purity` moze spasc w okolice `0.40`
+  mimo prawdziwego symbolu; jesli `coverage` jest pelne, nie odrzucac tego zbyt
+  agresywnie.
 
 Szczegolowy plan tej zmiany jest w:
 

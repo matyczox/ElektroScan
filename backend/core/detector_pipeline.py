@@ -253,6 +253,9 @@ def _detect_symbols_pipeline(
     gray_dark_ink_pixels = 0
     gray_dark_zone_pixels = 0
     gray_dark_evidence_pixels = 0
+    gray_dark_threshold = GRAY_DARK_INK_THRESHOLD
+    gray_dark_zone_threshold = GRAY_DARK_ZONE_THRESHOLD
+    gray_dark_evidence_threshold = GRAY_DARK_EVIDENCE_THRESHOLD
     gray_dark_suppressed_pixels = 0
     gray_dark_zone_suppressed_pixels = 0
     scan_masks_by_template: dict[int, np.ndarray]
@@ -275,6 +278,9 @@ def _detect_symbols_pipeline(
         gray_dark_ink_pixels = gray_scan_masks.dark_ink_pixels
         gray_dark_zone_pixels = gray_scan_masks.zone_ink_pixels
         gray_dark_evidence_pixels = gray_scan_masks.evidence_ink_pixels
+        gray_dark_threshold = gray_scan_masks.dark_threshold
+        gray_dark_zone_threshold = gray_scan_masks.zone_threshold
+        gray_dark_evidence_threshold = gray_scan_masks.evidence_threshold
         gray_dark_suppressed_pixels = gray_scan_masks.dark_suppressed_pixels
         gray_dark_zone_suppressed_pixels = gray_scan_masks.zone_suppressed_pixels
         scan_masks_by_template = gray_scan_masks.scan_masks_by_template
@@ -329,6 +335,9 @@ def _detect_symbols_pipeline(
         "gray_dark_ink_pixels": gray_dark_ink_pixels,
         "gray_dark_zone_pixels": gray_dark_zone_pixels,
         "gray_dark_evidence_pixels": gray_dark_evidence_pixels,
+        "gray_dark_threshold": gray_dark_threshold,
+        "gray_dark_zone_threshold": gray_dark_zone_threshold,
+        "gray_dark_evidence_threshold": gray_dark_evidence_threshold,
         "gray_dark_suppressed_pixels": gray_dark_suppressed_pixels,
         "gray_dark_suppressed_ratio": round(
             gray_dark_suppressed_pixels / max(1, gray_dark_ink_pixels), 3
@@ -500,8 +509,14 @@ def _detect_symbols_pipeline(
             validated_hits,
             templates,
         )
+        gray_unresolved_strong_hits = gray_strategy.trace_unresolved_strong_gray_hits(
+            final_hits,
+            validated_hits,
+            templates,
+        )
     else:
         rescued_gray_frames = 0
+        gray_unresolved_strong_hits = {"strongValidated": 0, "unresolved": 0, "items": []}
     diagnostics["gray_frame_final_rescued"] = rescued_gray_frames
     diagnostics["final_hits"] = len(final_hits)
     timings["clustering"] = time.perf_counter() - phase_start
@@ -538,11 +553,11 @@ def _detect_symbols_pipeline(
                     "removedPixels": int(diagnostics["gray_suppressed_pixels"]),
                     "rawPixels": int(gray_raw_ink_pixels),
                     "ratio": float(diagnostics["gray_suppressed_ratio"]),
-                    "darkThreshold": int(GRAY_DARK_INK_THRESHOLD),
+                    "darkThreshold": int(diagnostics["gray_dark_threshold"]),
                     "darkPixels": int(diagnostics["gray_dark_ink_pixels"]),
-                    "zoneThreshold": int(GRAY_DARK_ZONE_THRESHOLD),
+                    "zoneThreshold": int(diagnostics["gray_dark_zone_threshold"]),
                     "zonePixels": int(diagnostics["gray_dark_zone_pixels"]),
-                    "evidenceThreshold": int(GRAY_DARK_EVIDENCE_THRESHOLD),
+                    "evidenceThreshold": int(diagnostics["gray_dark_evidence_threshold"]),
                     "evidencePixels": int(diagnostics["gray_dark_evidence_pixels"]),
                     "zoneRemovedPixels": int(diagnostics["gray_dark_zone_suppressed_pixels"]),
                     "zoneRemovedRatio": float(diagnostics["gray_dark_zone_suppressed_ratio"]),
@@ -567,6 +582,7 @@ def _detect_symbols_pipeline(
                 "scanMaskRawHits": {
                     str(k): int(v) for k, v in sorted(scan_result.raw_hits_by_mask_kind.items())
                 },
+                "grayUnresolvedStrongHits": gray_unresolved_strong_hits,
                 "rejectionReasons": {k: int(v) for k, v in rejection_reasons.items()},
                 "slowestPhase": (
                     max(timings_ms.items(), key=lambda item: item[1])[0] if timings_ms else None
@@ -617,9 +633,9 @@ def _detect_symbols_pipeline(
         f" final_clusters={diagnostics['final_hits']},"
         f" rois={diagnostics['search_rois']} full_scan_templates={diagnostics['full_scan_templates']},"  # noqa: E501
         f" gray_suppress={diagnostics['gray_suppressed_pixels']}px({diagnostics['gray_suppressed_ratio']:.0%}),"
-        f" gray_dark<{GRAY_DARK_INK_THRESHOLD}={diagnostics['gray_dark_ink_pixels']}px,"
-        f" gray_zone<{GRAY_DARK_ZONE_THRESHOLD}={diagnostics['gray_dark_zone_pixels']}px,"
-        f" gray_evidence<{GRAY_DARK_EVIDENCE_THRESHOLD}={diagnostics['gray_dark_evidence_pixels']}px,"
+        f" gray_dark<{diagnostics['gray_dark_threshold']}={diagnostics['gray_dark_ink_pixels']}px,"
+        f" gray_zone<{diagnostics['gray_dark_zone_threshold']}={diagnostics['gray_dark_zone_pixels']}px,"
+        f" gray_evidence<{diagnostics['gray_dark_evidence_threshold']}={diagnostics['gray_dark_evidence_pixels']}px,"
         f" gray_zone_suppress={diagnostics['gray_dark_zone_suppressed_pixels']}px({diagnostics['gray_dark_zone_suppressed_ratio']:.0%}),"
         f" gray_dark_suppress={diagnostics['gray_dark_suppressed_pixels']}px({diagnostics['gray_dark_suppressed_ratio']:.0%}),"
         f" threads=scan:{scan_workers}/{DETECTOR_SCAN_MAX_WORKERS}|post:{postprocess_workers}/{DETECTOR_POSTPROCESS_MAX_WORKERS}|opencv:{OPENCV_NUM_THREADS},"  # noqa: E501
@@ -677,7 +693,14 @@ def _detect_symbols_pipeline(
         detections.sort(key=lambda det: (det.verification_score, det.confidence), reverse=True)
 
         count = len(detections)
-        if subtract_legend and legend_rect is None:
+        # Gray PDFs use explicit legend/text/plan-zone exclusions.  Blindly
+        # subtracting one hit per symbol here can hide valid plan detections
+        # that already passed validation, especially when the legend is outside
+        # the selected plan zone.
+        blind_legend_subtract = (
+            detector_profile != "gray" and subtract_legend and legend_rect is None
+        )
+        if blind_legend_subtract:
             count = max(0, count - 1)
 
         if count <= 0:
@@ -689,7 +712,7 @@ def _detect_symbols_pipeline(
                 count=count,
                 color="#22c55e",
                 detections=(
-                    detections[:count] if subtract_legend and legend_rect is None else detections
+                    detections[:count] if blind_legend_subtract else detections
                 ),
             )
         )

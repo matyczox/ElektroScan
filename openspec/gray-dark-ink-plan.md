@@ -189,3 +189,35 @@ Przerwac i nie brnac w progi, jesli:
 
 To nie jest rewrite silnika. To eksperyment zmieniajacy prowadzenie skanowania
 gray PDF przez ciemny tusz. Najpierw poprawic maski i ROI, potem dopiero progi.
+
+## Wynik Implementacji 2026-04-30
+
+Najwazniejsze nie bylo samo strojenie progow, tylko rozdzielenie faz. Gdy
+Inspektor ROI pokazuje `PASS`, a finalny wynik go nie ma, najpierw trzeba
+sprawdzic, gdzie hit znika:
+
+- `scan_raw`
+- `gray_raw_budget`
+- `raw_prefilter`
+- `validation`
+- `pre_parent_cluster`
+- `final_cluster`
+- `format_results`
+
+Naprawione klasy problemow:
+
+- `format_results` nie moze dla gray robic slepego `count - 1` za legende,
+  gdy nie ma `legend_rect`. To chowalo poprawne symbole po calej analizie.
+- Wydluzone gray symbole `04/05` potrzebuja fair peak budget per ROI. Inaczej
+  wczesne obszary zuzywaly globalny limit peakow i pozniejsze poprawne ROI
+  nigdy nie trafialy do walidacji.
+- Strong gray geometry nie moze wymagac sztywnego `purity >= 0.50`, jesli
+  `coverage` jest pelne i dark ink zgadza sie z template. Tekst albo sciana
+  moga lokalnie obnizyc purity prawdziwego symbolu.
+- Dark ink zones dzialaja jako kierunek: mniej jasnoszarych false-positive i
+  sensowniejszy czas. Nie traktowac tego jako gotowego uniwersalnego silnika
+  dla wszystkich gray PDF, dopoki nie przejdzie na kolejnych rzutach.
+
+Ostatni lokalny wynik dla Viking gray po tych poprawkach: okolo `23.7s`,
+`77` finalnych detekcji, z rozkladem `01:1, 02:8, 03:15, 04:12, 05:13,
+06:12, 07:16`.

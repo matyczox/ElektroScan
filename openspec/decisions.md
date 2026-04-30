@@ -39,6 +39,27 @@ Prawie jak testy jednostkowe architektury:
 - Lepiej pokazać `Brak?` w debug niż cicho zgubić symbol.
 - Lepiej zostawić jeden przypadek do HITL niż zepsuć pięć innych przez agresywny próg.
 
+## Decyzja 2026-04-30: Inspektor ROI Jest Lokalna Prawda Dla Gray
+
+Jesli Inspektor ROI pokazuje mocny `PASS`, a finalna analiza nie pokazuje
+symbolu, nie zaczynac od krecenia globalnym progiem. Najpierw przesledzic
+kandydata przez fazy:
+
+- `scan_raw`
+- `gray_raw_budget`
+- `raw_prefilter`
+- `validation`
+- `clustering`
+- `format_results`
+
+Ta zasada ujawnila trzy realne bledy: slepe odejmowanie legendy w finalnym
+formatowaniu, globalny starvation peakow dla wydluzonych symboli i zbyt twardy
+prog `purity` dla prawdziwej strong geometry. To sa lepsze poprawki niz
+hardcode po koordynatach albo dopisywanie zasad typu "ten symbol zawsze tu".
+
+Gray-only zmiany moga uzywac dark ink zones i progow kalibrowanych z legendy.
+Kolorowy profil ma pozostac osobna, szybka sciezka.
+
 ## Mapa Ryzyk Technicznych
 
 | Ryzyko | Prawdopodobieństwo | Wpływ |

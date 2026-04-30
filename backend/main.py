@@ -16,7 +16,13 @@ from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from core import detector_gray as gray_strategy
+from core.detector_config import (
+    GRAY_SCALES,
+)
 from core.detector import detect_symbols, draw_results, load_templates
+from core.detector_masks import _ink_mask
+from core.detector_templates import _prepare_variants
 from core.roi_inspector import inspect_roi
 
 # Importujemy nasze core'owe moduły
@@ -341,6 +347,40 @@ def _outside_plan_zone_rects(
     return clamped, outside
 
 
+def _extract_exclude_rects_from_request(
+    body: object | None,
+    image_shape: tuple[int, ...],
+) -> tuple[list[tuple[int, int, int, int]], tuple[int, int, int, int] | None, list[tuple[int, int, int, int]]]:
+    exclude_rects: list[tuple[int, int, int, int]] = []
+    legend_rect = None
+    plan_zone_rect = None
+    plan_zone_outside_rects: list[tuple[int, int, int, int]] = []
+
+    if body and body.excluded_zones:
+        for zone in body.excluded_zones:
+            try:
+                exclude_rects.append(
+                    (int(zone["x"]), int(zone["y"]), int(zone["width"]), int(zone["height"]))
+                )
+            except (KeyError, ValueError, TypeError):
+                pass
+
+    if body and body.legend_zone:
+        legend_rect = _zone_to_rect(body.legend_zone)
+    if legend_rect is not None:
+        exclude_rects.append(legend_rect)
+
+    if body and body.plan_zone:
+        plan_zone_rect, plan_zone_outside_rects = _outside_plan_zone_rects(
+            body.plan_zone,
+            image_shape,
+        )
+        if plan_zone_rect is not None:
+            exclude_rects.extend(plan_zone_outside_rects)
+
+    return exclude_rects, plan_zone_rect, plan_zone_outside_rects
+
+
 class ExtractRequest(BaseModel):
     excluded_zones: Optional[List[dict]] = []
     hidden_layers: Optional[List[str]] = []
@@ -513,6 +553,14 @@ class RoiInspectRequest(BaseModel):
     detector_profile: Optional[str] = "auto"
     roi: LegendZone
     top_n: Optional[int] = 15
+
+
+class GrayDebugZonesRequest(BaseModel):
+    excluded_zones: Optional[List[dict]] = []
+    hidden_layers: Optional[List[str]] = []
+    detector_profile: Optional[str] = "auto"
+    legend_zone: Optional[LegendZone] = None
+    plan_zone: Optional[LegendZone] = None
 
 
 @app.get("/api/analysis-progress")
@@ -890,6 +938,94 @@ def api_inspect_roi(session_id: str, body: RoiInspectRequest):
         }
     except Exception as e:
         print(f"Blad inspektora ROI: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/gray-debug-zones")
+def api_gray_debug_zones(session_id: str, body: GrayDebugZonesRequest = None):
+    plan_path = UPLOAD_DIR / f"{session_id}.pdf"
+    if not plan_path.exists():
+        raise HTTPException(status_code=404, detail="Nie znaleziono pliku sesji.")
+
+    try:
+        hidden_layers = body.hidden_layers if body else []
+        plan_img = pdf_to_png(str(plan_path), dpi=300, hidden_layers=hidden_layers)
+        templates = load_templates(str(TEMPLATES_DIR))
+        exclude_rects, plan_zone_rect, plan_zone_outside_rects = _extract_exclude_rects_from_request(
+            body,
+            plan_img.shape,
+        )
+
+        raw_dilated = _ink_mask(plan_img, dilate=True)
+        plan_masks_by_template = {template_id: raw_dilated for template_id in range(len(templates))}
+        gray_masks = gray_strategy.build_gray_scan_masks(
+            plan_image=plan_img,
+            templates=templates,
+            plan_masks_by_template=plan_masks_by_template,
+            exclude_rects=exclude_rects,
+            raw_dilated=raw_dilated,
+        )
+
+        rois_by_rect: dict[tuple[int, int, int, int], int] = {}
+        template_roi_counts: dict[str, int] = {}
+        for template_id, template in enumerate(templates):
+            variants = _prepare_variants(template_id, template, scales=GRAY_SCALES)
+            if variants:
+                max_width = max(variant.width for variant in variants)
+                max_height = max(variant.height for variant in variants)
+            else:
+                max_height, max_width = template.mask.shape[:2]
+            rois, _uses_full_scan, _roi_area, _foreground = gray_strategy.build_gray_search_rois(
+                gray_masks.zone_mask,
+                plan_img.shape,
+                max_width,
+                max_height,
+            )
+            template_roi_counts[template.name] = len(rois)
+            for rect in rois:
+                rois_by_rect[rect] = rois_by_rect.get(rect, 0) + 1
+
+        overlay = np.zeros((plan_img.shape[0], plan_img.shape[1], 4), dtype=np.uint8)
+        zone_pixels = gray_masks.zone_mask > 0
+        evidence_pixels = gray_masks.evidence_mask > 0
+        overlay[zone_pixels] = (94, 197, 34, 55)  # green, BGRA
+        overlay[evidence_pixels] = (22, 115, 249, 125)  # orange, BGRA
+
+        display_rois = gray_strategy.coalesce_gray_debug_rois(
+            list(rois_by_rect.keys()),
+            plan_img.shape,
+        )
+        for x, y, w, h in display_rois:
+            cv2.rectangle(overlay, (x, y), (x + w, y + h), (255, 180, 59, 150), 2)
+
+        ok, buffer_overlay = cv2.imencode(".png", overlay)
+        if not ok:
+            raise RuntimeError("Nie udalo sie wygenerowac overlay stref.")
+
+        return {
+            "overlayImage": f"data:image/png;base64,{base64.b64encode(buffer_overlay).decode('utf-8')}",
+            "imageWidth": int(plan_img.shape[1]),
+            "imageHeight": int(plan_img.shape[0]),
+            "zoneThreshold": int(gray_masks.zone_threshold),
+            "evidenceThreshold": int(gray_masks.evidence_threshold),
+            "zonePixels": int(gray_masks.zone_ink_pixels),
+            "evidencePixels": int(gray_masks.evidence_ink_pixels),
+            "roiCount": int(len(display_rois)),
+            "roiRefs": int(sum(rois_by_rect.values())),
+            "templates": int(len(templates)),
+            "planZoneUsed": plan_zone_rect,
+            "planZoneOutsideExcluded": plan_zone_outside_rects,
+            "topTemplateRoiCounts": [
+                {"template": name, "count": count}
+                for name, count in sorted(
+                    template_roi_counts.items(),
+                    key=lambda item: item[1],
+                    reverse=True,
+                )[:10]
+            ],
+        }
+    except Exception as e:
+        print(f"Blad podgladu gray debug zones: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

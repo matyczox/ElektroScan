@@ -13,18 +13,11 @@ from typing import Any
 import cv2
 import numpy as np
 
+from core import detector_gray as gray_strategy
 from core.detector_config import (
-    GRAY_DARK_EVIDENCE_THRESHOLD,
-    GRAY_DARK_ZONE_THRESHOLD,
-    GRAY_ELONGATED_SCAN_MAX_TEMPLATE_PIXELS,
-    GRAY_ELONGATED_SCAN_THRESHOLD,
     GRAY_SCALES,
-    GRAY_RAW_SCAN_MIN_TEMPLATE_AREA,
-    GRAY_RAW_SCAN_MIN_TEMPLATE_PIXELS,
-    GRAY_RAW_SCAN_THRESHOLD,
     GRAY_SUPPRESS_HORIZONTAL_KERNEL_PX,
     GRAY_SUPPRESS_VERTICAL_KERNEL_PX,
-    GRAY_STRICT_SCAN_THRESHOLD,
     SCALES,
     THRESHOLD_DILATED,
     THRESHOLD_PRECISE,
@@ -97,42 +90,26 @@ def _hit_overlap_metrics(
     return coverage, purity, context
 
 
-def _use_raw_gray_scan_mask(template: TemplateInfo) -> bool:
-    height, width = template.mask.shape[:2]
-    area = int(width * height)
-    pixels = int(getattr(template, "pixel_count", 0) or cv2.countNonZero(template.mask))
-    return area >= GRAY_RAW_SCAN_MIN_TEMPLATE_AREA or pixels >= GRAY_RAW_SCAN_MIN_TEMPLATE_PIXELS
-
-
-def _use_relaxed_gray_scan_threshold(template: TemplateInfo) -> bool:
-    height, width = template.mask.shape[:2]
-    return int(width * height) >= GRAY_RAW_SCAN_MIN_TEMPLATE_AREA
-
-
-def _use_lenient_gray_elongated_scan_threshold(template: TemplateInfo) -> bool:
-    height, width = template.mask.shape[:2]
-    aspect = max(width / max(1, height), height / max(1, width))
-    pixels = int(getattr(template, "pixel_count", 0) or cv2.countNonZero(template.mask))
-    return aspect >= 2.0 and pixels <= GRAY_ELONGATED_SCAN_MAX_TEMPLATE_PIXELS
-
-
 def _scan_mask_for_template(
     *,
     detector_profile: str,
     plan_image: np.ndarray,
     plan_hsv: np.ndarray,
     template: TemplateInfo,
+    template_id: int,
     gray_raw_mask: np.ndarray,
-    gray_scan_mask: np.ndarray,
-    gray_dark_raw_mask: np.ndarray,
-    gray_dark_scan_mask: np.ndarray,
+    gray_scan_masks: gray_strategy.GrayScanMasks | None,
 ) -> tuple[np.ndarray, np.ndarray, str]:
     """Return (validation_mask, scan_mask, scan_mask_kind) for one template."""
 
     if detector_profile == "gray" or template.dominant_hsv is None:
-        if _use_raw_gray_scan_mask(template):
-            return gray_raw_mask, gray_dark_raw_mask, "zone_raw"
-        return gray_raw_mask, gray_dark_scan_mask, "zone_suppressed"
+        if gray_scan_masks is None:
+            return gray_raw_mask, gray_raw_mask, "gray_raw"
+        return (
+            gray_raw_mask,
+            gray_scan_masks.scan_masks_by_template.get(template_id, gray_raw_mask),
+            gray_scan_masks.scan_mask_kinds_by_template.get(template_id, "gray_raw"),
+        )
 
     color_mask = _color_mask_for_template(
         plan_image,
@@ -173,21 +150,17 @@ def inspect_roi(
         GRAY_SUPPRESS_HORIZONTAL_KERNEL_PX,
         GRAY_SUPPRESS_VERTICAL_KERNEL_PX,
     )
-    gray_dark_raw_mask = _ink_mask(
-        plan_image,
-        dilate=True,
-        threshold=GRAY_DARK_ZONE_THRESHOLD,
-    )
-    gray_evidence_mask = _ink_mask(
-        plan_image,
-        dilate=False,
-        threshold=GRAY_DARK_EVIDENCE_THRESHOLD,
-    )
-    gray_dark_scan_mask = _suppress_long_strokes(
-        gray_dark_raw_mask,
-        GRAY_SUPPRESS_HORIZONTAL_KERNEL_PX,
-        GRAY_SUPPRESS_VERTICAL_KERNEL_PX,
-    )
+    gray_scan_masks = None
+    gray_evidence_mask = None
+    if detector_profile == "gray":
+        gray_scan_masks = gray_strategy.build_gray_scan_masks(
+            plan_image=plan_image,
+            templates=templates,
+            plan_masks_by_template={template_id: gray_raw_mask for template_id in range(len(templates))},
+            exclude_rects=[],
+            raw_dilated=gray_raw_mask,
+        )
+        gray_evidence_mask = gray_scan_masks.evidence_mask
 
     candidates: list[dict[str, Any]] = []
     raw_hits_by_scale: dict[float, int] = {}
@@ -200,10 +173,9 @@ def inspect_roi(
             plan_image=plan_image,
             plan_hsv=plan_hsv,
             template=template,
+            template_id=template_id,
             gray_raw_mask=gray_raw_mask,
-            gray_scan_mask=gray_scan_mask,
-            gray_dark_raw_mask=gray_dark_raw_mask,
-            gray_dark_scan_mask=gray_dark_scan_mask,
+            gray_scan_masks=gray_scan_masks,
         )
         roi_scan = _crop(scan_mask, clamped)
         if cv2.countNonZero(roi_scan) <= 0:
@@ -211,12 +183,7 @@ def inspect_roi(
 
         threshold = THRESHOLD_PRECISE if template.requires_precision else THRESHOLD_DILATED
         if detector_profile == "gray":
-            if _use_relaxed_gray_scan_threshold(template):
-                threshold = max(threshold, GRAY_RAW_SCAN_THRESHOLD)
-            elif _use_lenient_gray_elongated_scan_threshold(template):
-                threshold = GRAY_ELONGATED_SCAN_THRESHOLD
-            else:
-                threshold = max(threshold, GRAY_STRICT_SCAN_THRESHOLD)
+            threshold = gray_strategy.gray_scan_threshold(template, threshold)
 
         for variant in _prepare_variants(template_id, template, scales=used_scales):
             variant_count += 1
@@ -340,8 +307,14 @@ def inspect_roi(
     roi_image = plan_image[y : y + h, x : x + w]
     roi_raw_mask = _crop(gray_raw_mask, clamped)
     roi_scan_mask = _crop(gray_scan_mask, clamped)
-    roi_dark_raw_mask = _crop(gray_dark_raw_mask, clamped)
-    roi_dark_scan_mask = _crop(gray_dark_scan_mask, clamped)
+    roi_dark_raw_mask = (
+        _crop(gray_scan_masks.zone_mask, clamped) if gray_scan_masks is not None else roi_raw_mask
+    )
+    roi_dark_scan_mask = (
+        _crop(gray_scan_masks.evidence_mask, clamped)
+        if gray_scan_masks is not None
+        else roi_scan_mask
+    )
 
     return {
         "roi": {"x": x, "y": y, "width": w, "height": h},
@@ -355,9 +328,17 @@ def inspect_roi(
         "roiScanPixels": int(cv2.countNonZero(roi_scan_mask)),
         "roiDarkInkPixels": int(cv2.countNonZero(roi_dark_raw_mask)),
         "roiDarkScanPixels": int(cv2.countNonZero(roi_dark_scan_mask)),
-        "grayDarkInkThreshold": int(GRAY_DARK_ZONE_THRESHOLD),
-        "grayDarkEvidenceThreshold": int(GRAY_DARK_EVIDENCE_THRESHOLD),
-        "roiDarkEvidencePixels": int(cv2.countNonZero(_crop(gray_evidence_mask, clamped))),
+        "grayDarkInkThreshold": int(
+            gray_scan_masks.zone_threshold if gray_scan_masks is not None else 0
+        ),
+        "grayDarkEvidenceThreshold": int(
+            gray_scan_masks.evidence_threshold if gray_scan_masks is not None else 0
+        ),
+        "roiDarkEvidencePixels": int(
+            cv2.countNonZero(_crop(gray_evidence_mask, clamped))
+            if gray_evidence_mask is not None
+            else 0
+        ),
         "roiImage": _image_data_url(roi_image),
         "roiRawMask": _mask_data_url(roi_raw_mask),
         "roiScanMask": _mask_data_url(roi_scan_mask),
