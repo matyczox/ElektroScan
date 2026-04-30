@@ -12,6 +12,11 @@ from core.detector_config import (
     COLOR_VAL_TOLERANCE,
     CONTEXT_MARGIN_RATIO,
     DILATE_KERNEL,
+    GRAY_SMALL_SCALE_MIN_COVERAGE,
+    GRAY_SMALL_SCALE_SUSPICIOUS_PURITY,
+    GRAY_SMALL_SCALE_THRESHOLD,
+    GRAY_SUPPRESS_HORIZONTAL_KERNEL_PX,
+    GRAY_SUPPRESS_VERTICAL_KERNEL_PX,
     HSV_LOWER,
     HSV_UPPER,
     LABEL_CONTENT_MAX_RATIO,
@@ -90,6 +95,32 @@ def _ink_mask(
     if dilate:
         mask = cv2.dilate(mask, DILATE_KERNEL, iterations=1)
     return mask
+
+
+def _suppress_long_strokes(
+    mask: np.ndarray,
+    horizontal_px: int = GRAY_SUPPRESS_HORIZONTAL_KERNEL_PX,
+    vertical_px: int = GRAY_SUPPRESS_VERTICAL_KERNEL_PX,
+) -> np.ndarray:
+    """Remove long strokes from an ink mask, leaving compact symbol shapes.
+
+    Text lines and dimension annotations contain continuous strokes spanning
+    >= horizontal_px (horizontal) or >= vertical_px (vertical) pixels.
+    Symbol outlines (01, 04, ZG, etc.) have shorter internal strokes.
+    MORPH_OPEN with a 1×N kernel keeps only strokes that are uninterrupted for
+    the full kernel width; subtracting those yields a cleaner scan mask.
+
+    Only safe as a scan-time prefilter.  Validation must use the raw ink mask
+    so that symbols whose own strokes exceed the kernel width (large frames,
+    wide rectangles) are not discarded during the coverage/purity check.
+    """
+    if mask.size == 0 or cv2.countNonZero(mask) == 0:
+        return mask
+
+    h_lines = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((1, horizontal_px), np.uint8))
+    v_lines = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((vertical_px, 1), np.uint8))
+    long_strokes = cv2.bitwise_or(h_lines, v_lines)
+    return cv2.bitwise_and(mask, cv2.bitwise_not(long_strokes))
 
 
 def _thickness_normalized_mask(mask: np.ndarray) -> np.ndarray:
@@ -573,18 +604,29 @@ def _validate_template_hit(
     hit: CandidateHit,
     plan_mask: np.ndarray,
     plan_image: np.ndarray,
+    reasons: dict[str, int] | None = None,
 ) -> bool:
-    """Validate a candidate by foreground overlap, purity and hue consistency."""
+    """Validate a candidate by foreground overlap, purity and hue consistency.
+
+    When ``reasons`` is provided, the first failed check name is incremented in it
+    so callers can build an aggregate rejection histogram without re-running checks.
+    """
+
+    def _record(reason: str) -> None:
+        if reasons is not None:
+            reasons[reason] = reasons.get(reason, 0) + 1
 
     if hit.transformed_mask is None:
         return True
 
     roi = _roi_mask(plan_mask, hit.bbox)
     if roi is None or roi.shape != hit.transformed_mask.shape:
+        _record("roi_shape")
         return False
 
     roi_foreground = int(cv2.countNonZero(roi))
     if roi_foreground == 0 or hit.pixel_count <= 0:
+        _record("empty_roi")
         return False
 
     intersection_mask = cv2.bitwise_and(roi, hit.transformed_mask)
@@ -592,10 +634,15 @@ def _validate_template_hit(
     coverage = intersection / hit.pixel_count
     purity = intersection / roi_foreground
 
-    if coverage < MIN_COVERAGE_RATIO or purity < MIN_PURITY_RATIO:
+    if coverage < MIN_COVERAGE_RATIO:
+        _record("coverage")
+        return False
+    if purity < MIN_PURITY_RATIO:
+        _record("purity")
         return False
 
     if (context_purity := _context_purity(plan_mask, hit.bbox, intersection_mask)) <= 0.0:
+        _record("context_purity")
         return False
 
     if (
@@ -603,6 +650,7 @@ def _validate_template_hit(
         and coverage < NOISY_PARTIAL_COVERAGE_THRESHOLD
         and purity < NOISY_PARTIAL_PURITY_THRESHOLD
     ):
+        _record("noisy_partial")
         return False
 
     if hit.dominant_hsv is None:
@@ -624,17 +672,36 @@ def _validate_template_hit(
         # agreement before accepting them.
         if template_density < 0.18:
             if max(coverage, normalized_coverage) < 0.62:
+                _record("gray_coverage")
                 return False
             if max(purity, normalized_purity) < 0.30 and context_purity < 0.55:
+                _record("gray_purity")
                 return False
             if hit.match_score < 0.68 and max(coverage, normalized_coverage) < 0.74:
+                _record("gray_low_match")
                 return False
         elif purity < 0.18 and context_purity < 0.45:
+            _record("gray_purity")
             return False
+
+    # Small-scale anomaly: a sparse template (e.g. 01 rectangle at 0.5×) that
+    # latches onto an isolated stroke fragment shows partial coverage AND
+    # anomalously high purity (very little foreign ink in the ROI). Real gray
+    # plan detections sit in dense ink and have purity ~0.5-0.7. Reject only
+    # this combination to avoid killing valid imperfect-coverage hits.
+    if (
+        hit.dominant_hsv is None
+        and hit.scale <= GRAY_SMALL_SCALE_THRESHOLD
+        and coverage < GRAY_SMALL_SCALE_MIN_COVERAGE
+        and purity > GRAY_SMALL_SCALE_SUSPICIOUS_PURITY
+    ):
+        _record("gray_small_scale_anomaly")
+        return False
 
     template_centroid = _mask_centroid(hit.transformed_mask)
     intersection_centroid = _mask_centroid(intersection_mask)
     if template_centroid is None or intersection_centroid is None:
+        _record("centroid")
         return False
 
     centroid_offset = float(
@@ -646,13 +713,16 @@ def _validate_template_hit(
     bbox_diagonal = max(1.0, float(np.hypot(hit.bbox[2], hit.bbox[3])))
     centroid_offset_ratio = centroid_offset / bbox_diagonal
     if centroid_offset_ratio > MAX_CENTROID_OFFSET_RATIO:
+        _record("centroid_offset")
         return False
 
     if hit.match_score < LOW_MATCH_STRICT_THRESHOLD and context_purity < MIN_CONTEXT_PURITY:
+        _record("low_match_strict")
         return False
 
     color_similarity = _roi_color_similarity(plan_image, plan_mask, hit.bbox, hit.dominant_hsv)
     if color_similarity <= 0.0:
+        _record("color_similarity")
         return False
 
     verification_score = (
@@ -675,12 +745,14 @@ def _validate_template_hit(
                 content_threshold = LABEL_FULL_WIDTH_CONTENT_MIN_SCORE
 
         if content_score < content_threshold:
+            _record("content_score")
             return False
         verification_score = (
             1.0 - LABEL_CONTENT_SCORE_WEIGHT
         ) * verification_score + LABEL_CONTENT_SCORE_WEIGHT * content_score
 
     if verification_score < MIN_VERIFICATION_SCORE:
+        _record("verification")
         return False
 
     hit.coverage = round(coverage, 4)

@@ -60,6 +60,11 @@ ROTATIONS = [
     (270, cv2.ROTATE_90_COUNTERCLOCKWISE),
 ]
 SCALES = [0.90, 1.00, 1.10]
+# Diagnostic wider scales used only when detector_profile == "gray".
+# Symbols on gray plans are often rendered much smaller than the legend templates.
+# This range intentionally extends down to 0.5 so we can see at which scale
+# raw_peaks first appear; once that is known, set a tighter GRAY_SCALES.
+GRAY_SCALES = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2]
 
 THRESHOLD_PRECISE = 0.55
 THRESHOLD_DILATED = 0.45
@@ -70,6 +75,28 @@ MAX_TEXT_CONTENT_PEAKS_PER_VARIANT = 500
 GRAY_RAW_MAX_HITS_PER_VARIANT = _env_int("ELEKTROSCAN_GRAY_RAW_MAX_HITS_PER_VARIANT", 180)
 GRAY_RAW_MAX_HITS_PER_TEMPLATE = _env_int("ELEKTROSCAN_GRAY_RAW_MAX_HITS_PER_TEMPLATE", 1200)
 GRAY_RAW_MAX_TOTAL_HITS = _env_int("ELEKTROSCAN_GRAY_RAW_MAX_TOTAL_HITS", 9000)
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+# Gray small-scale anomaly filter: rejects only the conjunction of
+# (low coverage AND anomalously high purity), the signature of a sparse
+# template that latched onto an isolated stroke fragment.  Set
+# ELEKTROSCAN_GRAY_SMALL_SCALE_SUSPICIOUS_PURITY=1.01 to disable.
+GRAY_SMALL_SCALE_THRESHOLD = _env_float("ELEKTROSCAN_GRAY_SMALL_SCALE_THRESHOLD", 0.7)
+GRAY_SMALL_SCALE_MIN_COVERAGE = _env_float("ELEKTROSCAN_GRAY_SMALL_SCALE_MIN_COVERAGE", 0.80)
+GRAY_SMALL_SCALE_SUSPICIOUS_PURITY = _env_float(
+    "ELEKTROSCAN_GRAY_SMALL_SCALE_SUSPICIOUS_PURITY", 0.85
+)
+
 MIN_TEMPLATE_PIXELS = 20
 
 MIN_COVERAGE_RATIO = 0.24
@@ -88,6 +115,14 @@ ROI_MAX_COMPONENTS = 1200
 ROI_MERGE_GAP_PIXELS = 4
 ROI_PADDING_RATIO = 1.15
 ROI_FULL_SCAN_AREA_RATIO = 0.70
+
+# Gray-mode stroke suppression: MORPH_OPEN kernel sizes (pixels).
+# Strokes longer than these thresholds are treated as text/dimension lines and
+# removed from the scan mask before matchTemplate.  Symbols like 01/04/ZG have
+# internal strokes shorter than this; text and dimension annotations are longer.
+# Only affects the scan-time mask — validation still uses the raw ink mask.
+GRAY_SUPPRESS_HORIZONTAL_KERNEL_PX = 40
+GRAY_SUPPRESS_VERTICAL_KERNEL_PX = 40
 
 PRECISE_KEYWORDS = ["gniazdo", "wypust"]
 MIRRORED_VARIANT_PREFIXES = {"06", "07", "09", "10", "11", "12"}

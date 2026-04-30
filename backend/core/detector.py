@@ -42,12 +42,16 @@ from core.detector_config import (
     GRAY_RAW_MAX_HITS_PER_TEMPLATE,
     GRAY_RAW_MAX_HITS_PER_VARIANT,
     GRAY_RAW_MAX_TOTAL_HITS,
+    GRAY_SCALES,
+    GRAY_SUPPRESS_HORIZONTAL_KERNEL_PX,
+    GRAY_SUPPRESS_VERTICAL_KERNEL_PX,
     LABEL_CONTENT_SCAN_MIN_PIXELS,
     MAX_PEAKS_PER_VARIANT,
     MAX_TEXT_CONTENT_PEAKS_PER_VARIANT,
     MIN_TEMPLATE_PIXELS,
     OPENCV_NUM_THREADS,
     PRECISE_KEYWORDS,
+    SCALES,
     TEXT_CONTENT_THRESHOLD,
     THRESHOLD_DILATED,
     THRESHOLD_PRECISE,
@@ -59,6 +63,7 @@ from core.detector_masks import (
     _find_local_maxima,
     _hsv_mask,
     _ink_mask,
+    _suppress_long_strokes,
     _tight_mask_crop,
     _validate_template_hit,
 )
@@ -716,10 +721,11 @@ def detect_symbols(
     plan_hsv = cv2.cvtColor(plan_image, cv2.COLOR_BGR2HSV)
 
     variant_workers = max(1, min(len(templates), DETECTOR_POSTPROCESS_MAX_WORKERS))
+    used_scales = list(GRAY_SCALES) if detector_profile == "gray" else list(SCALES)
     with ThreadPoolExecutor(max_workers=variant_workers) as pool:
         prepared_variant_items = list(
             pool.map(
-                lambda item: (item[0], _prepare_variants(item[0], item[1])),
+                lambda item: (item[0], _prepare_variants(item[0], item[1], scales=used_scales)),
                 enumerate(templates),
             )
         )
@@ -814,10 +820,36 @@ def detect_symbols(
     dilated_plan_masks_by_template: dict[int, np.ndarray] = {}
     timings["prepare"] = time.perf_counter() - phase_start
 
+    # Gray stroke suppression — build a dedicate scan mask with long text/dimension
+    # strokes removed.  matchTemplate runs on this suppressed mask so it no longer
+    # fires on text rows and dimension lines.  Validation still uses the raw ink mask
+    # (plan_masks_by_template) so that symbols whose own strokes exceed the kernel
+    # width (large rectangular frames) pass the coverage/purity check.
+    gray_suppressed_pixels = 0
+    gray_raw_ink_pixels = 0
+    scan_masks_by_template: dict[int, np.ndarray]
+    timings["gray_suppress"] = 0.0
+    if detector_profile == "gray":
+        _t_suppress = time.perf_counter()
+        _raw_dilated = _get_ink_plan_mask(dilate=True)
+        gray_raw_ink_pixels = int(cv2.countNonZero(_raw_dilated))
+        _suppressed = _suppress_long_strokes(
+            _raw_dilated,
+            GRAY_SUPPRESS_HORIZONTAL_KERNEL_PX,
+            GRAY_SUPPRESS_VERTICAL_KERNEL_PX,
+        )
+        gray_suppressed_pixels = gray_raw_ink_pixels - int(cv2.countNonZero(_suppressed))
+        timings["gray_suppress"] = time.perf_counter() - _t_suppress
+        scan_masks_by_template = {tid: _suppressed for tid in plan_masks_by_template}
+    else:
+        scan_masks_by_template = plan_masks_by_template
+
     diagnostics = {
         "detector_profile": 1 if detector_profile == "gray" else 0,
         "gray_text_exclude_rects": len(gray_text_exclude_rects),
         "gray_title_exclude_rects": len(gray_title_exclude_rects),
+        "gray_suppressed_pixels": gray_suppressed_pixels,
+        "gray_suppressed_ratio": round(gray_suppressed_pixels / max(1, gray_raw_ink_pixels), 3),
         "raw_peaks": 0,
         "raw_budget_hits": 0,
         "raw_budget_removed": 0,
@@ -849,14 +881,16 @@ def detect_symbols(
         threshold = THRESHOLD_PRECISE if template.requires_precision else THRESHOLD_DILATED
         if detector_profile == "gray":
             threshold = max(threshold, 0.58)
-        plan_mask = plan_masks_by_template[template_id]
+        # scan_mask: suppressed for gray (long strokes removed), raw for color.
+        # plan_masks_by_template (raw ink) is used only during validation.
+        scan_mask = scan_masks_by_template[template_id]
         search_rois = search_rois_by_template.get(template_id, [])
         if plan_mask_foregrounds.get(template_id, 0) < MIN_TEMPLATE_PIXELS or not search_rois:
             return []
 
         template_hits: list[CandidateHit] = []
         for variant in variants_by_template.get(template_id, []):
-            if variant.height > plan_mask.shape[0] or variant.width > plan_mask.shape[1]:
+            if variant.height > scan_mask.shape[0] or variant.width > scan_mask.shape[1]:
                 continue
 
             variant_peaks: list[tuple[int, int, float]] = []
@@ -865,7 +899,7 @@ def detect_symbols(
                 if variant.height > roi_h or variant.width > roi_w:
                     continue
 
-                roi_plan_mask = plan_mask[roi_y : roi_y + roi_h, roi_x : roi_x + roi_w]
+                roi_plan_mask = scan_mask[roi_y : roi_y + roi_h, roi_x : roi_x + roi_w]
                 match_result = cv2.matchTemplate(
                     roi_plan_mask,
                     variant.transformed_mask,
@@ -925,7 +959,7 @@ def detect_symbols(
                 if content_h > roi_h or content_w > roi_w:
                     continue
 
-                roi_plan_mask = plan_mask[roi_y : roi_y + roi_h, roi_x : roi_x + roi_w]
+                roi_plan_mask = scan_mask[roi_y : roi_y + roi_h, roi_x : roi_x + roi_w]
                 match_result = cv2.matchTemplate(
                     roi_plan_mask,
                     content_crop,
@@ -996,6 +1030,14 @@ def detect_symbols(
     timings["scan"] = time.perf_counter() - phase_start
 
     diagnostics["raw_peaks"] = len(raw_template_hits)
+
+    # Per-scale histograms for diagnostics: count raw_peaks at each scale
+    # before budget/prefilter so we can see whether matchTemplate fires at all
+    # at a given scale (especially important on gray plans).
+    raw_peaks_by_scale: dict[float, int] = {}
+    for _hit in raw_template_hits:
+        raw_peaks_by_scale[_hit.scale] = raw_peaks_by_scale.get(_hit.scale, 0) + 1
+
     gray_budget_profile: dict = {}
     if detector_profile == "gray":
         raw_template_hits, gray_budget_profile = _gray_raw_budget(raw_template_hits, templates)
@@ -1015,15 +1057,20 @@ def detect_symbols(
     diagnostics["raw_prefilter_removed"] = raw_before_prefilter - len(raw_template_hits)
     timings["raw_prefilter"] = time.perf_counter() - phase_start
 
+    candidates_by_scale: dict[float, int] = {}
+    for _hit in raw_template_hits:
+        candidates_by_scale[_hit.scale] = candidates_by_scale.get(_hit.scale, 0) + 1
+
     validated_candidates: list[CandidateHit] = list(pdf_candidates)
     phase_start = time.perf_counter()
     postprocess_workers = max(1, DETECTOR_POSTPROCESS_MAX_WORKERS)
 
     def _validate_and_promote_hit(
         hit: CandidateHit,
-    ) -> tuple[CandidateHit, CandidateHit, CandidateHit | None]:
+    ) -> tuple[CandidateHit, CandidateHit, CandidateHit | None, str | None]:
         plan_mask = plan_masks_by_template[hit.template_id]
-        if _validate_template_hit(hit, plan_mask, plan_image):
+        local_reasons: dict[str, int] = {}
+        if _validate_template_hit(hit, plan_mask, plan_image, reasons=local_reasons):
             promoted_hit = _maybe_promote_socket_06_to_07(
                 hit,
                 plan_image,
@@ -1033,11 +1080,13 @@ def detect_symbols(
                 variants_lookup,
                 socket_07_promotions,
             )
-            return hit, promoted_hit, None
-        return hit, hit, hit
+            return hit, promoted_hit, None, None
+        rejection_reason = next(iter(local_reasons), "other")
+        return hit, hit, hit, rejection_reason
 
     validated_hits: list[CandidateHit] = []
     rejected_hits: list[CandidateHit] = []
+    rejection_reasons: dict[str, int] = {}
     validation_workers = max(1, min(len(raw_template_hits), postprocess_workers))
     if raw_template_hits:
         completed_validations = 0
@@ -1057,9 +1106,11 @@ def detect_symbols(
                     )
                 if validation_result is None:
                     continue
-                original_hit, promoted_hit, rejected_hit = validation_result
+                original_hit, promoted_hit, rejected_hit, reason = validation_result
                 if rejected_hit is not None:
                     rejected_hits.append(rejected_hit)
+                    if reason is not None:
+                        rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
                     continue
                 if (
                     promoted_hit.template_id != original_hit.template_id
@@ -1068,6 +1119,10 @@ def detect_symbols(
                     diagnostics["promoted_targeted_hits"] += 1
                 validated_hits.append(promoted_hit)
     validated_candidates.extend(validated_hits)
+
+    accepted_by_scale: dict[float, int] = {}
+    for _hit in validated_hits:
+        accepted_by_scale[_hit.scale] = accepted_by_scale.get(_hit.scale, 0) + 1
 
     diagnostics["validated_template_hits"] = len(validated_candidates) - len(pdf_candidates)
     timings["validation_targeted"] = time.perf_counter() - phase_start
@@ -1168,6 +1223,27 @@ def detect_symbols(
                     "fullImageAreaPixels": int(plan_image.shape[0] * plan_image.shape[1]),
                 },
                 "grayRawBudget": gray_budget_profile,
+                "grayStrokeSuppression": {
+                    "removedPixels": int(diagnostics["gray_suppressed_pixels"]),
+                    "rawPixels": int(gray_raw_ink_pixels),
+                    "ratio": float(diagnostics["gray_suppressed_ratio"]),
+                    "timingMs": round(timings_ms.get("gray_suppress", 0.0), 3),
+                    "horizontalKernelPx": GRAY_SUPPRESS_HORIZONTAL_KERNEL_PX,
+                    "verticalKernelPx": GRAY_SUPPRESS_VERTICAL_KERNEL_PX,
+                },
+                "scaleHistogram": {
+                    "usedScales": [round(float(s), 3) for s in used_scales],
+                    "rawPeaks": {
+                        round(float(s), 3): int(c) for s, c in sorted(raw_peaks_by_scale.items())
+                    },
+                    "candidates": {
+                        round(float(s), 3): int(c) for s, c in sorted(candidates_by_scale.items())
+                    },
+                    "accepted": {
+                        round(float(s), 3): int(c) for s, c in sorted(accepted_by_scale.items())
+                    },
+                },
+                "rejectionReasons": {k: int(v) for k, v in rejection_reasons.items()},
                 "debugCandidates": debug_candidates,
                 "slowestPhase": (
                     max(timings_ms.items(), key=lambda item: item[1])[0] if timings_ms else None
@@ -1175,14 +1251,31 @@ def detect_symbols(
             }
         )
 
+    def _fmt_scale_hist(hist: dict[float, int]) -> str:
+        if not hist:
+            return "{}"
+        return "{" + ",".join(f"{s:.2f}:{hist.get(s, 0)}" for s in used_scales) + "}"
+
+    rejection_summary = (
+        ",".join(f"{k}:{v}" for k, v in sorted(rejection_reasons.items(), key=lambda kv: -kv[1]))
+        if rejection_reasons
+        else "-"
+    )
+
     print(
         "Detection diagnostics:"
+        f" profile={detector_profile},"
+        f" templates={len(templates)},"
+        f" used_scales=[{','.join(f'{s:.2f}' for s in used_scales)}],"
         f" prepared_variants={diagnostics['prepared_variants']},"
         f" skipped_empty_color_masks={diagnostics['skipped_empty_color_masks']},"
-        f" raw_peaks={diagnostics['raw_peaks']},"
+        f" raw_peaks={diagnostics['raw_peaks']} per_scale={_fmt_scale_hist(raw_peaks_by_scale)},"
         f" raw_budget={diagnostics['raw_budget_hits']}(-{diagnostics['raw_budget_removed']}),"
-        f" raw_after_prefilter={diagnostics['raw_prefilter_hits']}(-{diagnostics['raw_prefilter_removed']}),"  # noqa: E501
-        f" validated_template_hits={diagnostics['validated_template_hits']},"
+        f" raw_after_prefilter={diagnostics['raw_prefilter_hits']}(-{diagnostics['raw_prefilter_removed']})"  # noqa: E501
+        f" candidates_per_scale={_fmt_scale_hist(candidates_by_scale)},"
+        f" validated_template_hits={diagnostics['validated_template_hits']}"
+        f" accepted_per_scale={_fmt_scale_hist(accepted_by_scale)},"
+        f" rejects=nms:{diagnostics['raw_prefilter_removed']}|suppression(budget):{diagnostics['raw_budget_removed']}|validation:[{rejection_summary}],"  # noqa: E501
         f" promoted_targeted_hits={diagnostics['promoted_targeted_hits']},"
         f" parent_search_input_hits={diagnostics['parent_search_input_hits']},"
         f" parent_search_candidates={diagnostics['parent_search_candidates']},"
@@ -1192,10 +1285,12 @@ def detect_symbols(
         f" pre_parent_clusters={diagnostics['pre_parent_clusters']},"
         f" final_clusters={diagnostics['final_hits']},"
         f" rois={diagnostics['search_rois']} full_scan_templates={diagnostics['full_scan_templates']},"  # noqa: E501
+        f" gray_suppress={diagnostics['gray_suppressed_pixels']}px({diagnostics['gray_suppressed_ratio']:.0%}),"
         f" threads=scan:{scan_workers}/{DETECTOR_SCAN_MAX_WORKERS}|post:{postprocess_workers}/{DETECTOR_POSTPROCESS_MAX_WORKERS}|opencv:{OPENCV_NUM_THREADS},"  # noqa: E501
         f" timings_ms="
         f"pdf_text:{timings_ms['pdf_text']:.0f}|"
         f"prepare:{timings_ms['prepare']:.0f}|"
+        f"gray_suppress:{timings_ms['gray_suppress']:.0f}|"
         f"scan:{timings_ms['scan']:.0f}|"
         f"raw_prefilter:{timings_ms['raw_prefilter']:.0f}|"
         f"validation_targeted:{timings_ms['validation_targeted']:.0f}|"
