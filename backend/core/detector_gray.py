@@ -38,6 +38,9 @@ from core.detector_config import (
     GRAY_RECT_FRAME_MAX_CENTER_DENSITY,
     GRAY_RECT_FRAME_MAX_DENSITY,
     GRAY_RECT_FRAME_MAX_RAW_SCAN_SCALE,
+    GRAY_RECT_FRAME_MERGE_CENTER_DISTANCE,
+    GRAY_RECT_FRAME_MERGE_IOM,
+    GRAY_RECT_FRAME_MERGE_MAX_SCALE_DELTA,
     GRAY_RECT_FRAME_MIN_ASPECT,
     GRAY_RECT_FRAME_MIN_DENSITY,
     GRAY_RECT_FRAME_MIN_RAW_SCAN_SCALE,
@@ -750,6 +753,14 @@ def _is_gray_symbol_hit(hit: CandidateHit) -> bool:
     return hit.dominant_hsv is None and not hit.is_text_label
 
 
+def _is_gray_rect_frame_hit(hit: CandidateHit, templates: list[TemplateInfo]) -> bool:
+    return (
+        _is_gray_symbol_hit(hit)
+        and 0 <= hit.template_id < len(templates)
+        and is_gray_rect_frame_template(templates[hit.template_id])
+    )
+
+
 def _suppress_nested_gray_core_hits(hits: list[CandidateHit]) -> list[CandidateHit]:
     """Drop smaller gray sub-symbols when a fuller symbol covers the same ink."""
 
@@ -785,6 +796,83 @@ def _suppress_nested_gray_core_hits(hits: list[CandidateHit]) -> list[CandidateH
     return [hit for index, hit in enumerate(hits) if index not in suppressed]
 
 
+def _merge_duplicate_gray_rect_frames(
+    hits: list[CandidateHit],
+    templates: list[TemplateInfo],
+) -> tuple[list[CandidateHit], int]:
+    """Merge shifted hollow-frame detections that represent one oversized frame."""
+
+    if len(hits) < 2:
+        return hits, 0
+
+    parent = list(range(len(hits)))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        root_left = find(left)
+        root_right = find(right)
+        if root_left != root_right:
+            parent[root_right] = root_left
+
+    def same_frame(left: CandidateHit, right: CandidateHit) -> bool:
+        if left.template_id != right.template_id:
+            return False
+        if not (_is_gray_rect_frame_hit(left, templates) and _is_gray_rect_frame_hit(right, templates)):
+            return False
+        if (left.rotation % 180) != (right.rotation % 180):
+            return False
+        if abs(float(left.scale) - float(right.scale)) > GRAY_RECT_FRAME_MERGE_MAX_SCALE_DELTA:
+            return False
+
+        _inter, iou, iom, center_distance = _bbox_metrics(left.bbox, right.bbox)
+        if iou <= 0.0:
+            return False
+        return (
+            iom >= GRAY_RECT_FRAME_MERGE_IOM
+            and center_distance <= GRAY_RECT_FRAME_MERGE_CENTER_DISTANCE
+        )
+
+    for left_index in range(len(hits)):
+        for right_index in range(left_index + 1, len(hits)):
+            if same_frame(hits[left_index], hits[right_index]):
+                union(left_index, right_index)
+
+    groups: dict[int, list[CandidateHit]] = {}
+    for index, hit in enumerate(hits):
+        groups.setdefault(find(index), []).append(hit)
+
+    merged_count = 0
+    output: list[CandidateHit] = []
+    for group_hits in groups.values():
+        if len(group_hits) == 1:
+            output.append(group_hits[0])
+            continue
+
+        winner = max(
+            group_hits,
+            key=lambda hit: (
+                float(hit.verification_score),
+                float(hit.match_score),
+                float(hit.coverage),
+            ),
+        )
+        min_x = min(hit.bbox[0] for hit in group_hits)
+        min_y = min(hit.bbox[1] for hit in group_hits)
+        max_x = max(hit.bbox[0] + hit.bbox[2] for hit in group_hits)
+        max_y = max(hit.bbox[1] + hit.bbox[3] for hit in group_hits)
+        winner.bbox = (min_x, min_y, max_x - min_x, max_y - min_y)
+        output.append(winner)
+        merged_count += len(group_hits) - 1
+
+    output.sort(key=lambda item: (item.bbox[1], item.bbox[0], -item.verification_score))
+    return output, merged_count
+
+
 def rescue_validated_gray_frame_hits(
     final_hits: list[CandidateHit],
     validated_hits: list[CandidateHit],
@@ -804,10 +892,13 @@ def rescue_validated_gray_frame_hits(
             rescued.append(hit)
 
     if not rescued:
-        return _suppress_nested_gray_core_hits(final_hits), 0
+        suppressed = _suppress_nested_gray_core_hits(final_hits)
+        merged, _merged_count = _merge_duplicate_gray_rect_frames(suppressed, templates)
+        return merged, 0
 
     combined = final_hits + rescued
     combined = _suppress_nested_gray_core_hits(combined)
+    combined, _merged_count = _merge_duplicate_gray_rect_frames(combined, templates)
     combined.sort(key=lambda item: (item.bbox[1], item.bbox[0], -item.verification_score))
     return combined, len(rescued)
 
