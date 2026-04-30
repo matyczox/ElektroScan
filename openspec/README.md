@@ -28,6 +28,16 @@ Jesli starsze pliki sa sprzeczne z `current-context.md`, traktuj
 | [devops.md](devops.md) | Docker, CI, lint, testy |
 | [changelog.md](changelog.md) | Historia zmian |
 
+## Goldeny
+
+Committed snapshoty regresyjne sa w `backend/tests/golden/`.
+
+- `viking_bronisze_e8_gray_first_pdf_100pct.json` - pierwszy szary PDF
+  zaakceptowany jako 100% dla aktualnego celu.
+
+`backend/analysis_debug/` jest tylko lokalna diagnostyka i nie powinien trafic
+do commita.
+
 ## Minimalny Prompt Dla Nowego AI
 
 ```text

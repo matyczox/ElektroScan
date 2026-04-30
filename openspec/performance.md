@@ -90,3 +90,28 @@ Przy `include_debug=true` backend zapisuje snapshot JSON do `backend/analysis_de
 - `debugCandidates`
 
 **Nie commitować `backend/analysis_debug/`** — to lokalna diagnostyka. Jest w `.gitignore`.
+
+## Committed Golden Snapshots
+
+Committed goldeny regresyjne trzymamy osobno:
+
+- `backend/tests/golden/viking_bronisze_e8_gray_first_pdf_100pct.json`
+
+Porownanie aktualnego runu z goldenem:
+
+```powershell
+py -3 backend/tools/compare_analysis_snapshot.py `
+  backend/tests/golden/viking_bronisze_e8_gray_first_pdf_100pct.json `
+  backend/analysis_debug/<analysis_id>.json `
+  --focus 01,02,03,04,05,06,07 `
+  --center-tolerance 20 `
+  --size-tolerance 0.45
+```
+
+Smoke test po zmianach:
+
+```powershell
+py -3 -m compileall -q backend
+cd frontend
+npm run build
+```

@@ -72,6 +72,20 @@ npm run build
 
 Plik roboczy: `VIKING-BRONISZE-ELE-Rzuty-E8.pdf`.
 
+Aktualny stan po pracy 2026-05-01:
+
+- Pierwszy szary PDF Viking E8 jest zaakceptowany przez uzytkownika jako
+  dzialajacy w 100% dla obecnego celu.
+- Golden snapshot: `backend/tests/golden/viking_bronisze_e8_gray_first_pdf_100pct.json`.
+- Golden ma `81` finalnych boxow: `01:7, 02:8, 03:11, 04:12, 05:13,
+  06:14, 07:16`.
+- Lokalny smoke run generujacy goldena trwal okolo `22.6s`.
+- To jest baseline dla jednego szarego PDF. Inne szare PDF nadal trzeba
+  przejsc osobno Inspektorem ROI.
+- Nie znaleziono committed golden JSON dla dwoch pierwszych kolorowych PDF.
+  One sa opisane jako dzialajace okolo 95%, ale formalny kolorowy golden
+  trzeba jeszcze dopisac, gdy beda znane stabilne snapshoty.
+
 Aktualny stan po pracy 2026-04-30 wieczorem:
 
 - Viking gray jest blisko uzywalnego stanu dla pierwszego PDF. Ostatni lokalny
@@ -128,6 +142,23 @@ Preferowany nastepny eksperyment:
 - Nie obnizac globalnie progow dla wszystkich symboli, bo to zwieksza false
   positives.
 - Najpierw logowac i porownywac w Inspektorze ROI, potem dopiero zmieniac final.
+
+Najwazniejsze lekcje z dopinania Viking gray:
+
+- Jesli Inspektor ROI pokazuje `PASS`, a final nie, to zwykle nie jest kwestia
+  jednego progu. Sprawdz faze, w ktorej kandydat ginie.
+- Gdy final wykrywa cos z jasnoszarych linii, problemem nie jest nazwa symbolu,
+  tylko brak twardego dowodu ciemnego tuszu w bboxie.
+- `01` wymaga osobnego myslenia, bo na planie bywa wiekszy niz w legendzie i
+  moze skladac sie z dwoch przesunietych polow. Rozwiazanie: geometryczny rescue
+  i merge nachodzacych ramek, nie reguly po koordynatach.
+- `03` w srodku prawdziwego `06` trzeba eliminowac relacja containment/overlap:
+  pelniejszy symbol z dobra geometria wygrywa z mniejszym rdzeniem.
+- `04/05` sa cienkie i wydluzone. Potrzebuja fair ROI/peak handling, inaczej
+  globalny budzet zjada je przed walidacja.
+- `06/07` sa dobre testy parent/child: `07` nie moze chowac `06`, ale mniejsze
+  rdzenie nie moga zostawac jako osobne false-positive, jesli pelny symbol jest
+  juz zaakceptowany.
 
 Aktualne heurystyki, ktore dzialaja dobrze na Viking gray:
 

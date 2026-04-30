@@ -61,6 +61,20 @@ Ten plik służy do logowania ważnych zmian i decyzji projektowych. Nie zastęp
 
 <!-- Dodawaj nowe wpisy na górze listy, po tej linii -->
 
+## 2026-05-01 - Golden dla pierwszego szarego PDF Viking
+
+**Dotyczy:** `backend/tests/golden/`, `openspec/`
+**Zmiana:** Dodano committed golden snapshot
+`viking_bronisze_e8_gray_first_pdf_100pct.json` dla
+`VIKING-BRONISZE-ELE-Rzuty-E8.pdf`. Snapshot ma `81` boxow i rozklad
+`01:7, 02:8, 03:11, 04:12, 05:13, 06:14, 07:16`.
+**Dlaczego:** Po pracy z Inspektorem ROI pierwszy szary PDF jest zaakceptowany
+jako 100% aktualnego celu i trzeba go chronic przed regresjami.
+**Ryzyko:** Golden obejmuje tylko pierwszy szary Viking. Inne szare PDF nadal
+moga wymagac strojenia. Nie wolno podmieniac goldena bez sprawdzenia ROI.
+**Zlote przypadki:** Porownywac przez
+`backend/tools/compare_analysis_snapshot.py` z fokusem `01,02,03,04,05,06,07`.
+
 ## 2026-04-30 - Gray Viking: dark ink zones i trace faz
 
 **Dotyczy:** `backend/core/detector_gray.py`, `backend/core/detector_masks.py`,

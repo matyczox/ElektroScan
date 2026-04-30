@@ -221,3 +221,31 @@ Naprawione klasy problemow:
 Ostatni lokalny wynik dla Viking gray po tych poprawkach: okolo `23.7s`,
 `77` finalnych detekcji, z rozkladem `01:1, 02:8, 03:15, 04:12, 05:13,
 06:12, 07:16`.
+
+## Wynik Implementacji 2026-05-01
+
+Viking gray E8 zostal dopiety do stanu zaakceptowanego przez uzytkownika jako
+100% dla pierwszego szarego PDF.
+
+Golden:
+
+- `backend/tests/golden/viking_bronisze_e8_gray_first_pdf_100pct.json`
+- `81` finalnych boxow
+- rozklad: `01:7, 02:8, 03:11, 04:12, 05:13, 06:14, 07:16`
+- lokalny smoke run: okolo `22.6s`
+
+Co domknelo temat:
+
+- Gray skanuje po `zone_raw` / `zone_suppressed` opartych na ciemnym tuszu,
+  zamiast mielic cala jasnoszara architekture.
+- `gray_dark_evidence` blokuje przypadki, gdzie geometria pasuje, ale bbox
+  jest zbudowany z jasnoszarych linii planu.
+- `01` dostal gray-only rescue dla wiekszych ramek na planie oraz merge
+  zdublowanych, nachodzacych trafien.
+- `03` w srodku zaakceptowanego `06` jest traktowane jak mniejszy rdzen, nie
+  osobny finalny symbol.
+- `04/05` korzystaja z wydluzonej, ale nadal ogolnej logiki: fair peak budget,
+  dark evidence i walidacja geometrii.
+
+Nadal nie zakladac, ze kazdy gray PDF jest gotowy. Ten golden chroni pierwszego
+Vikinga i ma byc punktem odniesienia przed praca nad kolejnymi szarymi rzutami.

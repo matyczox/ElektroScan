@@ -1,5 +1,10 @@
 # ElektroScan Open Spec
 
+> Aktualizacja 2026-05-01: aktywnym zrodlem prawdy jest
+> `openspec/current-context.md`, a aktywny workspace to
+> `C:\Users\Admin\Desktop\elektroskan_claude`. Starsze sekcje tego pliku moga
+> zawierac historyczne sciezki i branche.
+
 Pełna dokumentacja modułowa znajduje się też w katalogu [`openspec/`](openspec/). Ten plik zostaje jako duży handoff end-to-end dla człowieka i agenta AI, a `openspec/` jako wersja podzielona tematycznie.
 
 Ten dokument jest przekazaniem projektu dla kolejnej osoby i jej agenta AI/Codexa. Ma dać pełny obraz tego, co projekt robi, jak jest zbudowany, jakie decyzje już podjęto, czego nie psuć oraz gdzie są obecne graniczne problemy.

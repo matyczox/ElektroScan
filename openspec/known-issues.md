@@ -6,6 +6,11 @@ Znane problemy nie są powodem do panicznego overfitu. Podejście: zebrać dane,
 
 Te przypadki są ważniejsze niż "średnie wrażenie z UI". Jeżeli któryś się zmienia, trzeba rozumieć dlaczego.
 
+Committed golden snapshoty:
+
+- `backend/tests/golden/viking_bronisze_e8_gray_first_pdf_100pct.json` -
+  pierwszy szary PDF zaakceptowany jako 100% aktualnego celu.
+
 | PDF | Miejsce / bbox | Oczekiwane zachowanie | Dlaczego ważne |
 | --- | --- | --- | --- |
 | `PW-E-02 Rev2.pdf` | `2293,1548,48,31` | Ma być `12`, nie `11` | Historycznie największy problem, obecnie naprawiony |
@@ -96,3 +101,11 @@ Sprawdzać:
 - `E 400V` przypadki `08`.
 - Grupy zielonych `11/12/13`.
 - Fałszywe środki `21/23` w zlepionych symbolach.
+
+### `VIKING-BRONISZE-ELE-Rzuty-E8.pdf`
+
+- Profil: `gray`.
+- Status: pierwszy szary PDF zaakceptowany przez uzytkownika jako 100%.
+- Golden: `backend/tests/golden/viking_bronisze_e8_gray_first_pdf_100pct.json`.
+- Oczekiwany rozklad goldena: `01:7, 02:8, 03:11, 04:12, 05:13, 06:14, 07:16`.
+- Ten baseline nie oznacza, ze inne szare PDF sa gotowe.
