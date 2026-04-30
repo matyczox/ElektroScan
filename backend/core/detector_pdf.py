@@ -175,6 +175,146 @@ def _collect_pdf_text_hits(
     return hits_by_template
 
 
+def _collect_pdf_text_exclude_rects(
+    pdf_path: str,
+    image_shape: tuple[int, int, int] | tuple[int, int],
+    dpi: int = DEFAULT_PDF_DPI,
+    hidden_layers: list[str] | None = None,
+) -> list[tuple[int, int, int, int]]:
+    """
+    Return rendered-image rectangles for descriptive PDF text blocks.
+
+    Gray/black plans put notes, title blocks, walls and symbols into one ink
+    mask. This helper removes only longer text blocks from the gray search
+    mask. Short labels such as "ZG" are deliberately kept because they can be
+    part of actual symbols.
+    """
+
+    if not pdf_path or not os.path.exists(pdf_path):
+        return []
+
+    rects: list[tuple[int, int, int, int]] = []
+    doc = fitz.open(pdf_path)
+    try:
+        _apply_hidden_layers(doc, hidden_layers)
+        page = doc.load_page(0)
+        scale = dpi / 72.0
+
+        for block in page.get_text("blocks"):
+            if len(block) < 7 or block[6] != 0:
+                continue
+
+            raw_text = str(block[4] or "")
+            clean_text = " ".join(raw_text.split())
+            alnum_len = sum(1 for char in clean_text if char.isalnum())
+            if alnum_len < 6 and " " not in clean_text:
+                continue
+
+            x0, y0, x1, y1 = [float(value) for value in block[:4]]
+            width_px = (x1 - x0) * scale
+            height_px = (y1 - y0) * scale
+            aspect = max(width_px / max(1.0, height_px), height_px / max(1.0, width_px))
+
+            looks_like_description = (
+                alnum_len >= 8
+                or " " in clean_text
+                or (alnum_len >= 6 and aspect >= 2.2)
+                or width_px >= 65
+            )
+            if not looks_like_description:
+                continue
+
+            padding = max(2, int(round(1.5 * scale)))
+            bbox = _clamp_bbox(
+                (
+                    int(round(x0 * scale)) - padding,
+                    int(round(y0 * scale)) - padding,
+                    int(round(width_px)) + 2 * padding,
+                    int(round(height_px)) + 2 * padding,
+                ),
+                image_shape,
+            )
+            if bbox is not None:
+                rects.append(bbox)
+    except Exception as exc:  # pragma: no cover - depends on PDF structure
+        print(f"Warning: could not collect PDF text exclude rects: {exc}")
+    finally:
+        doc.close()
+
+    return rects
+
+
+def _estimate_title_block_exclude_rects(
+    pdf_path: str,
+    image_shape: tuple[int, int, int] | tuple[int, int],
+    dpi: int = DEFAULT_PDF_DPI,
+    hidden_layers: list[str] | None = None,
+) -> list[tuple[int, int, int, int]]:
+    """Estimate dense annotation/title-block regions to skip in gray mode."""
+
+    if not pdf_path or not os.path.exists(pdf_path):
+        return []
+
+    image_h, image_w = int(image_shape[0]), int(image_shape[1])
+    rects: list[tuple[int, int, int, int]] = []
+    doc = fitz.open(pdf_path)
+    try:
+        _apply_hidden_layers(doc, hidden_layers)
+        page = doc.load_page(0)
+        scale = dpi / 72.0
+        text_rects: list[tuple[int, int, int, int]] = []
+
+        for block in page.get_text("blocks"):
+            if len(block) < 7 or block[6] != 0:
+                continue
+            text = " ".join(str(block[4] or "").split())
+            if len(text) < 3:
+                continue
+            bbox = _clamp_bbox(
+                (
+                    int(round(float(block[0]) * scale)),
+                    int(round(float(block[1]) * scale)),
+                    int(round((float(block[2]) - float(block[0])) * scale)),
+                    int(round((float(block[3]) - float(block[1])) * scale)),
+                ),
+                image_shape,
+            )
+            if bbox is not None:
+                text_rects.append(bbox)
+
+        if not text_rects:
+            return []
+
+        # Right-side vertical title/notes column.
+        right_boundary = int(image_w * 0.72)
+        right_rects = [rect for rect in text_rects if rect[0] + rect[2] / 2 >= right_boundary]
+        if len(right_rects) >= 12:
+            min_x = max(0, min(x for x, _y, _w, _h in right_rects) - 16)
+            min_y = max(0, min(y for _x, y, _w, _h in right_rects) - 16)
+            max_x = image_w
+            max_y = min(image_h, max(y + h for _x, y, _w, h in right_rects) + 16)
+            if (max_y - min_y) > image_h * 0.20:
+                rects.append((min_x, min_y, max_x - min_x, max_y - min_y))
+
+        # Bottom title strip.
+        bottom_boundary = int(image_h * 0.74)
+        bottom_rects = [rect for rect in text_rects if rect[1] + rect[3] / 2 >= bottom_boundary]
+        if len(bottom_rects) >= 10:
+            min_x = max(0, min(x for x, _y, _w, _h in bottom_rects) - 16)
+            min_y = max(0, min(y for _x, y, _w, _h in bottom_rects) - 16)
+            max_x = min(image_w, max(x + w for x, _y, w, _h in bottom_rects) + 16)
+            max_y = image_h
+            if (max_x - min_x) > image_w * 0.22:
+                rects.append((min_x, min_y, max_x - min_x, max_y - min_y))
+
+    except Exception as exc:  # pragma: no cover - depends on PDF structure
+        print(f"Warning: could not estimate title-block exclude rects: {exc}")
+    finally:
+        doc.close()
+
+    return rects
+
+
 def _estimate_legend_exclude_rect(
     pdf_path: str,
     image_shape: tuple[int, int, int] | tuple[int, int],

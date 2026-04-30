@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import List, Optional
 
 import cv2
+import fitz
+import numpy as np
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -53,6 +55,7 @@ TEMPLATES_DIR.mkdir(exist_ok=True)
 ANALYSIS_DIR.mkdir(exist_ok=True)
 
 SNAPSHOT_EXECUTOR = ThreadPoolExecutor(max_workers=1)
+ANALYSIS_PROGRESS: dict[str, dict] = {}
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -69,6 +72,29 @@ DEFAULT_ANALYSIS_DEBUG = _env_flag("ELEKTROSCAN_ANALYSIS_DEBUG", default=True)
 def _log(message: str) -> None:
     if VERBOSE_LOGS:
         print(message)
+
+
+def _set_analysis_progress(
+    session_id: str,
+    stage: str,
+    percent: float,
+    detail: str = "",
+    *,
+    analysis_id: str | None = None,
+    done: bool = False,
+    error: str | None = None,
+) -> None:
+    previous = ANALYSIS_PROGRESS.get(session_id, {})
+    ANALYSIS_PROGRESS[session_id] = {
+        "sessionId": session_id,
+        "analysisId": analysis_id or previous.get("analysisId"),
+        "stage": stage,
+        "percent": round(max(0.0, min(100.0, float(percent))), 1),
+        "detail": detail,
+        "done": done,
+        "error": error,
+        "updatedAtUtc": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 def _session_meta_path(session_id: str) -> Path:
@@ -158,14 +184,111 @@ def _build_hidden_layer_debug(pdf_path: str, hidden_layers: list[str]) -> dict:
     }
 
 
+def _normalize_detector_profile(profile: str | None) -> str:
+    value = (profile or "auto").strip().lower()
+    return value if value in {"auto", "color", "gray"} else "auto"
+
+
+def _ink_profile_stats(plan_img: np.ndarray) -> dict:
+    arr = plan_img.astype(np.int16)
+    max_channel = arr.max(axis=2)
+    min_channel = arr.min(axis=2)
+    saturation = max_channel - min_channel
+    ink = max_channel < 245
+    ink_pixels = int(np.count_nonzero(ink))
+    total_pixels = int(plan_img.shape[0] * plan_img.shape[1])
+
+    if ink_pixels == 0 or total_pixels == 0:
+        return {
+            "inkPct": 0.0,
+            "colorfulInkPct": 0.0,
+            "grayInkPct": 0.0,
+            "recommendedProfile": "color",
+        }
+
+    colorful = ink & (saturation > 35)
+    colorful_pixels = int(np.count_nonzero(colorful))
+    gray_pixels = ink_pixels - colorful_pixels
+    colorful_ink_pct = (colorful_pixels / ink_pixels) * 100.0
+
+    return {
+        "inkPct": round((ink_pixels / total_pixels) * 100.0, 3),
+        "colorfulInkPct": round(colorful_ink_pct, 3),
+        "grayInkPct": round((gray_pixels / ink_pixels) * 100.0, 3),
+        "recommendedProfile": "gray" if colorful_ink_pct < 1.0 else "color",
+    }
+
+
+def _build_pdf_diagnostics(pdf_path: str, plan_img: np.ndarray | None = None) -> dict:
+    diagnostics = {
+        "pages": 0,
+        "layers": 0,
+        "textCharsPage1": 0,
+        "textBlocksPage1": 0,
+        "drawingsPage1": 0,
+        "imagesPage1": 0,
+        "inkPct": 0.0,
+        "colorfulInkPct": 0.0,
+        "grayInkPct": 0.0,
+        "recommendedProfile": "color",
+    }
+
+    try:
+        diagnostics["layers"] = len(get_pdf_layers(pdf_path))
+    except Exception:
+        pass
+
+    doc = fitz.open(pdf_path)
+    try:
+        diagnostics["pages"] = int(doc.page_count)
+        if doc.page_count:
+            page = doc.load_page(0)
+            text_blocks = page.get_text("blocks")
+            diagnostics["textBlocksPage1"] = int(
+                sum(1 for block in text_blocks if len(block) > 6 and block[6] == 0)
+            )
+            diagnostics["textCharsPage1"] = int(len(page.get_text("text") or ""))
+            try:
+                diagnostics["drawingsPage1"] = int(len(page.get_drawings()))
+            except Exception:
+                diagnostics["drawingsPage1"] = 0
+            try:
+                diagnostics["imagesPage1"] = int(len(page.get_images(full=True)))
+            except Exception:
+                diagnostics["imagesPage1"] = 0
+    finally:
+        doc.close()
+
+    if plan_img is None:
+        try:
+            plan_img = pdf_to_png(pdf_path, dpi=100)
+        except Exception:
+            plan_img = None
+
+    if plan_img is not None:
+        diagnostics.update(_ink_profile_stats(plan_img))
+
+    return diagnostics
+
+
 @app.get("/")
 async def root():
     return {"message": "ElektroScan AI API is running"}
 
 
+class LegendZone(BaseModel):
+    page: Optional[int] = 0
+    x: float
+    y: float
+    width: float
+    height: float
+
+
 class ExtractRequest(BaseModel):
     excluded_zones: Optional[List[dict]] = []
     hidden_layers: Optional[List[str]] = []
+    legend_zone: Optional[LegendZone] = None
+    detector_profile: Optional[str] = "auto"
 
 
 class RenderRequest(BaseModel):
@@ -188,6 +311,7 @@ async def api_preview(file: UploadFile = File(...)):
     try:
         # Render podglądu (300 DPI — identycznie jak detekcja)
         plan_img = pdf_to_png(str(file_path), dpi=300)
+        pdf_diagnostics = _build_pdf_diagnostics(str(file_path), plan_img)
         _, buffer_plan = cv2.imencode(".jpg", plan_img, [cv2.IMWRITE_JPEG_QUALITY, 80])
         plan_base64 = base64.b64encode(buffer_plan).decode("utf-8")
 
@@ -195,6 +319,7 @@ async def api_preview(file: UploadFile = File(...)):
             "planPreview": f"data:image/jpeg;base64,{plan_base64}",
             "sessionId": session_id,
             "sourcePdf": file.filename or file_path.name,
+            "pdfDiagnostics": pdf_diagnostics,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -209,6 +334,17 @@ async def api_layers(session_id: str):
     return {"layers": layers}
 
 
+@app.get("/api/pdf-diagnostics")
+async def api_pdf_diagnostics(session_id: str):
+    file_path = UPLOAD_DIR / f"{session_id}.pdf"
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Nie znaleziono pliku sesji.")
+    try:
+        return {"pdfDiagnostics": _build_pdf_diagnostics(str(file_path))}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/render-preview")
 async def api_render_preview(session_id: str, body: RenderRequest = None):
     file_path = UPLOAD_DIR / f"{session_id}.pdf"
@@ -217,9 +353,13 @@ async def api_render_preview(session_id: str, body: RenderRequest = None):
     try:
         hidden_layers = body.hidden_layers if body else []
         plan_img = pdf_to_png(str(file_path), dpi=300, hidden_layers=hidden_layers)
+        pdf_diagnostics = _build_pdf_diagnostics(str(file_path), plan_img)
         _, buffer_plan = cv2.imencode(".jpg", plan_img, [cv2.IMWRITE_JPEG_QUALITY, 80])
         plan_base64 = base64.b64encode(buffer_plan).decode("utf-8")
-        return {"planPreview": f"data:image/jpeg;base64,{plan_base64}"}
+        return {
+            "planPreview": f"data:image/jpeg;base64,{plan_base64}",
+            "pdfDiagnostics": pdf_diagnostics,
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -233,7 +373,15 @@ async def api_extract_legend(session_id: str, body: ExtractRequest = None):
     try:
         _log("Renderowanie planu do ekstrakcji (300 DPI)")
         hidden_layers = body.hidden_layers if body else []
+        requested_profile = _normalize_detector_profile(body.detector_profile if body else "auto")
         plan_img = pdf_to_png(str(file_path), dpi=300, hidden_layers=hidden_layers)
+        pdf_diagnostics = _build_pdf_diagnostics(str(file_path), plan_img)
+        resolved_profile = (
+            pdf_diagnostics.get("recommendedProfile", "color")
+            if requested_profile == "auto"
+            else requested_profile
+        )
+        mask_mode = resolved_profile if resolved_profile in {"color", "gray"} else "auto"
 
         # Strefy wykluczone
         exclude_rects = []
@@ -246,13 +394,27 @@ async def api_extract_legend(session_id: str, body: ExtractRequest = None):
                 except (KeyError, ValueError):
                     pass
 
+        legend_rect_px = None
+        if body and body.legend_zone:
+            legend_rect_px = (
+                int(round(body.legend_zone.x)),
+                int(round(body.legend_zone.y)),
+                int(round(body.legend_zone.width)),
+                int(round(body.legend_zone.height)),
+            )
+
         _log("Ekstrakcja legendy...")
         if TEMPLATES_DIR.exists():
             shutil.rmtree(TEMPLATES_DIR)
         TEMPLATES_DIR.mkdir(exist_ok=True)
 
         symbols = extract_legend(
-            str(file_path), plan_img, output_dir=str(TEMPLATES_DIR), exclude_rects=exclude_rects
+            str(file_path),
+            plan_img,
+            output_dir=str(TEMPLATES_DIR),
+            exclude_rects=exclude_rects,
+            legend_rect_px=legend_rect_px,
+            mask_mode=mask_mode,
         )
 
         # Generujemy podgląd jeszcze raz na wypadek gdyby UI go potrzebowało w pełnej rozdz.
@@ -265,7 +427,14 @@ async def api_extract_legend(session_id: str, body: ExtractRequest = None):
                 {"id": s.name, "name": s.name, "imgBase64": f"data:image/png;base64,{img_b64}"}
             )
 
-        return {"patterns": patterns_list}
+        return {
+            "patterns": patterns_list,
+            "legendZoneUsed": legend_rect_px,
+            "legendMaskMode": mask_mode,
+            "detectorProfileRequested": requested_profile,
+            "detectorProfileUsed": resolved_profile,
+            "pdfDiagnostics": pdf_diagnostics,
+        }
 
     except Exception as e:
         print(f"Błąd podczas ekstrakcji: {str(e)}")
@@ -276,11 +445,32 @@ class AnalyzeRequest(BaseModel):
     excluded_zones: Optional[List[dict]] = []
     hidden_layers: Optional[List[str]] = []
     include_debug: Optional[bool] = None
+    include_debug_candidates: Optional[bool] = None
     include_image: Optional[bool] = None
+    detector_profile: Optional[str] = "auto"
+
+
+@app.get("/api/analysis-progress")
+async def api_analysis_progress(session_id: str):
+    return {
+        "progress": ANALYSIS_PROGRESS.get(
+            session_id,
+            {
+                "sessionId": session_id,
+                "analysisId": None,
+                "stage": "idle",
+                "percent": 0.0,
+                "detail": "",
+                "done": False,
+                "error": None,
+                "updatedAtUtc": None,
+            },
+        )
+    }
 
 
 @app.post("/api/analyze")
-async def api_analyze(session_id: str, body: AnalyzeRequest = None):
+def api_analyze(session_id: str, body: AnalyzeRequest = None):
     plan_path = UPLOAD_DIR / f"{session_id}.pdf"
 
     if not plan_path.exists():
@@ -289,6 +479,9 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
     request_start = time.perf_counter()
     timings_ms: dict[str, float] = {}
     counters: dict[str, int] = {}
+    analysis_id = str(uuid.uuid4())
+    generated_at_utc = datetime.now(timezone.utc).isoformat()
+    _set_analysis_progress(session_id, "setup", 1, "Start analizy", analysis_id=analysis_id)
 
     try:
         phase_start = time.perf_counter()
@@ -298,11 +491,18 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
             if body and body.include_debug is not None
             else DEFAULT_ANALYSIS_DEBUG
         )
+        include_debug_candidates = (
+            bool(body.include_debug_candidates)
+            if body and body.include_debug_candidates is not None
+            else False
+        )
+        requested_profile = _normalize_detector_profile(body.detector_profile if body else "auto")
         include_image = body.include_image if body and body.include_image is not None else True
         session_meta = _read_session_meta(session_id)
         timings_ms["requestSetup"] = _elapsed_ms(phase_start)
 
         # 1. Ładujemy plan
+        _set_analysis_progress(session_id, "render_pdf", 5, "Renderowanie PDF", analysis_id=analysis_id)
         phase_start = time.perf_counter()
         plan_img = pdf_to_png(str(plan_path), dpi=300, hidden_layers=hidden_layers)
         timings_ms["renderPdf"] = _elapsed_ms(phase_start)
@@ -310,7 +510,23 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
         counters["planHeight"] = int(plan_img.shape[0])
         counters["hiddenLayers"] = len(hidden_layers)
 
+        _set_analysis_progress(session_id, "diagnostics", 8, "Diagnostyka PDF", analysis_id=analysis_id)
+        phase_start = time.perf_counter()
+        pdf_diagnostics = _build_pdf_diagnostics(str(plan_path), plan_img)
+        resolved_profile = (
+            pdf_diagnostics.get("recommendedProfile", "color")
+            if requested_profile == "auto"
+            else requested_profile
+        )
+        if resolved_profile not in {"color", "gray"}:
+            resolved_profile = "color"
+        timings_ms["pdfDiagnostics"] = _elapsed_ms(phase_start)
+        counters["pdfLayers"] = int(pdf_diagnostics.get("layers", 0))
+        counters["pdfDrawingsPage1"] = int(pdf_diagnostics.get("drawingsPage1", 0))
+        counters["pdfImagesPage1"] = int(pdf_diagnostics.get("imagesPage1", 0))
+
         # 2. Ładujemy wzorce
+        _set_analysis_progress(session_id, "load_templates", 10, "Ladowanie wzorcow", analysis_id=analysis_id)
         phase_start = time.perf_counter()
         templates = load_templates(str(TEMPLATES_DIR))
         timings_ms["loadTemplates"] = _elapsed_ms(phase_start)
@@ -339,6 +555,16 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
 
         # 4. Detekcja
         detector_profile: dict = {}
+
+        def detector_progress(stage: str, percent: float, detail: str = "") -> None:
+            _set_analysis_progress(
+                session_id,
+                stage,
+                percent,
+                detail,
+                analysis_id=analysis_id,
+            )
+
         phase_start = time.perf_counter()
         results = detect_symbols(
             plan_img,
@@ -348,11 +574,15 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
             pdf_dpi=300,
             hidden_layers=hidden_layers,
             debug_profile=detector_profile if include_debug else None,
+            detector_profile=resolved_profile,
+            include_debug_candidates=include_debug_candidates,
+            progress_callback=detector_progress,
         )
         timings_ms["detectSymbolsTotal"] = _elapsed_ms(phase_start)
 
         result_image_payload: str | None = None
         if include_image:
+            _set_analysis_progress(session_id, "draw_results", 96, "Rysowanie wynikow", analysis_id=analysis_id)
             phase_start = time.perf_counter()
             result_img = draw_results(plan_img, results)
             timings_ms["drawResults"] = _elapsed_ms(phase_start)
@@ -376,16 +606,21 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
         # Na razie wysyłamy gotowy obraz i listę wyników
 
         analysis_context = {
-            "analysisId": str(uuid.uuid4()),
-            "generatedAtUtc": datetime.now(timezone.utc).isoformat(),
+            "analysisId": analysis_id,
+            "generatedAtUtc": generated_at_utc,
             "sessionId": session_id,
             "sourcePdf": session_meta.get("sourcePdf", plan_path.name),
             "hiddenLayersUsed": hidden_layers,
             "excludedZonesUsed": exclude_rects,
+            "detectorProfileRequested": requested_profile,
+            "detectorProfileUsed": resolved_profile,
+            "includeDebugCandidates": include_debug_candidates,
+            "pdfDiagnostics": pdf_diagnostics,
         }
         if include_debug:
             analysis_context["hiddenLayerDebug"] = hidden_layer_debug
 
+        _set_analysis_progress(session_id, "format_response", 98, "Przygotowanie odpowiedzi", analysis_id=analysis_id)
         phase_start = time.perf_counter()
         formatted_results = []
         all_boxes = []
@@ -467,7 +702,9 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
         }
         if include_debug:
             response_payload["performance"] = performance
-            response_payload["debugCandidates"] = detector_profile.get("debugCandidates", [])
+            response_payload["debugCandidates"] = (
+                detector_profile.get("debugCandidates", []) if include_debug_candidates else []
+            )
 
         snapshot_queued = False
         try:
@@ -477,7 +714,9 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
                 "results": formatted_results,
                 "boxes": all_boxes,
                 "debugCandidates": (
-                    detector_profile.get("debugCandidates", []) if include_debug else []
+                    detector_profile.get("debugCandidates", [])
+                    if include_debug and include_debug_candidates
+                    else []
                 ),
                 "resultImageLength": len(response_payload["resultImage"] or ""),
                 "performance": performance,
@@ -510,10 +749,28 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
             f" slowest={performance['slowestStages']}"
         )
 
+        _set_analysis_progress(
+            session_id,
+            "done",
+            100,
+            "Analiza zakonczona",
+            analysis_id=analysis_id,
+            done=True,
+        )
+
         return response_payload
 
     except Exception as e:
         print(f"Błąd podczas analizy: {str(e)}")
+        _set_analysis_progress(
+            session_id,
+            "error",
+            100,
+            str(e),
+            analysis_id=analysis_id,
+            done=True,
+            error=str(e),
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 

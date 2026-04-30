@@ -28,6 +28,7 @@ from core.detector_masks import (
     _dominant_hsv_color,
     _extract_label_content_mask,
     _hsv_mask,
+    _ink_mask,
     _mask_bbox,
 )
 from core.detector_models import TargetedPromotionRule, TemplateInfo, TemplateVariant
@@ -275,12 +276,20 @@ def load_templates(folder: str) -> list[TemplateInfo]:
         requires_precision = any(keyword in name_lower for keyword in PRECISE_KEYWORDS)
 
         precise_mask = _hsv_mask(img, dilate=False)
+        is_gray_template = int(cv2.countNonZero(precise_mask)) <= MIN_TEMPLATE_PIXELS
+        if is_gray_template:
+            precise_mask = _ink_mask(img, dilate=False)
+
         content_mask = _extract_label_content_mask(precise_mask)
         content_pixel_count = int(cv2.countNonZero(content_mask)) if content_mask is not None else 0
         if content_mask is not None:
             requires_precision = False
 
-        mask = _hsv_mask(img, dilate=not requires_precision)
+        mask = (
+            _ink_mask(img, dilate=not requires_precision)
+            if is_gray_template
+            else _hsv_mask(img, dilate=not requires_precision)
+        )
         pixel_count = int(cv2.countNonZero(mask))
 
         if pixel_count <= MIN_TEMPLATE_PIXELS:
@@ -294,7 +303,7 @@ def load_templates(folder: str) -> list[TemplateInfo]:
                 mask=mask,
                 requires_precision=requires_precision,
                 image_bgr=img,
-                dominant_hsv=_dominant_hsv_color(img),
+                dominant_hsv=None if is_gray_template else _dominant_hsv_color(img),
                 text_tokens=_derive_text_tokens(name),
                 content_mask=content_mask,
                 content_pixel_count=content_pixel_count,

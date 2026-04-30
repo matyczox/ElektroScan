@@ -78,6 +78,33 @@ def _hsv_mask(
     return mask
 
 
+def _ink_mask(
+    image_bgr: np.ndarray,
+    dilate: bool = False,
+    threshold: int = 238,
+) -> np.ndarray:
+    """Create a binary mask of visible ink for gray/black vector PDFs."""
+
+    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+    mask = np.where(gray < threshold, 255, 0).astype(np.uint8)
+    if dilate:
+        mask = cv2.dilate(mask, DILATE_KERNEL, iterations=1)
+    return mask
+
+
+def _thickness_normalized_mask(mask: np.ndarray) -> np.ndarray:
+    """Normalize stroke thickness while preserving the coarse symbol shape."""
+
+    if mask.size == 0 or cv2.countNonZero(mask) == 0:
+        return mask
+
+    kernel = np.ones((3, 3), np.uint8)
+    opened = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    if cv2.countNonZero(opened) >= max(3, int(cv2.countNonZero(mask) * 0.35)):
+        mask = opened
+    return cv2.dilate(mask, kernel, iterations=1)
+
+
 def _dominant_hsv_color(image_bgr: np.ndarray) -> tuple[int, int, int] | None:
     """Return the dominant HSV color among colored pixels."""
 
@@ -577,6 +604,33 @@ def _validate_template_hit(
         and purity < NOISY_PARTIAL_PURITY_THRESHOLD
     ):
         return False
+
+    if hit.dominant_hsv is None:
+        template_area = max(1, hit.bbox[2] * hit.bbox[3])
+        template_density = hit.pixel_count / template_area
+        normalized_roi = _thickness_normalized_mask(roi)
+        normalized_template = _thickness_normalized_mask(hit.transformed_mask)
+        normalized_intersection = int(
+            cv2.countNonZero(cv2.bitwise_and(normalized_roi, normalized_template))
+        )
+        normalized_template_pixels = max(1, int(cv2.countNonZero(normalized_template)))
+        normalized_roi_pixels = max(1, int(cv2.countNonZero(normalized_roi)))
+        normalized_coverage = normalized_intersection / normalized_template_pixels
+        normalized_purity = normalized_intersection / normalized_roi_pixels
+
+        # In gray/black PDFs every text glyph and wall line shares the same
+        # ink mask. Sparse outline templates are especially prone to matching
+        # random text strokes after rotation, so require a much fuller shape
+        # agreement before accepting them.
+        if template_density < 0.18:
+            if max(coverage, normalized_coverage) < 0.62:
+                return False
+            if max(purity, normalized_purity) < 0.30 and context_purity < 0.55:
+                return False
+            if hit.match_score < 0.68 and max(coverage, normalized_coverage) < 0.74:
+                return False
+        elif purity < 0.18 and context_purity < 0.45:
+            return False
 
     template_centroid = _mask_centroid(hit.transformed_mask)
     intersection_centroid = _mask_centroid(intersection_mask)

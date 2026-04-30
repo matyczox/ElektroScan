@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect } from 'react';
-import { AlertTriangle, Plus, ZoomIn, ZoomOut, Maximize, Move, Slash, X } from 'lucide-react';
+import { AlertTriangle, Layers, Plus, ZoomIn, ZoomOut, Maximize, Move, Slash, X } from 'lucide-react';
 
 interface Box {
   id: string;
@@ -70,8 +70,11 @@ interface CanvasViewProps {
   onDismissDebugCandidate?: (id: string) => void;
   focusedBoxId?: string | null;
   excludedZones?: ExcludedZone[];
+  legendZone?: ExcludedZone | null;
   onAddExcludedZone?: (x: number, y: number, w: number, h: number) => void;
   onRemoveExcludedZone?: (index: number) => void;
+  onSetLegendZone?: (x: number, y: number, w: number, h: number) => void;
+  onClearLegendZone?: () => void;
   symbolNames?: string[];
   onAddManualBox?: (box: Omit<Box, 'id' | 'color'> & { symbolName: string }) => void;
 }
@@ -86,8 +89,11 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
   onDismissDebugCandidate,
   focusedBoxId,
   excludedZones = [],
+  legendZone = null,
   onAddExcludedZone,
   onRemoveExcludedZone,
+  onSetLegendZone,
+  onClearLegendZone,
   symbolNames = [],
   onAddManualBox,
 }) => {
@@ -97,8 +103,8 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
   const [isDragging, setIsDragging] = useState(false);
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
 
-  // Tryb rysowania strefy wykluczonej
-  const [isZoneMode, setIsZoneMode] = useState(false);
+  // Tryb rysowania strefy wykluczonej albo legendy
+  const [drawMode, setDrawMode] = useState<'none' | 'exclude' | 'legend'>('none');
   const [isDrawing, setIsDrawing] = useState(false);
   const [drawStart, setDrawStart] = useState({ x: 0, y: 0 });
   const [drawCurrent, setDrawCurrent] = useState({ x: 0, y: 0 });
@@ -169,7 +175,7 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
       // Nie starujemy drag
       return;
     }
-    if (isZoneMode) {
+    if (drawMode !== 'none') {
       setIsDrawing(true);
       const coords = getCanvasCoordinates(e.clientX, e.clientY);
       setDrawStart(coords);
@@ -181,7 +187,7 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
   };
 
   const handleMouseMove = (e: React.MouseEvent) => {
-    if (isZoneMode && isDrawing) {
+    if (drawMode !== 'none' && isDrawing) {
       setDrawCurrent(getCanvasCoordinates(e.clientX, e.clientY));
     } else if (isDragging) {
       setPosition({ x: e.clientX - dragStart.x, y: e.clientY - dragStart.y });
@@ -189,14 +195,17 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
   };
 
   const handleMouseUp = () => {
-    if (isZoneMode && isDrawing) {
+    if (drawMode !== 'none' && isDrawing) {
       setIsDrawing(false);
-      setIsZoneMode(false);
       const x = Math.min(drawStart.x, drawCurrent.x);
       const y = Math.min(drawStart.y, drawCurrent.y);
       const w = Math.abs(drawCurrent.x - drawStart.x);
       const h = Math.abs(drawCurrent.y - drawStart.y);
-      if (w > 5 && h > 5) onAddExcludedZone?.(x, y, w, h);
+      if (w > 5 && h > 5) {
+        if (drawMode === 'legend') onSetLegendZone?.(x, y, w, h);
+        else onAddExcludedZone?.(x, y, w, h);
+      }
+      setDrawMode('none');
     }
     setIsDragging(false);
   };
@@ -337,18 +346,33 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
       <div style={{ position: 'absolute', top: 16, right: 16, zIndex: 20, display: 'flex', gap: 6 }}>
         <button
           className="btn-secondary"
-          onClick={() => setIsZoneMode(z => !z)}
+          onClick={() => setDrawMode(mode => mode === 'exclude' ? 'none' : 'exclude')}
           title="Dodaj strefę wykluczoną"
           style={{
-            borderColor: isZoneMode ? 'var(--accent-orange)' : undefined,
-            color: isZoneMode ? 'var(--accent-orange)' : undefined,
+            borderColor: drawMode === 'exclude' ? 'var(--accent-orange)' : undefined,
+            color: drawMode === 'exclude' ? 'var(--accent-orange)' : undefined,
             padding: '6px 10px',
             fontSize: 11,
             fontWeight: 700,
           }}
         >
           <Slash size={14} />
-          {isZoneMode ? 'Rysuj...' : 'Strefa'}
+          {drawMode === 'exclude' ? 'Rysuj...' : 'Strefa'}
+        </button>
+        <button
+          className="btn-secondary"
+          onClick={() => setDrawMode(mode => mode === 'legend' ? 'none' : 'legend')}
+          title="Zaznacz strefe legendy"
+          style={{
+            borderColor: drawMode === 'legend' ? '#38bdf8' : undefined,
+            color: drawMode === 'legend' ? '#38bdf8' : undefined,
+            padding: '6px 10px',
+            fontSize: 11,
+            fontWeight: 700,
+          }}
+        >
+          <Layers size={14} />
+          {drawMode === 'legend' ? 'Legenda...' : 'Legenda'}
         </button>
         <button
           className="btn-secondary"
@@ -381,14 +405,14 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
       </div>
 
       {/* Hint rysowania */}
-      {isZoneMode && (
+      {drawMode !== 'none' && (
         <div style={{
           position: 'absolute', top: 64, left: '50%', transform: 'translateX(-50%)',
-          background: 'rgba(249,115,22,0.92)', color: '#fff',
+          background: drawMode === 'legend' ? 'rgba(14,165,233,0.92)' : 'rgba(249,115,22,0.92)', color: '#fff',
           padding: '6px 18px', borderRadius: 6, fontSize: 12, fontWeight: 700,
           zIndex: 20, pointerEvents: 'none',
         }}>
-          Zaznacz myszką obszar legendy
+          {drawMode === 'legend' ? 'Zaznacz obszar legendy' : 'Zaznacz strefe wykluczona'}
         </div>
       )}
 
@@ -399,7 +423,7 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseUp}
-        style={{ cursor: isZoneMode ? 'crosshair' : (isDragging ? 'grabbing' : 'grab') }}
+        style={{ cursor: drawMode !== 'none' ? 'crosshair' : (isDragging ? 'grabbing' : 'grab') }}
       >
         <div
           style={{
@@ -436,6 +460,58 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
               </div>
             </div>
           ))}
+
+          {/* Manual legend zone */}
+          {legendZone && (
+            <div
+              style={{
+                position: 'absolute',
+                left: legendZone.x,
+                top: legendZone.y,
+                width: legendZone.width,
+                height: legendZone.height,
+                border: '3px dashed #38bdf8',
+                backgroundColor: 'rgba(14,165,233,0.08)',
+                boxSizing: 'border-box',
+                pointerEvents: 'auto',
+              }}
+            >
+              <div style={{
+                position: 'absolute',
+                top: -22,
+                left: 0,
+                background: '#0284c7',
+                color: '#fff',
+                fontSize: 10,
+                fontWeight: 800,
+                padding: '2px 6px',
+                borderRadius: 4,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 4,
+                whiteSpace: 'nowrap',
+              }}>
+                LEGENDA
+                {onClearLegendZone && (
+                  <button
+                    onClick={e => { e.stopPropagation(); onClearLegendZone(); }}
+                    style={{
+                      background: 'rgba(0,0,0,0.35)',
+                      border: 'none',
+                      cursor: 'pointer',
+                      color: '#fff',
+                      display: 'flex',
+                      padding: 2,
+                      borderRadius: 3,
+                    }}
+                    title="Usun strefe legendy"
+                  >
+                    <X size={12} />
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* Detection Boxes */}
           {boxes.map(box => {
@@ -636,15 +712,15 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
           })}
 
           {/* Drawing preview */}
-          {isZoneMode && isDrawing && (
+          {drawMode !== 'none' && isDrawing && (
             <div style={{
               position: 'absolute',
               left: Math.min(drawStart.x, drawCurrent.x),
               top: Math.min(drawStart.y, drawCurrent.y),
               width: Math.abs(drawCurrent.x - drawStart.x),
               height: Math.abs(drawCurrent.y - drawStart.y),
-              border: '2px dashed var(--accent-orange)',
-              backgroundColor: 'rgba(249,115,22,0.12)',
+              border: `2px dashed ${drawMode === 'legend' ? '#38bdf8' : 'var(--accent-orange)'}`,
+              backgroundColor: drawMode === 'legend' ? 'rgba(14,165,233,0.12)' : 'rgba(249,115,22,0.12)',
               pointerEvents: 'none',
             }} />
           )}

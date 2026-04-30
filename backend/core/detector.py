@@ -8,6 +8,7 @@ modules so detector behavior stays easier to audit and tune.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 
 import cv2
@@ -38,6 +39,9 @@ from core.detector_config import (
     DEFAULT_PDF_DPI,
     DETECTOR_POSTPROCESS_MAX_WORKERS,
     DETECTOR_SCAN_MAX_WORKERS,
+    GRAY_RAW_MAX_HITS_PER_TEMPLATE,
+    GRAY_RAW_MAX_HITS_PER_VARIANT,
+    GRAY_RAW_MAX_TOTAL_HITS,
     LABEL_CONTENT_SCAN_MIN_PIXELS,
     MAX_PEAKS_PER_VARIANT,
     MAX_TEXT_CONTENT_PEAKS_PER_VARIANT,
@@ -54,6 +58,7 @@ from core.detector_masks import (
     _color_mask_for_template,
     _find_local_maxima,
     _hsv_mask,
+    _ink_mask,
     _tight_mask_crop,
     _validate_template_hit,
 )
@@ -64,7 +69,12 @@ from core.detector_models import (
     TemplateInfo,
     TemplateVariant,
 )
-from core.detector_pdf import _collect_pdf_text_hits, _estimate_legend_exclude_rect
+from core.detector_pdf import (
+    _collect_pdf_text_exclude_rects,
+    _collect_pdf_text_hits,
+    _estimate_legend_exclude_rect,
+    _estimate_title_block_exclude_rects,
+)
 from core.detector_promotions import (
     _maybe_promote_socket_06_to_07,
     _maybe_promote_switch_parent_search,
@@ -89,10 +99,166 @@ def _is_content_scan_eligible(variant: TemplateVariant) -> bool:
     return True
 
 
+def _clamp_roi(
+    bbox: tuple[int, int, int, int],
+    image_shape: tuple[int, int, int] | tuple[int, int],
+) -> tuple[int, int, int, int] | None:
+    image_h, image_w = image_shape[:2]
+    x, y, w, h = bbox
+    x1 = max(0, x)
+    y1 = max(0, y)
+    x2 = min(image_w, x + w)
+    y2 = min(image_h, y + h)
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return int(x1), int(y1), int(x2 - x1), int(y2 - y1)
+
+
+def _rect_area(rect: tuple[int, int, int, int]) -> int:
+    return max(0, int(rect[2])) * max(0, int(rect[3]))
+
+
+def _build_gray_search_rois(
+    plan_mask: np.ndarray,
+    image_shape: tuple[int, int, int] | tuple[int, int],
+    max_template_width: int,
+    max_template_height: int,
+) -> tuple[list[tuple[int, int, int, int]], bool, int, int]:
+    """
+    Build bounded ROIs for gray/ink plans.
+
+    In gray PDFs every wall, text label and symbol shares one mask. Falling back
+    to a full-page scan is too expensive, so gray mode only scans bounded
+    component windows and caps their count.
+    """
+    foreground_pixels = int(cv2.countNonZero(plan_mask))
+    if foreground_pixels <= 0:
+        return [], False, 0, foreground_pixels
+
+    image_h, image_w = image_shape[:2]
+    kernel = np.ones((3, 3), np.uint8)
+    seed_mask = cv2.dilate(plan_mask, kernel, iterations=1)
+    components, _labels, stats, _centroids = cv2.connectedComponentsWithStats(
+        seed_mask,
+        connectivity=8,
+    )
+    if components <= 1:
+        return [], False, 0, foreground_pixels
+
+    template_area = max(1, int(max_template_width) * int(max_template_height))
+    max_component_width = max(80, int(max_template_width * 4.0))
+    max_component_height = max(80, int(max_template_height * 4.0))
+    max_component_area = max(120, int(template_area * 8.0))
+    pad_x = max(6, int(round(max_template_width * 1.35)))
+    pad_y = max(6, int(round(max_template_height * 1.35)))
+
+    component_rects: list[tuple[float, int, tuple[int, int, int, int]]] = []
+    target_area = max(1, int(max_template_width) * int(max_template_height))
+    target_aspect = max_template_width / max(1, max_template_height)
+    for component_id in range(1, components):
+        area = int(stats[component_id, cv2.CC_STAT_AREA])
+        if area < 6 or area > max_component_area:
+            continue
+
+        x = int(stats[component_id, cv2.CC_STAT_LEFT])
+        y = int(stats[component_id, cv2.CC_STAT_TOP])
+        w = int(stats[component_id, cv2.CC_STAT_WIDTH])
+        h = int(stats[component_id, cv2.CC_STAT_HEIGHT])
+        if w > max_component_width or h > max_component_height:
+            continue
+
+        clamped = _clamp_roi((x - pad_x, y - pad_y, w + 2 * pad_x, h + 2 * pad_y), image_shape)
+        if clamped is not None:
+            bbox_area = max(1, w * h)
+            aspect = w / max(1, h)
+            area_score = abs(np.log((bbox_area + 1) / target_area))
+            aspect_score = abs(np.log((aspect + 0.05) / max(0.05, target_aspect)))
+            score = float(area_score + 0.35 * aspect_score)
+            component_rects.append((score, area, clamped))
+
+    if not component_rects:
+        return [], False, 0, foreground_pixels
+
+    # Prefer components whose local geometry resembles the current template.
+    # Tiny text glyphs and giant walls are still present in gray masks, so a
+    # tight cap keeps analysis bounded instead of drifting into minutes.
+    component_rects.sort(key=lambda item: (item[0], -item[1]))
+    max_rois = 180
+    rois = [rect for _score, _area, rect in component_rects[:max_rois]]
+    roi_area = sum(_rect_area(roi) for roi in rois)
+    full_area = max(1, int(image_w) * int(image_h))
+    roi_area = min(roi_area, full_area)
+    return rois, False, roi_area, foreground_pixels
+
+
 def _hit_score(hit: CandidateHit) -> float:
     """Return the best available confidence-like score for debug ranking."""
 
     return float(hit.verification_score or hit.content_score or hit.match_score)
+
+
+def _gray_raw_budget(
+    candidates: list[CandidateHit],
+    templates: list[TemplateInfo],
+) -> tuple[list[CandidateHit], dict]:
+    """Keep the strongest gray-mode raw hits before the slower overlap prefilter."""
+
+    if len(candidates) <= GRAY_RAW_MAX_TOTAL_HITS:
+        return candidates, {
+            "before": len(candidates),
+            "after": len(candidates),
+            "removed": 0,
+            "topGenerators": [],
+        }
+
+    grouped_by_variant: dict[tuple[int, float, int, bool, str], list[CandidateHit]] = {}
+    for hit in candidates:
+        grouped_by_variant.setdefault(
+            (hit.template_id, hit.scale, hit.rotation, hit.mirrored, hit.source),
+            [],
+        ).append(hit)
+
+    variant_limited: list[CandidateHit] = []
+    raw_counts_by_template: dict[int, int] = {}
+    for hits in grouped_by_variant.values():
+        template_id = hits[0].template_id
+        raw_counts_by_template[template_id] = raw_counts_by_template.get(template_id, 0) + len(hits)
+        hits.sort(key=lambda item: item.match_score, reverse=True)
+        variant_limited.extend(hits[:GRAY_RAW_MAX_HITS_PER_VARIANT])
+
+    grouped_by_template: dict[int, list[CandidateHit]] = {}
+    for hit in variant_limited:
+        grouped_by_template.setdefault(hit.template_id, []).append(hit)
+
+    template_limited: list[CandidateHit] = []
+    for hits in grouped_by_template.values():
+        hits.sort(key=lambda item: item.match_score, reverse=True)
+        template_limited.extend(hits[:GRAY_RAW_MAX_HITS_PER_TEMPLATE])
+
+    if len(template_limited) > GRAY_RAW_MAX_TOTAL_HITS:
+        template_limited.sort(key=lambda item: item.match_score, reverse=True)
+        template_limited = template_limited[:GRAY_RAW_MAX_TOTAL_HITS]
+
+    top_generators = []
+    for template_id, count in sorted(
+        raw_counts_by_template.items(),
+        key=lambda item: item[1],
+        reverse=True,
+    )[:8]:
+        top_generators.append(
+            {
+                "templateId": int(template_id),
+                "templateName": templates[template_id].name if 0 <= template_id < len(templates) else "",
+                "rawHits": int(count),
+            }
+        )
+
+    return template_limited, {
+        "before": len(candidates),
+        "after": len(template_limited),
+        "removed": max(0, len(candidates) - len(template_limited)),
+        "topGenerators": top_generators,
+    }
 
 
 def _bbox_center(bbox: tuple[int, int, int, int]) -> tuple[float, float]:
@@ -446,6 +612,9 @@ def detect_symbols(
     pdf_dpi: int = DEFAULT_PDF_DPI,
     hidden_layers: list[str] | None = None,
     debug_profile: dict | None = None,
+    detector_profile: str = "color",
+    include_debug_candidates: bool = True,
+    progress_callback: Callable[[str, float, str], None] | None = None,
 ) -> list[DetectionResult]:
     """
     Detect symbols on a rendered plan using template matching plus PDF-text fallback.
@@ -458,6 +627,16 @@ def detect_symbols(
 
     timings: dict[str, float] = {}
 
+    def _progress(stage: str, percent: float, detail: str = "") -> None:
+        if progress_callback is None:
+            return
+        try:
+            progress_callback(stage, max(0.0, min(100.0, float(percent))), detail)
+        except Exception:
+            pass
+
+    detector_profile = detector_profile if detector_profile in {"color", "gray"} else "color"
+
     legend_rect = _estimate_legend_exclude_rect(
         pdf_path=pdf_path or "",
         image_shape=plan_image.shape,
@@ -467,9 +646,39 @@ def detect_symbols(
     if legend_rect is not None:
         exclude_rects.append(legend_rect)
 
+    gray_text_exclude_rects: list[tuple[int, int, int, int]] = []
+    gray_title_exclude_rects: list[tuple[int, int, int, int]] = []
+    if detector_profile == "gray":
+        gray_text_exclude_rects = _collect_pdf_text_exclude_rects(
+            pdf_path=pdf_path or "",
+            image_shape=plan_image.shape,
+            dpi=pdf_dpi,
+            hidden_layers=hidden_layers,
+        )
+        gray_title_exclude_rects = _estimate_title_block_exclude_rects(
+            pdf_path=pdf_path or "",
+            image_shape=plan_image.shape,
+            dpi=pdf_dpi,
+            hidden_layers=hidden_layers,
+        )
+        exclude_rects.extend(gray_title_exclude_rects)
+        exclude_rects.extend(gray_text_exclude_rects)
+
     color_masks_cache: dict[str, np.ndarray] = {}
+    ink_mask_cache: np.ndarray | None = None
+
+    def _get_ink_plan_mask(*, dilate: bool) -> np.ndarray:
+        nonlocal ink_mask_cache
+        if ink_mask_cache is None:
+            ink_mask_cache = _ink_mask(plan_image, dilate=False)
+            for ex, ey, ew, eh in exclude_rects:
+                cv2.rectangle(ink_mask_cache, (ex, ey), (ex + ew, ey + eh), 0, -1)
+        return cv2.dilate(ink_mask_cache, np.ones((3, 3), np.uint8), iterations=1) if dilate else ink_mask_cache
 
     def _get_plan_mask(template: TemplateInfo) -> np.ndarray:
+        if detector_profile == "gray" or template.dominant_hsv is None:
+            return _get_ink_plan_mask(dilate=True)
+
         if template.dominant_hsv is not None:
             cache_key = f"{template.dominant_hsv}_{template.requires_precision}"
             if cache_key not in color_masks_cache:
@@ -490,6 +699,7 @@ def detect_symbols(
         return fallback
 
     phase_start = time.perf_counter()
+    _progress("pdf_text", 12, "Odczyt pomocniczych tekstow PDF")
     pdf_hits_by_template = _collect_pdf_text_hits(
         pdf_path=pdf_path or "",
         templates=templates,
@@ -502,6 +712,7 @@ def detect_symbols(
     timings["pdf_text"] = time.perf_counter() - phase_start
 
     phase_start = time.perf_counter()
+    _progress("prepare", 18, "Przygotowanie masek i wariantow")
     plan_hsv = cv2.cvtColor(plan_image, cv2.COLOR_BGR2HSV)
 
     variant_workers = max(1, min(len(templates), DETECTOR_POSTPROCESS_MAX_WORKERS))
@@ -529,7 +740,7 @@ def detect_symbols(
     unique_mask_keys = {
         f"{template.dominant_hsv}_{template.requires_precision}"
         for template in templates
-        if template.dominant_hsv is not None
+        if template.dominant_hsv is not None and detector_profile == "color"
     }
 
     def _build_cached_color_mask(cache_key: str) -> tuple[str, np.ndarray]:
@@ -578,12 +789,20 @@ def detect_symbols(
     ) -> tuple[int, list[tuple[int, int, int, int]], tuple[bool, int, int]]:
         template_id, plan_mask = item
         max_width, max_height = max_variant_size_by_template[template_id]
-        rois, uses_full_scan, roi_area, foreground_pixels = _build_search_rois(
-            plan_mask,
-            plan_image.shape,
-            max_width,
-            max_height,
-        )
+        if detector_profile == "gray":
+            rois, uses_full_scan, roi_area, foreground_pixels = _build_gray_search_rois(
+                plan_mask,
+                plan_image.shape,
+                max_width,
+                max_height,
+            )
+        else:
+            rois, uses_full_scan, roi_area, foreground_pixels = _build_search_rois(
+                plan_mask,
+                plan_image.shape,
+                max_width,
+                max_height,
+            )
         return template_id, rois, (uses_full_scan, roi_area, foreground_pixels)
 
     roi_workers = max(1, min(len(plan_masks_by_template), DETECTOR_POSTPROCESS_MAX_WORKERS))
@@ -596,7 +815,12 @@ def detect_symbols(
     timings["prepare"] = time.perf_counter() - phase_start
 
     diagnostics = {
+        "detector_profile": 1 if detector_profile == "gray" else 0,
+        "gray_text_exclude_rects": len(gray_text_exclude_rects),
+        "gray_title_exclude_rects": len(gray_title_exclude_rects),
         "raw_peaks": 0,
+        "raw_budget_hits": 0,
+        "raw_budget_removed": 0,
         "raw_prefilter_hits": 0,
         "raw_prefilter_removed": 0,
         "prepared_variants": sum(len(variants) for variants in variants_by_template.values()),
@@ -623,6 +847,8 @@ def detect_symbols(
     def _scan_template(template_id: int) -> list[CandidateHit]:
         template = templates[template_id]
         threshold = THRESHOLD_PRECISE if template.requires_precision else THRESHOLD_DILATED
+        if detector_profile == "gray":
+            threshold = max(threshold, 0.58)
         plan_mask = plan_masks_by_template[template_id]
         search_rois = search_rois_by_template.get(template_id, [])
         if plan_mask_foregrounds.get(template_id, 0) < MIN_TEMPLATE_PIXELS or not search_rois:
@@ -681,7 +907,11 @@ def detect_symbols(
                     )
                 )
 
-            if not template.is_text_label or not _is_content_scan_eligible(variant):
+            if (
+                detector_profile == "gray"
+                or not template.is_text_label
+                or not _is_content_scan_eligible(variant)
+            ):
                 continue
 
             content_crop = _tight_mask_crop(variant.content_mask)
@@ -749,16 +979,37 @@ def detect_symbols(
     phase_start = time.perf_counter()
     scan_workers = max(1, min(len(template_ids_to_scan), DETECTOR_SCAN_MAX_WORKERS))
     if template_ids_to_scan:
+        completed_scans = 0
+        total_scans = max(1, len(template_ids_to_scan))
         with ThreadPoolExecutor(max_workers=scan_workers) as pool:
             for hits in pool.map(_scan_template, template_ids_to_scan):
                 raw_template_hits.extend(hits)
+                completed_scans += 1
+                if completed_scans == 1 or completed_scans % 2 == 0 or completed_scans == total_scans:
+                    _progress(
+                        "scan",
+                        25 + 35 * completed_scans / total_scans,
+                        f"Skan template {completed_scans}/{total_scans}",
+                    )
     else:
         scan_workers = 0
     timings["scan"] = time.perf_counter() - phase_start
 
     diagnostics["raw_peaks"] = len(raw_template_hits)
+    gray_budget_profile: dict = {}
+    if detector_profile == "gray":
+        raw_template_hits, gray_budget_profile = _gray_raw_budget(raw_template_hits, templates)
+        diagnostics["raw_budget_hits"] = len(raw_template_hits)
+        diagnostics["raw_budget_removed"] = int(gray_budget_profile.get("removed", 0))
+    else:
+        diagnostics["raw_budget_hits"] = len(raw_template_hits)
+
     phase_start = time.perf_counter()
     raw_before_prefilter = len(raw_template_hits)
+    detail = f"Odsiew slabych kandydatow ({raw_before_prefilter})"
+    if gray_budget_profile.get("removed"):
+        detail += f", ucieto {gray_budget_profile['removed']}"
+    _progress("raw_prefilter", 62, detail)
     raw_template_hits = _prefilter_raw_template_hits(raw_template_hits)
     diagnostics["raw_prefilter_hits"] = len(raw_template_hits)
     diagnostics["raw_prefilter_removed"] = raw_before_prefilter - len(raw_template_hits)
@@ -789,8 +1040,21 @@ def detect_symbols(
     rejected_hits: list[CandidateHit] = []
     validation_workers = max(1, min(len(raw_template_hits), postprocess_workers))
     if raw_template_hits:
+        completed_validations = 0
+        total_validations = max(1, len(raw_template_hits))
         with ThreadPoolExecutor(max_workers=validation_workers) as pool:
             for validation_result in pool.map(_validate_and_promote_hit, raw_template_hits):
+                completed_validations += 1
+                if (
+                    completed_validations == 1
+                    or completed_validations % 250 == 0
+                    or completed_validations == total_validations
+                ):
+                    _progress(
+                        "validation",
+                        65 + 18 * completed_validations / total_validations,
+                        f"Walidacja {completed_validations}/{total_validations}",
+                    )
                 if validation_result is None:
                     continue
                 original_hit, promoted_hit, rejected_hit = validation_result
@@ -809,6 +1073,7 @@ def detect_symbols(
     timings["validation_targeted"] = time.perf_counter() - phase_start
 
     phase_start = time.perf_counter()
+    _progress("prefilter", 84, "Klastrowanie kandydatow")
     prefiltered_candidates = _prefilter_candidates(validated_candidates)
     diagnostics["prefilter_hits"] = len(prefiltered_candidates)
     timings["prefilter"] = time.perf_counter() - phase_start
@@ -819,6 +1084,7 @@ def detect_symbols(
     timings["pre_parent_clustering"] = time.perf_counter() - phase_start
 
     phase_start = time.perf_counter()
+    _progress("parent_search", 88, "Szukanie pelniejszych symboli")
 
     def _search_parent_hit(hit: CandidateHit) -> tuple[CandidateHit, dict[str, int]]:
         local_stats: dict[str, int] = {}
@@ -853,11 +1119,13 @@ def detect_symbols(
     timings["parent_search"] = time.perf_counter() - phase_start
 
     phase_start = time.perf_counter()
+    _progress("final_clustering", 94, "Finalne laczenie wynikow")
     final_hits = _cluster_candidates(parent_search_candidates, parent_ids_by_child)
     diagnostics["final_hits"] = len(final_hits)
     timings["clustering"] = time.perf_counter() - phase_start
 
     phase_start = time.perf_counter()
+    _progress("debug_candidates", 97, "Kandydaci HITL/debug")
     debug_candidates = (
         _collect_debug_candidates(
             rejected_hits=rejected_hits,
@@ -867,7 +1135,7 @@ def detect_symbols(
             plan_image=plan_image,
             exclude_rects=exclude_rects,
         )
-        if debug_profile is not None
+        if debug_profile is not None and include_debug_candidates
         else []
     )
     diagnostics["debug_candidates"] = len(debug_candidates)
@@ -880,6 +1148,7 @@ def detect_symbols(
             {
                 "timingsMs": timings_ms,
                 "counters": {key: int(value) for key, value in diagnostics.items()},
+                "profile": detector_profile,
                 "threading": {
                     "scanWorkers": int(scan_workers),
                     "configuredScanWorkers": int(DETECTOR_SCAN_MAX_WORKERS),
@@ -898,6 +1167,7 @@ def detect_symbols(
                     "foregroundPixels": int(diagnostics["roi_foreground_pixels"]),
                     "fullImageAreaPixels": int(plan_image.shape[0] * plan_image.shape[1]),
                 },
+                "grayRawBudget": gray_budget_profile,
                 "debugCandidates": debug_candidates,
                 "slowestPhase": (
                     max(timings_ms.items(), key=lambda item: item[1])[0] if timings_ms else None
@@ -910,6 +1180,7 @@ def detect_symbols(
         f" prepared_variants={diagnostics['prepared_variants']},"
         f" skipped_empty_color_masks={diagnostics['skipped_empty_color_masks']},"
         f" raw_peaks={diagnostics['raw_peaks']},"
+        f" raw_budget={diagnostics['raw_budget_hits']}(-{diagnostics['raw_budget_removed']}),"
         f" raw_after_prefilter={diagnostics['raw_prefilter_hits']}(-{diagnostics['raw_prefilter_removed']}),"  # noqa: E501
         f" validated_template_hits={diagnostics['validated_template_hits']},"
         f" promoted_targeted_hits={diagnostics['promoted_targeted_hits']},"
@@ -935,6 +1206,7 @@ def detect_symbols(
     )
 
     per_template: dict[int, list[Detection]] = {}
+    _progress("format_results", 99, "Formatowanie wynikow")
     for hit in final_hits:
         x, y, w, h = [int(value) for value in hit.bbox]
         detection = Detection(

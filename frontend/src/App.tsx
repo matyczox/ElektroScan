@@ -7,6 +7,8 @@ import './index.css';
 const API_BASE = 'http://127.0.0.1:8000';
 const withNoCache = (path: string) => `${API_BASE}${path}${path.includes('?') ? '&' : '?'}_ts=${Date.now()}`;
 
+type DetectorProfile = 'auto' | 'color' | 'gray';
+
 interface ExcludedZone {
   x: number;
   y: number;
@@ -32,6 +34,34 @@ interface AnalysisContext {
       matches?: string[];
     }>;
   };
+  detectorProfileRequested?: DetectorProfile;
+  detectorProfileUsed?: 'color' | 'gray';
+  includeDebugCandidates?: boolean;
+  pdfDiagnostics?: PdfDiagnostics;
+}
+
+interface PdfDiagnostics {
+  pages?: number;
+  layers?: number;
+  textCharsPage1?: number;
+  textBlocksPage1?: number;
+  drawingsPage1?: number;
+  imagesPage1?: number;
+  inkPct?: number;
+  colorfulInkPct?: number;
+  grayInkPct?: number;
+  recommendedProfile?: 'color' | 'gray';
+}
+
+interface AnalysisProgress {
+  sessionId?: string;
+  analysisId?: string | null;
+  stage?: string;
+  percent?: number;
+  detail?: string;
+  done?: boolean;
+  error?: string | null;
+  updatedAtUtc?: string | null;
 }
 
 interface DetectionBox {
@@ -72,8 +102,13 @@ function App() {
   const [focusedBoxId, setFocusedBoxId] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [excludedZones, setExcludedZones] = useState<ExcludedZone[]>([]);
+  const [legendZone, setLegendZone] = useState<ExcludedZone | null>(null);
   const [layers, setLayers] = useState<{name: string, visible: boolean}[]>([]);
   const [analysisContext, setAnalysisContext] = useState<AnalysisContext | null>(null);
+  const [detectorProfile, setDetectorProfile] = useState<DetectorProfile>('auto');
+  const [showDebugCandidates, setShowDebugCandidates] = useState(false);
+  const [pdfDiagnostics, setPdfDiagnostics] = useState<PdfDiagnostics | null>(null);
+  const [analysisProgress, setAnalysisProgress] = useState<AnalysisProgress | null>(null);
   const detectRequestSeqRef = useRef(0);
   const detectAbortRef = useRef<AbortController | null>(null);
 
@@ -93,6 +128,10 @@ function App() {
     fetchTemplates();
   }, []);
 
+  useEffect(() => {
+    if (!showDebugCandidates) setDebugCandidates([]);
+  }, [showDebugCandidates]);
+
   // ── Handlery ────────────────────────────────────────────
 
   const handleFileSelect = async (selectedFile: File) => {
@@ -103,8 +142,11 @@ function App() {
     setDebugCandidates([]);
     setSessionId(null);
     setExcludedZones([]);
+    setLegendZone(null);
     setFocusedBoxId(null);
     setAnalysisContext(null);
+    setPdfDiagnostics(null);
+    setAnalysisProgress(null);
     
     setIsProcessing(true);
     setProgressText('Ładowanie podglądu PDF...');
@@ -120,6 +162,7 @@ function App() {
       const data = await res.json();
       setPdfPreview(data.planPreview);
       setSessionId(data.sessionId);
+      setPdfDiagnostics(data.pdfDiagnostics || null);
       
       // Fetch layers
       fetch(withNoCache(`/api/layers?session_id=${data.sessionId}`), { cache: 'no-store' })
@@ -153,6 +196,7 @@ function App() {
       if (!res.ok) throw new Error('Błąd odświeżania podglądu');
       const data = await res.json();
       setPdfPreview(data.planPreview);
+      setPdfDiagnostics(data.pdfDiagnostics || null);
     } catch (err) {
       console.error(err);
     } finally {
@@ -164,7 +208,7 @@ function App() {
   const handleExtractLegend = async () => {
     if (!sessionId) return;
     setIsProcessing(true);
-    setProgressText('Ekstrakcja legendy (300 DPI)...');
+    setProgressText(legendZone ? 'Ekstrakcja zaznaczonej legendy (300 DPI)...' : 'Ekstrakcja legendy (300 DPI)...');
     try {
       const response = await fetch(withNoCache(`/api/extract-legend?session_id=${sessionId}`), {
         method: 'POST',
@@ -177,12 +221,21 @@ function App() {
             width: Math.round(z.width),
             height: Math.round(z.height),
           })),
-          hidden_layers: layers.filter(l => !l.visible).map(l => l.name)
+          hidden_layers: layers.filter(l => !l.visible).map(l => l.name),
+          detector_profile: detectorProfile,
+          legend_zone: legendZone ? {
+            page: 0,
+            x: Math.round(legendZone.x),
+            y: Math.round(legendZone.y),
+            width: Math.round(legendZone.width),
+            height: Math.round(legendZone.height),
+          } : undefined,
         })
       });
       if (!response.ok) throw new Error('Błąd serwera');
       const data = await response.json();
       setPatterns(data.patterns);
+      setPdfDiagnostics(data.pdfDiagnostics || pdfDiagnostics);
     } catch (error) {
       console.error(error);
       alert('Wystąpił błąd podczas ekstrakcji legendy. Upewnij się, że backend działa.');
@@ -203,12 +256,35 @@ function App() {
 
     setIsProcessing(true);
     setProgressText('Analiza hybrydowa (HSV + Complexity Sorting)...');
+    setAnalysisProgress({ sessionId, stage: 'start', percent: 1, detail: 'Start analizy', done: false });
     setResults([]);
     setBoxes([]);
     setDebugCandidates([]);
     setAnalysisContext(null);
     setFocusedBoxId(null);
+    let progressTimer: number | null = null;
     try {
+      progressTimer = window.setInterval(async () => {
+        try {
+          const progressResponse = await fetch(
+            withNoCache(`/api/analysis-progress?session_id=${sessionId}`),
+            { cache: 'no-store' },
+          );
+          if (!progressResponse.ok || requestSeq !== detectRequestSeqRef.current) return;
+          const progressData = await progressResponse.json();
+          const progress = progressData.progress as AnalysisProgress | undefined;
+          if (!progress) return;
+          setAnalysisProgress(progress);
+          if (progress.detail) setProgressText(progress.detail);
+          if (progress.done && progressTimer !== null) {
+            window.clearInterval(progressTimer);
+            progressTimer = null;
+          }
+        } catch (_error) {
+          // Progress polling is best-effort; the analysis request remains authoritative.
+        }
+      }, 700);
+
       const fetchStartedAt = performance.now();
       const response = await fetch(withNoCache(`/api/analyze?session_id=${sessionId}`), {
         method: 'POST',
@@ -225,6 +301,8 @@ function App() {
           hidden_layers: layers.filter(l => !l.visible).map(l => l.name),
           include_image: false,
           include_debug: true,
+          include_debug_candidates: showDebugCandidates,
+          detector_profile: detectorProfile,
         })
       });
       const responseReceivedAt = performance.now();
@@ -234,8 +312,17 @@ function App() {
       if (requestSeq !== detectRequestSeqRef.current) return;
       setResults(data.results);
       setBoxes(data.boxes || []);
-      setDebugCandidates(data.debugCandidates || []);
+      setDebugCandidates(showDebugCandidates ? (data.debugCandidates || []) : []);
       setAnalysisContext(data.analysisContext || null);
+      setAnalysisProgress({
+        sessionId,
+        analysisId: data.analysisContext?.analysisId,
+        stage: 'done',
+        percent: 100,
+        detail: 'Analiza zakonczona',
+        done: true,
+      });
+      setPdfDiagnostics(data.analysisContext?.pdfDiagnostics || pdfDiagnostics);
       if (data.resultImage) setPdfPreview(data.resultImage);
       setFocusedBoxId(null);
       window.setTimeout(() => {
@@ -256,6 +343,7 @@ function App() {
       alert('Błąd podczas analizy planu.');
     } finally {
       if (requestSeq === detectRequestSeqRef.current) {
+        if (progressTimer !== null) window.clearInterval(progressTimer);
         setIsProcessing(false);
         setProgressText('');
       }
@@ -275,8 +363,11 @@ function App() {
     setLayers([]);
     setSessionId(null);
     setExcludedZones([]);
+    setLegendZone(null);
     setFocusedBoxId(null);
     setAnalysisContext(null);
+    setPdfDiagnostics(null);
+    setAnalysisProgress(null);
   };
 
   const handleClearTemplates = async () => {
@@ -398,11 +489,19 @@ function App() {
         onClearTemplates={handleClearTemplates}
         isProcessing={isProcessing}
         progressText={progressText}
+        analysisProgress={analysisProgress}
         patterns={patterns}
         onUpdatePattern={handleUpdatePattern}
         onDeletePattern={handleDeletePattern}
         layers={layers}
         onToggleLayer={handleToggleLayer}
+        detectorProfile={detectorProfile}
+        onDetectorProfileChange={setDetectorProfile}
+        showDebugCandidates={showDebugCandidates}
+        onShowDebugCandidatesChange={setShowDebugCandidates}
+        pdfDiagnostics={pdfDiagnostics}
+        hasLegendZone={Boolean(legendZone)}
+        onClearLegendZone={() => setLegendZone(null)}
       />
 
       {/* Środek: Canvas */}
@@ -417,8 +516,11 @@ function App() {
         onAcceptDebugCandidate={handleAcceptDebugCandidate}
         onDismissDebugCandidate={handleDismissDebugCandidate}
         excludedZones={excludedZones}
+        legendZone={legendZone}
         onAddExcludedZone={(x, y, w, h) => setExcludedZones(prev => [...prev, { x, y, width: w, height: h }])}
         onRemoveExcludedZone={idx => setExcludedZones(prev => prev.filter((_, i) => i !== idx))}
+        onSetLegendZone={(x, y, w, h) => setLegendZone({ x, y, width: w, height: h })}
+        onClearLegendZone={() => setLegendZone(null)}
         symbolNames={patterns.map(p => p.name)}
         onAddManualBox={handleAddManualBox}
       />

@@ -2,6 +2,29 @@ import React, { useRef, useState } from 'react';
 import { Upload, FileDown, Layers, Trash2, Cpu, Edit3 } from 'lucide-react';
 import { PatternModal } from './PatternModal';
 
+type DetectorProfile = 'auto' | 'color' | 'gray';
+
+interface PdfDiagnostics {
+  pages?: number;
+  layers?: number;
+  textCharsPage1?: number;
+  textBlocksPage1?: number;
+  drawingsPage1?: number;
+  imagesPage1?: number;
+  inkPct?: number;
+  colorfulInkPct?: number;
+  grayInkPct?: number;
+  recommendedProfile?: 'color' | 'gray';
+}
+
+interface AnalysisProgress {
+  stage?: string;
+  percent?: number;
+  detail?: string;
+  done?: boolean;
+  error?: string | null;
+}
+
 interface SidebarProps {
   fileName: string | null;
   onFileSelect: (file: File) => void;
@@ -11,11 +34,19 @@ interface SidebarProps {
   onClearTemplates: () => void;
   isProcessing: boolean;
   progressText: string;
+  analysisProgress?: AnalysisProgress | null;
   patterns: any[];
   onUpdatePattern: (index: number, newName: string) => void;
   onDeletePattern: (index: number) => void;
   layers?: {name: string, visible: boolean}[];
   onToggleLayer?: (name: string) => void;
+  detectorProfile: DetectorProfile;
+  onDetectorProfileChange: (profile: DetectorProfile) => void;
+  showDebugCandidates: boolean;
+  onShowDebugCandidatesChange: (value: boolean) => void;
+  pdfDiagnostics?: PdfDiagnostics | null;
+  hasLegendZone?: boolean;
+  onClearLegendZone?: () => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -27,14 +58,31 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onClearTemplates,
   isProcessing,
   progressText,
+  analysisProgress,
   patterns,
   onUpdatePattern,
   onDeletePattern,
   layers = [],
-  onToggleLayer
+  onToggleLayer,
+  detectorProfile,
+  onDetectorProfileChange,
+  showDebugCandidates,
+  onShowDebugCandidatesChange,
+  pdfDiagnostics,
+  hasLegendZone = false,
+  onClearLegendZone,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [editingPatternIndex, setEditingPatternIndex] = useState<number | null>(null);
+  const progressPercent =
+    typeof analysisProgress?.percent === 'number'
+      ? Math.max(0, Math.min(100, analysisProgress.percent))
+      : null;
+  const progressLabel =
+    analysisProgress?.error ||
+    analysisProgress?.detail ||
+    progressText ||
+    'Przetwarzanie...';
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
@@ -122,6 +170,54 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </div>
         )}
 
+        {/* Detection profile */}
+        <div className="card">
+          <div className="card-header">
+            <Cpu size={14} /> Profil detekcji
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <label className="text-xs text-muted" style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+              Tryb obrazu
+              <select
+                value={detectorProfile}
+                disabled={isProcessing}
+                onChange={e => onDetectorProfileChange(e.target.value as DetectorProfile)}
+                style={{
+                  width: '100%',
+                  padding: '7px 8px',
+                  borderRadius: 6,
+                  border: '1px solid var(--border-light)',
+                  background: 'var(--bg-primary)',
+                  color: 'var(--text-main)',
+                }}
+              >
+                <option value="auto">Auto</option>
+                <option value="color">Kolor</option>
+                <option value="gray">Szary / tusz</option>
+              </select>
+            </label>
+
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={showDebugCandidates}
+                disabled={isProcessing}
+                onChange={e => onShowDebugCandidatesChange(e.target.checked)}
+              />
+              <span>Pokaz niepewne/brakujace</span>
+            </label>
+
+            {pdfDiagnostics && (
+              <div className="text-xs text-muted" style={{ lineHeight: 1.45 }}>
+                <div>Rekomendacja: <b>{pdfDiagnostics.recommendedProfile === 'gray' ? 'Szary' : 'Kolor'}</b></div>
+                <div>Warstwy: {pdfDiagnostics.layers ?? 0}, tekst: {pdfDiagnostics.textCharsPage1 ?? 0}</div>
+                <div>Wektory: {pdfDiagnostics.drawingsPage1 ?? 0}, obrazy: {pdfDiagnostics.imagesPage1 ?? 0}</div>
+                <div>Tusz kolorowy: {(pdfDiagnostics.colorfulInkPct ?? 0).toFixed(2)}%</div>
+              </div>
+            )}
+          </div>
+        </div>
+
         {/* Action Buttons */}
         <div className="card">
           <div className="card-header">Operacje</div>
@@ -132,8 +228,17 @@ export const Sidebar: React.FC<SidebarProps> = ({
               disabled={!fileName || isProcessing}
             >
               <Layers size={18} />
-              1. Auto-Legenda (Extract)
+              {hasLegendZone ? '1. Legenda z zaznaczenia' : '1. Auto-Legenda (Extract)'}
             </button>
+            {hasLegendZone && (
+              <button
+                className="btn-secondary"
+                onClick={onClearLegendZone}
+                disabled={isProcessing}
+              >
+                Wyczysc strefe legendy
+              </button>
+            )}
             <button 
               className="btn-primary" 
               onClick={onDetect}
@@ -157,11 +262,24 @@ export const Sidebar: React.FC<SidebarProps> = ({
           {isProcessing && (
             <div className="mt-4">
               <div className="flex-row" style={{ justifyContent: 'space-between' }}>
-                <span className="text-xs text-muted">{progressText || 'Przetwarzanie...'}</span>
+                <span className="text-xs text-muted">{progressLabel}</span>
+                {progressPercent !== null && (
+                  <span className="text-xs text-muted">{Math.round(progressPercent)}%</span>
+                )}
               </div>
               <div className="progress-container">
-                <div className="progress-fill" style={{ width: '100%', animation: 'pulse 1.5s infinite' }} />
+                <div
+                  className="progress-fill"
+                  style={{
+                    width: `${progressPercent ?? 100}%`,
+                    animation: progressPercent === null ? 'pulse 1.5s infinite' : 'none',
+                    transition: 'width 260ms ease',
+                  }}
+                />
               </div>
+              {analysisProgress?.stage && (
+                <div className="text-xs text-muted mt-1">Etap: {analysisProgress.stage}</div>
+              )}
             </div>
           )}
         </div>
