@@ -19,6 +19,10 @@ from core.detector_config import (
     GRAY_DARK_ZONE_THRESHOLD,
     GRAY_ELONGATED_SCAN_MAX_TEMPLATE_PIXELS,
     GRAY_ELONGATED_SCAN_THRESHOLD,
+    GRAY_FULLER_SYMBOL_MAX_VERIFICATION_DROP,
+    GRAY_FULLER_SYMBOL_MIN_AREA_RATIO,
+    GRAY_FULLER_SYMBOL_MIN_COVERAGE,
+    GRAY_FULLER_SYMBOL_MIN_PURITY,
     GRAY_LEGEND_DARK_MARGIN,
     GRAY_LEGEND_EVIDENCE_MARGIN,
     GRAY_LEGEND_INK_PERCENTILE,
@@ -675,6 +679,49 @@ def _same_physical_hit(left: CandidateHit, right: CandidateHit) -> bool:
     return iou >= 0.35 or iom >= 0.72 or center_distance <= 0.30
 
 
+def _hit_area(hit: CandidateHit) -> int:
+    return max(1, hit.bbox[2] * hit.bbox[3])
+
+
+def _is_gray_symbol_hit(hit: CandidateHit) -> bool:
+    return hit.dominant_hsv is None and not hit.is_text_label
+
+
+def _suppress_nested_gray_core_hits(hits: list[CandidateHit]) -> list[CandidateHit]:
+    """Drop smaller gray sub-symbols when a fuller symbol covers the same ink."""
+
+    if len(hits) < 2:
+        return hits
+
+    suppressed: set[int] = set()
+    for small_idx, small in enumerate(hits):
+        if not _is_gray_symbol_hit(small):
+            continue
+
+        small_area = _hit_area(small)
+        for large_idx, large in enumerate(hits):
+            if small_idx == large_idx or not _is_gray_symbol_hit(large):
+                continue
+            if _hit_area(large) < small_area * GRAY_FULLER_SYMBOL_MIN_AREA_RATIO:
+                continue
+            if large.coverage < GRAY_FULLER_SYMBOL_MIN_COVERAGE:
+                continue
+            if large.purity < GRAY_FULLER_SYMBOL_MIN_PURITY:
+                continue
+            if large.verification_score + GRAY_FULLER_SYMBOL_MAX_VERIFICATION_DROP < small.verification_score:
+                continue
+            if not _same_physical_hit(small, large):
+                continue
+
+            suppressed.add(small_idx)
+            break
+
+    if not suppressed:
+        return hits
+
+    return [hit for index, hit in enumerate(hits) if index not in suppressed]
+
+
 def rescue_validated_gray_frame_hits(
     final_hits: list[CandidateHit],
     validated_hits: list[CandidateHit],
@@ -694,9 +741,10 @@ def rescue_validated_gray_frame_hits(
             rescued.append(hit)
 
     if not rescued:
-        return final_hits, 0
+        return _suppress_nested_gray_core_hits(final_hits), 0
 
     combined = final_hits + rescued
+    combined = _suppress_nested_gray_core_hits(combined)
     combined.sort(key=lambda item: (item.bbox[1], item.bbox[0], -item.verification_score))
     return combined, len(rescued)
 

@@ -631,6 +631,7 @@ function App() {
         onClearPlanZone={() => setPlanZone(null)}
         symbolNames={patterns.map(p => p.name)}
         onAddManualBox={handleAddManualBox}
+        onRejectBox={handleRejectBox}
         onInspectZone={handleInspectRoi}
         grayDebugOverlayImage={grayDebugZones?.overlayImage ?? null}
         grayDebugInfo={grayDebugZones}

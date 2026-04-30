@@ -1,5 +1,5 @@
 ﻿import React, { useRef, useState, useEffect } from 'react';
-import { AlertTriangle, Layers, Plus, ZoomIn, ZoomOut, Maximize, Move, Slash, X } from 'lucide-react';
+import { AlertTriangle, Layers, Plus, Trash2, ZoomIn, ZoomOut, Maximize, Move, Slash, X } from 'lucide-react';
 
 interface Box {
   id: string;
@@ -96,6 +96,7 @@ interface CanvasViewProps {
   isGrayDebugLoading?: boolean;
   symbolNames?: string[];
   onAddManualBox?: (box: Omit<Box, 'id' | 'color'> & { symbolName: string }) => void;
+  onRejectBox?: (id: string) => void;
 }
 
 export const CanvasView: React.FC<CanvasViewProps> = ({
@@ -120,6 +121,7 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
   isGrayDebugLoading = false,
   symbolNames = [],
   onAddManualBox,
+  onRejectBox,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState(1);
@@ -154,6 +156,26 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
     setPulsingId(null);
     setCopiedBoxId(null);
   }, [analysisContext?.analysisId]);
+
+  useEffect(() => {
+    if (!focusedBoxId || !onRejectBox) return;
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Delete' && event.key !== 'Backspace') return;
+
+      const target = event.target as HTMLElement | null;
+      const tagName = target?.tagName?.toLowerCase();
+      if (tagName === 'input' || tagName === 'textarea' || tagName === 'select' || target?.isContentEditable) {
+        return;
+      }
+
+      event.preventDefault();
+      onRejectBox(focusedBoxId);
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [focusedBoxId, onRejectBox]);
 
   // Kiedy focusedBoxId siÄ™ zmienia â†’ animuj pan do tej ramki
   useEffect(() => {
@@ -251,6 +273,13 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
 
   const BOX_FOCUS_COLOR = '#f97316';
   const BOX_LOW_COLOR = '#f59e0b';
+  const focusedBox = focusedBoxId ? boxes.find(box => box.id === focusedBoxId) : null;
+  const drawableBoxes = [...boxes].sort((left, right) => {
+    const rightArea = right.width * right.height;
+    const leftArea = left.width * left.height;
+    if (rightArea !== leftArea) return rightArea - leftArea;
+    return (left.confidence ?? 0) - (right.confidence ?? 0);
+  });
 
   const formatDebugValue = (value?: number, digits = 3) =>
     typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : 'n/a';
@@ -438,6 +467,23 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
           <Plus size={14} />
           {isManualMode ? 'Kliknij plan' : 'Dodaj'}
         </button>
+        {focusedBox && onRejectBox && (
+          <button
+            className="btn-secondary"
+            onClick={() => onRejectBox(focusedBox.id)}
+            title="Usun zaznaczone wykrycie (Delete)"
+            style={{
+              borderColor: '#ef4444',
+              color: '#ef4444',
+              padding: '6px 10px',
+              fontSize: 11,
+              fontWeight: 700,
+            }}
+          >
+            <Trash2 size={14} />
+            Usun box
+          </button>
+        )}
         <div style={{ width: 1, background: 'var(--border-light)', margin: '0 2px', alignSelf: 'stretch' }} />
         <button className="btn-secondary" style={{ padding: '6px 10px' }}
           onClick={() => setScale(s => Math.min(s * 1.2, 5))}>
@@ -668,7 +714,7 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
           )}
 
           {/* Detection Boxes */}
-          {boxes.map(box => {
+          {drawableBoxes.map(box => {
             const isFocused = focusedBoxId === box.id || pulsingId === box.id;
             const isPulsing = pulsingId === box.id;
             const displayConfidence = box.verificationScore ?? box.confidence;
