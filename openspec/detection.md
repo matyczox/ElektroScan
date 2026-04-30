@@ -1,5 +1,10 @@
 # Detekcja — Metryki, Labels, Promocje, HITL
 
+> Aktualizacja: stary panel `Pokaz niepewne/brakujace` i `debugCandidates`
+> zostaly usuniete z glownego UI. Do diagnozy brakow uzywamy teraz Inspektora
+> ROI (`backend/core/roi_inspector.py`). Jesli ponizsze sekcje mowia o
+> debugCandidates/HITL jako aktywnym panelu, traktuj je jako historyczny opis.
+
 ## Metryki Walidacji Kandydata
 
 Każdy kandydat jest oceniany przez zestaw metryk. Wszystkie pola są dostępne w debug payload.

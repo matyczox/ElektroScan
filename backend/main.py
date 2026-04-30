@@ -502,7 +502,6 @@ class AnalyzeRequest(BaseModel):
     excluded_zones: Optional[List[dict]] = []
     hidden_layers: Optional[List[str]] = []
     include_debug: Optional[bool] = None
-    include_debug_candidates: Optional[bool] = None
     include_image: Optional[bool] = None
     detector_profile: Optional[str] = "auto"
     legend_zone: Optional[LegendZone] = None
@@ -556,11 +555,6 @@ def api_analyze(session_id: str, body: AnalyzeRequest = None):
             body.include_debug
             if body and body.include_debug is not None
             else DEFAULT_ANALYSIS_DEBUG
-        )
-        include_debug_candidates = (
-            bool(body.include_debug_candidates)
-            if body and body.include_debug_candidates is not None
-            else False
         )
         requested_profile = _normalize_detector_profile(body.detector_profile if body else "auto")
         include_image = body.include_image if body and body.include_image is not None else True
@@ -663,7 +657,6 @@ def api_analyze(session_id: str, body: AnalyzeRequest = None):
             hidden_layers=hidden_layers,
             debug_profile=detector_profile if include_debug else None,
             detector_profile=resolved_profile,
-            include_debug_candidates=include_debug_candidates,
             progress_callback=detector_progress,
         )
         timings_ms["detectSymbolsTotal"] = _elapsed_ms(phase_start)
@@ -706,7 +699,6 @@ def api_analyze(session_id: str, body: AnalyzeRequest = None):
             "planZoneOutsideExcluded": plan_zone_outside_rects,
             "detectorProfileRequested": requested_profile,
             "detectorProfileUsed": resolved_profile,
-            "includeDebugCandidates": include_debug_candidates,
             "pdfDiagnostics": pdf_diagnostics,
         }
         if include_debug:
@@ -794,9 +786,6 @@ def api_analyze(session_id: str, body: AnalyzeRequest = None):
         }
         if include_debug:
             response_payload["performance"] = performance
-            response_payload["debugCandidates"] = (
-                detector_profile.get("debugCandidates", []) if include_debug_candidates else []
-            )
 
         snapshot_queued = False
         try:
@@ -805,11 +794,6 @@ def api_analyze(session_id: str, body: AnalyzeRequest = None):
                 "analysisContext": analysis_context,
                 "results": formatted_results,
                 "boxes": all_boxes,
-                "debugCandidates": (
-                    detector_profile.get("debugCandidates", [])
-                    if include_debug and include_debug_candidates
-                    else []
-                ),
                 "resultImageLength": len(response_payload["resultImage"] or ""),
                 "performance": performance,
             }

@@ -1,44 +1,39 @@
-# ElektroScan — Indeks Dokumentacji
+# ElektroScan - OpenSpec
 
-Katalog `openspec/` zawiera pełną dokumentację projektu podzieloną tematycznie. Każdy plik można czytać niezależnie.
+Katalog `openspec/` trzyma dokumentacje projektu dla ludzi i AI.
+
+## Najpierw Czytaj
+
+1. [current-context.md](current-context.md) - aktualny stan pracy, rozdzial
+   color/gray, zasady bezpieczenstwa i kierunek dla szarych PDF.
+2. [architecture.md](architecture.md) - szersza architektura projektu.
+3. [workflow.md](workflow.md) - jak uruchamiac i testowac projekt.
+
+Jesli starsze pliki sa sprzeczne z `current-context.md`, traktuj
+`current-context.md` jako aktualniejsze zrodlo prawdy.
 
 ## Pliki
 
-| Plik | Zawartość |
+| Plik | Zawartosc |
 | --- | --- |
-| [architecture.md](architecture.md) | Struktura projektu, pipeline detektora, opis modułów |
-| [detection.md](detection.md) | Metryki detekcji, text labels, rodzinne promocje, HITL i debug candidates |
-| [api.md](api.md) | Endpointy API, zarządzanie wzorcami, CostPanel, frontend HITL |
-| [performance.md](performance.md) | Wydajność, env vars, narzędzia diagnostyczne |
-| [known-issues.md](known-issues.md) | Znane problemy, złote przypadki regresyjne |
-| [workflow.md](workflow.md) | Jak uruchomić, jak pracować z AI/Codexem, rytuał debugowania |
-| [decisions.md](decisions.md) | Inwarianty, czego nie robić, mapa ryzyk, plan prac |
-| [devops.md](devops.md) | Docker, linting, testy, GitHub Actions — plan wdrożenia |
-| [changelog.md](changelog.md) | Log zmian i decyzji architektonicznych |
+| [current-context.md](current-context.md) | Aktualny kontekst roboczy dla AI |
+| [architecture.md](architecture.md) | Struktura projektu i pipeline detektora |
+| [detection.md](detection.md) | Metryki detekcji, walidacja, promocje |
+| [api.md](api.md) | Endpointy API i formaty odpowiedzi |
+| [performance.md](performance.md) | Wydajnosc, env vars, diagnostyka |
+| [known-issues.md](known-issues.md) | Znane problemy i przypadki regresyjne |
+| [workflow.md](workflow.md) | Uruchamianie, testowanie, praca z AI |
+| [decisions.md](decisions.md) | Decyzje architektoniczne i inwarianty |
+| [devops.md](devops.md) | Docker, CI, lint, testy |
+| [changelog.md](changelog.md) | Historia zmian |
 
-## Stan Referencyjny
-
-- Branch: `codex-test-niewiadoma-optymalizacja`
-- Ostatni commit: `6fb831a Niepewne bledy HITL debug`
-- Dobry punkt optymalizacyjny: `7d45d22 Mega Dobra optymalizacja-OBECNA`
-- Lokalnie może istnieć `backend/analysis_debug/` — nie commitować.
-
-## Pakiet Startowy
-
-1. Przeczytaj ten indeks i przejrzyj `architecture.md`.
-2. Uruchom `git status --short` — upewnij się że nie ma przypadkowych zmian.
-3. Sprawdź `git log --oneline -8` — upewnij się że jesteś na właściwym branchu.
-4. Odpal backend i frontend (instrukcja w `workflow.md`).
-5. Wrzuć `PW-E-02 Rev2.pdf` → sprawdź `bbox=2293,1548` (ma być `12`).
-6. Wrzuć `PW-E-01 Rev2 (1).pdf` → sprawdź labels `TM/MSW/TSM/INT/TV`.
-7. Dopiero potem zmieniaj kod.
-
-Minimalny prompt dla nowego Codexa/AI:
+## Minimalny Prompt Dla Nowego AI
 
 ```text
-Pracujesz nad ElektroScan. Przeczytaj openspec/README.md i openspec/architecture.md.
-Detektor symboli elektrycznych z PDF/obrazu oparty o OpenCV/template matching i HITL.
-Nie wolno hardcodować koordynat, nie opierać produkcyjnej logiki na PDF text layer,
-nie commituj backend/analysis_debug. Przed zmianą sprawdź branch, status i commity.
-Nie usuwaj reguł rodzinnych 06/07 i 10/11/12 bez testów regresji.
+Pracujesz w C:\Users\Admin\Desktop\elektroskan_claude. Najpierw przeczytaj
+openspec/current-context.md. Detektor ma rozdzielone wejscia color/gray, ale
+wciaz ma wspolny pipeline. Nie hardcoduj koordynat ani nazw symboli. Gray PDF
+tunuj tylko w gray-only sciezce. Kolorowy silnik ma zostac szybki i nietkniety.
+Do diagnozy brakow uzywaj Inspektora ROI, nie przywracaj starego panelu
+"Pokaz niepewne/brakujace".
 ```

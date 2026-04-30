@@ -1,5 +1,29 @@
 # Architektura ElektroScan
 
+> Aktualizacja: szybki, najnowszy stan pracy jest w
+> [current-context.md](current-context.md). Ten plik opisuje szersza
+> architekture, ale czesc historycznych opisow moze byc starsza niz obecny
+> rozdzial silnikow `color` / `gray`.
+
+## Aktualny Podzial Detektora
+
+Detektor ma teraz publiczny router i dwa jawne entrypointy:
+
+- `backend/core/detector.py` - publiczny router `detect_symbols(...)`.
+- `backend/core/detector_color_engine.py` - wejscie dla kolorowych PDF.
+- `backend/core/detector_gray_engine.py` - wejscie dla szarych PDF.
+
+Glowny pipeline jest nadal wspolny, ale rozbity na fazy:
+
+- `backend/core/detector_pipeline.py` - orkiestrator.
+- `backend/core/detector_scanning.py` - skanowanie `matchTemplate`.
+- `backend/core/detector_validation.py` - walidacja kandydatow.
+- `backend/core/detector_parent_search.py` - drozszy fallback parent-search,
+  praktycznie tylko dla gray.
+
+Zasada: zmiany dla szarych PDF nie moga przypadkiem spowalniac albo zmieniac
+kolorowego silnika.
+
 ## Cel Projektu
 
 ElektroScan wykrywa symbole instalacji elektrycznej na planach PDF/obrazach na podstawie wzorców z legendy. Nie jest detektorem pod jeden PDF — ma działać możliwie uniwersalnie na podobnych schematach, z trybem HITL dla granicznych przypadków.

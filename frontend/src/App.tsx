@@ -40,7 +40,6 @@ interface AnalysisContext {
   };
   detectorProfileRequested?: DetectorProfile;
   detectorProfileUsed?: 'color' | 'gray';
-  includeDebugCandidates?: boolean;
   pdfDiagnostics?: PdfDiagnostics;
 }
 
@@ -140,7 +139,6 @@ function App() {
   const [patterns, setPatterns] = useState<any[]>([]);
   const [results, setResults] = useState<any[]>([]);
   const [boxes, setBoxes] = useState<DetectionBox[]>([]);
-  const [debugCandidates, setDebugCandidates] = useState<DetectionBox[]>([]);
   const [focusedBoxId, setFocusedBoxId] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [excludedZones, setExcludedZones] = useState<ExcludedZone[]>([]);
@@ -149,7 +147,6 @@ function App() {
   const [layers, setLayers] = useState<{name: string, visible: boolean}[]>([]);
   const [analysisContext, setAnalysisContext] = useState<AnalysisContext | null>(null);
   const [detectorProfile, setDetectorProfile] = useState<DetectorProfile>('auto');
-  const [showDebugCandidates, setShowDebugCandidates] = useState(false);
   const [pdfDiagnostics, setPdfDiagnostics] = useState<PdfDiagnostics | null>(null);
   const [analysisProgress, setAnalysisProgress] = useState<AnalysisProgress | null>(null);
   const [roiInspection, setRoiInspection] = useState<RoiInspection | null>(null);
@@ -173,10 +170,6 @@ function App() {
     fetchTemplates();
   }, []);
 
-  useEffect(() => {
-    if (!showDebugCandidates) setDebugCandidates([]);
-  }, [showDebugCandidates]);
-
   // ── Handlery ────────────────────────────────────────────
 
   const handleFileSelect = async (selectedFile: File) => {
@@ -184,7 +177,6 @@ function App() {
     setPdfPreview(null);
     setResults([]);
     setBoxes([]);
-    setDebugCandidates([]);
     setSessionId(null);
     setExcludedZones([]);
     setLegendZone(null);
@@ -306,7 +298,6 @@ function App() {
     setAnalysisProgress({ sessionId, stage: 'start', percent: 1, detail: 'Start analizy', done: false });
     setResults([]);
     setBoxes([]);
-    setDebugCandidates([]);
     setAnalysisContext(null);
     setFocusedBoxId(null);
     let progressTimer: number | null = null;
@@ -348,7 +339,6 @@ function App() {
           hidden_layers: layers.filter(l => !l.visible).map(l => l.name),
           include_image: false,
           include_debug: true,
-          include_debug_candidates: showDebugCandidates,
           detector_profile: detectorProfile,
           legend_zone: legendZone ? {
             page: 0,
@@ -373,7 +363,6 @@ function App() {
       if (requestSeq !== detectRequestSeqRef.current) return;
       setResults(data.results);
       setBoxes(data.boxes || []);
-      setDebugCandidates(showDebugCandidates ? (data.debugCandidates || []) : []);
       setAnalysisContext(data.analysisContext || null);
       setAnalysisProgress({
         sessionId,
@@ -420,7 +409,6 @@ function App() {
     setPatterns([]);
     setResults([]);
     setBoxes([]);
-    setDebugCandidates([]);
     setLayers([]);
     setSessionId(null);
     setExcludedZones([]);
@@ -518,34 +506,6 @@ function App() {
     });
   };
 
-  const handleDismissDebugCandidate = (id: string) => {
-    setDebugCandidates(prev => prev.filter(candidate => candidate.id !== id));
-  };
-
-  const handleAcceptDebugCandidate = (candidate: DetectionBox) => {
-    const symbolName = candidate.symbolName === 'possible_missed'
-      ? (patterns[0]?.name ?? candidate.symbolName)
-      : candidate.symbolName;
-    handleAddManualBox({
-      symbolName,
-      x: candidate.x,
-      y: candidate.y,
-      width: candidate.width,
-      height: candidate.height,
-      confidence: candidate.confidence || 1.0,
-      verificationScore: candidate.verificationScore,
-      source: `hitl_${candidate.reason ?? 'debug_candidate'}`,
-      rotation: candidate.rotation,
-      scale: candidate.scale,
-      mirrored: candidate.mirrored,
-      coverage: candidate.coverage,
-      purity: candidate.purity,
-      contextPurity: candidate.contextPurity,
-      colorSimilarity: candidate.colorSimilarity,
-    });
-    handleDismissDebugCandidate(candidate.id);
-  };
-
   const handleAddManualBox = (box: Omit<DetectionBox, 'id' | 'color'>) => {
     // Kolor z backendu lub domyślny złoty, id losowe
     const newBox = {
@@ -595,8 +555,6 @@ function App() {
         onToggleLayer={handleToggleLayer}
         detectorProfile={detectorProfile}
         onDetectorProfileChange={setDetectorProfile}
-        showDebugCandidates={showDebugCandidates}
-        onShowDebugCandidatesChange={setShowDebugCandidates}
         pdfDiagnostics={pdfDiagnostics}
         hasLegendZone={Boolean(legendZone)}
         onClearLegendZone={() => setLegendZone(null)}
@@ -609,12 +567,9 @@ function App() {
         key={analysisContext?.analysisId ?? sessionId ?? 'canvas-empty'}
         imageSrc={pdfPreview}
         boxes={boxes}
-        debugCandidates={debugCandidates}
         analysisContext={analysisContext}
         focusedBoxId={focusedBoxId}
         onBoxClick={id => setFocusedBoxId(prev => prev === id ? null : id)}
-        onAcceptDebugCandidate={handleAcceptDebugCandidate}
-        onDismissDebugCandidate={handleDismissDebugCandidate}
         excludedZones={excludedZones}
         legendZone={legendZone}
         planZone={planZone}
@@ -721,9 +676,6 @@ function App() {
           onRejectBox={handleRejectBox}
           onChangeBoxSymbol={handleChangeBoxSymbol}
           symbolNames={patterns.map(p => p.name)}
-          debugCandidates={debugCandidates}
-          onAcceptDebugCandidate={handleAcceptDebugCandidate}
-          onDismissDebugCandidate={handleDismissDebugCandidate}
           onTemplateUploaded={fetchTemplates}
         />
       )}

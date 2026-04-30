@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+﻿import React, { useState, useEffect, useRef } from 'react';
 import { Layers, ChevronDown, ChevronRight, X, Calculator, Upload } from 'lucide-react';
 
 const API_BASE = 'http://127.0.0.1:8000';
@@ -44,9 +44,6 @@ interface ResultsPanelProps {
   onRejectBox: (id: string) => void;
   onChangeBoxSymbol?: (id: string, symbolName: string) => void;
   symbolNames?: string[];
-  debugCandidates?: Box[];
-  onAcceptDebugCandidate?: (box: Box) => void;
-  onDismissDebugCandidate?: (id: string) => void;
   onTemplateUploaded?: () => void;
 }
 
@@ -58,9 +55,6 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
   onRejectBox,
   onChangeBoxSymbol,
   symbolNames = [],
-  debugCandidates = [],
-  onAcceptDebugCandidate,
-  onDismissDebugCandidate,
   onTemplateUploaded,
 }) => {
   const [activeTab, setActiveTab] = useState<'correction' | 'cost'>('correction');
@@ -120,10 +114,10 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
       if (res.ok) {
         onTemplateUploaded?.();
       } else {
-        alert('Błąd uploadu wzorca.');
+        alert('BĹ‚Ä…d uploadu wzorca.');
       }
     } catch {
-      alert('Błąd połączenia z backendem.');
+      alert('BĹ‚Ä…d poĹ‚Ä…czenia z backendem.');
     } finally {
       setUploading(false);
       if (uploadRef.current) uploadRef.current.value = '';
@@ -132,24 +126,6 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
 
   const empty = results.length === 0;
   const allSymbolNames = Array.from(new Set([...symbolNames, ...results.map(result => result.name)])).sort();
-  const reasonLabel = (reason?: string) => {
-    switch (reason) {
-      case 'overlap_conflict':
-        return 'konflikt';
-      case 'partial_ghost':
-        return 'ghost';
-      case 'rejected_low_content':
-        return 'niska tresc';
-      case 'unexplained_component':
-        return 'brak?';
-      case 'accepted_uncertain':
-        return 'sprawdź';
-      case 'rejected_candidate':
-        return 'możliwy';
-      default:
-        return 'debug';
-    }
-  };
 
   return (
     <div className="results-panel">
@@ -186,7 +162,7 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
                 transition: 'all 0.2s',
               }}
             >
-              {tab === 'correction' ? '🔍 Korekta' : '💰 Kosztorys'}
+              {tab === 'correction' ? 'đź”Ť Korekta' : 'đź’° Kosztorys'}
             </button>
           ))}
         </div>
@@ -195,12 +171,12 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
       {empty ? (
         <div className="sidebar-content" style={{ alignItems: 'center', justifyContent: 'center', textAlign: 'center' }}>
           <Layers size={36} style={{ opacity: 0.2, marginBottom: 12 }} />
-          <p className="text-sm text-muted">Brak wyników.<br />Wgraj plan i uruchom analizę.</p>
+          <p className="text-sm text-muted">Brak wynikĂłw.<br />Wgraj plan i uruchom analizÄ™.</p>
         </div>
       ) : (
         <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
 
-          {/* ── KOREKTA TAB ── */}
+          {/* â”€â”€ KOREKTA TAB â”€â”€ */}
           {activeTab === 'correction' && (
             <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
 
@@ -208,7 +184,7 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
               <div className="card" style={{ padding: '12px 16px' }}>
                 <div className="flex-row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
                   <span className="text-xs text-muted" style={{ textTransform: 'uppercase', fontWeight: 600 }}>
-                    Min. Pewność
+                    Min. PewnoĹ›Ä‡
                   </span>
                   <span className="text-xs" style={{ color: 'var(--accent-gold)', fontWeight: 700 }}>
                     {minConfidence}%
@@ -229,7 +205,7 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
                 </div>
               </div>
 
-              {/* Upload ręcznego wzorca */}
+              {/* Upload rÄ™cznego wzorca */}
               <div>
                 <button
                   className="btn-secondary flex-row gap-2"
@@ -249,58 +225,6 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
                 />
               </div>
 
-              {debugCandidates.length > 0 && (
-                <div className="card" style={{ padding: 12, borderColor: 'rgba(239,68,68,0.35)' }}>
-                  <div className="flex-row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
-                    <span className="text-xs" style={{ color: '#fca5a5', textTransform: 'uppercase', fontWeight: 800 }}>
-                      HITL / do sprawdzenia
-                    </span>
-                    <span className="text-xs" style={{ color: '#fca5a5', fontWeight: 800 }}>{debugCandidates.length}</span>
-                  </div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 180, overflowY: 'auto' }}>
-                    {debugCandidates.slice(0, 20).map(candidate => (
-                      <div
-                        key={candidate.id}
-                        style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: 6,
-                          padding: '6px 0',
-                          borderTop: '1px solid rgba(255,255,255,0.06)',
-                        }}
-                      >
-                        <button
-                          onClick={() => onFocusBox?.(candidate.id)}
-                          style={{ flex: 1, background: 'none', border: 'none', color: 'var(--text-primary)', textAlign: 'left', cursor: 'pointer' }}
-                        >
-                          <div style={{ fontSize: 11, fontWeight: 800, color: '#fca5a5' }}>
-                            {reasonLabel(candidate.reason)} · {candidate.symbolName.split('_')[0]}
-                          </div>
-                          <div className="text-xs text-muted">x:{candidate.x} y:{candidate.y}</div>
-                        </button>
-                        {onAcceptDebugCandidate && candidate.reason !== 'accepted_uncertain' && (
-                          <button
-                            onClick={() => onAcceptDebugCandidate(candidate)}
-                            title="Dodaj jako reczny box"
-                            style={{ border: 'none', background: '#22c55e', color: '#fff', borderRadius: 4, padding: '3px 6px', fontSize: 10, fontWeight: 800, cursor: 'pointer' }}
-                          >
-                            +
-                          </button>
-                        )}
-                        {onDismissDebugCandidate && (
-                          <button
-                            onClick={() => onDismissDebugCandidate(candidate.id)}
-                            title="Ukryj sugestie"
-                            style={{ border: 'none', background: '#111827', color: '#fff', borderRadius: 4, padding: '3px 6px', fontSize: 10, fontWeight: 800, cursor: 'pointer' }}
-                          >
-                            ×
-                          </button>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
 
               {/* Accordion z grupami */}
               {results.map(group => {
@@ -308,7 +232,7 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
                 const isOpen = expandedGroups.has(group.name);
                 return (
                   <div key={group.name} className="card" style={{ padding: 0, overflow: 'hidden' }}>
-                    {/* Nagłówek grupy */}
+                    {/* NagĹ‚Ăłwek grupy */}
                     <button
                       onClick={() => toggleGroup(group.name)}
                       style={{
@@ -353,12 +277,12 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
                       </span>
                     </button>
 
-                    {/* Rozwinięta lista detekcji */}
+                    {/* RozwiniÄ™ta lista detekcji */}
                     {isOpen && (
                       <div style={{ borderTop: '1px solid var(--border-light)' }}>
                         {groupBoxes.length === 0 ? (
                           <p className="text-xs text-muted" style={{ padding: '10px 14px' }}>
-                            Wszystkie odfiltrowane przez próg pewności.
+                            Wszystkie odfiltrowane przez prĂłg pewnoĹ›ci.
                           </p>
                         ) : (
                           groupBoxes.map(box => {
@@ -416,10 +340,10 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
                                   ))}
                                 </select>
                               )}
-                              {/* Odrzuć */}
+                              {/* OdrzuÄ‡ */}
                               <button
                                 onClick={e => { e.stopPropagation(); onRejectBox(box.id); }}
-                                title="Odrzuć (fałszywe trafienie)"
+                                title="OdrzuÄ‡ (faĹ‚szywe trafienie)"
                                 style={{
                                   background: 'none',
                                   border: 'none',
@@ -447,7 +371,7 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
             </div>
           )}
 
-          {/* ── KOSZTORYS TAB ── */}
+          {/* â”€â”€ KOSZTORYS TAB â”€â”€ */}
           {activeTab === 'cost' && (
             <>
               <div style={{ padding: 16, flex: 1, display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -460,7 +384,7 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
                         <div className="estimate-card-title">{group.name}</div>
                         <div className="estimate-inputs">
                           <div className="estimate-input-group">
-                            <label className="estimate-input-label">ILOŚĆ</label>
+                            <label className="estimate-input-label">ILOĹšÄ†</label>
                             <input
                               type="number"
                               className="estimate-input"
@@ -490,7 +414,7 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
               <div className="estimate-total-footer">
                 <div className="flex-row gap-2">
                   <Calculator size={16} color="var(--text-muted)" />
-                  <span className="text-xs text-muted" style={{ textTransform: 'uppercase' }}>Suma Całkowita</span>
+                  <span className="text-xs text-muted" style={{ textTransform: 'uppercase' }}>Suma CaĹ‚kowita</span>
                 </div>
                 <span style={{ fontSize: 18, fontWeight: 700, color: 'var(--accent-gold)' }}>
                   {totalSum.toFixed(2)} PLN

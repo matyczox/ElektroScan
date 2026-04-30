@@ -42,8 +42,6 @@ interface SidebarProps {
   onToggleLayer?: (name: string) => void;
   detectorProfile: DetectorProfile;
   onDetectorProfileChange: (profile: DetectorProfile) => void;
-  showDebugCandidates: boolean;
-  onShowDebugCandidatesChange: (value: boolean) => void;
   pdfDiagnostics?: PdfDiagnostics | null;
   hasLegendZone?: boolean;
   onClearLegendZone?: () => void;
@@ -68,8 +66,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onToggleLayer,
   detectorProfile,
   onDetectorProfileChange,
-  showDebugCandidates,
-  onShowDebugCandidatesChange,
   pdfDiagnostics,
   hasLegendZone = false,
   onClearLegendZone,
@@ -199,16 +195,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 <option value="color">Kolor</option>
                 <option value="gray">Szary / tusz</option>
               </select>
-            </label>
-
-            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, cursor: 'pointer' }}>
-              <input
-                type="checkbox"
-                checked={showDebugCandidates}
-                disabled={isProcessing}
-                onChange={e => onShowDebugCandidatesChange(e.target.checked)}
-              />
-              <span>Pokaz niepewne/brakujace</span>
             </label>
 
             {pdfDiagnostics && (
