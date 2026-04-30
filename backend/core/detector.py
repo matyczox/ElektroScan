@@ -942,7 +942,13 @@ def detect_symbols(
     ) -> tuple[CandidateHit, CandidateHit, CandidateHit | None, str | None]:
         plan_mask = plan_masks_by_template[hit.template_id]
         local_reasons: dict[str, int] = {}
-        if _validate_template_hit(hit, plan_mask, plan_image, reasons=local_reasons):
+        if _validate_template_hit(
+            hit,
+            plan_mask,
+            plan_image,
+            reasons=local_reasons,
+            plan_hsv=plan_hsv,
+        ):
             promoted_hit = _maybe_promote_socket_06_to_07(
                 hit,
                 plan_image,
@@ -951,6 +957,7 @@ def detect_symbols(
                 dilated_plan_masks_by_template,
                 variants_lookup,
                 socket_07_promotions,
+                plan_hsv=plan_hsv,
             )
             return hit, promoted_hit, None, None
         rejection_reason = next(iter(local_reasons), "other")
@@ -1011,39 +1018,48 @@ def detect_symbols(
     timings["pre_parent_clustering"] = time.perf_counter() - phase_start
 
     phase_start = time.perf_counter()
-    _progress("parent_search", 88, "Szukanie pelniejszych symboli")
-
-    def _search_parent_hit(hit: CandidateHit) -> tuple[CandidateHit, dict[str, int]]:
-        local_stats: dict[str, int] = {}
-        promoted_hit = _maybe_promote_switch_parent_search(
-            hit,
-            plan_image,
-            templates,
-            plan_masks_by_template,
-            dilated_plan_masks_by_template,
-            variants_lookup,
-            socket_07_promotions,
-            local_stats,
-        )
-        return promoted_hit, local_stats
-
     parent_search_candidates: list[CandidateHit] = []
-    parent_search_workers = max(1, min(len(pre_parent_candidates), postprocess_workers))
-    if pre_parent_candidates:
-        with ThreadPoolExecutor(max_workers=parent_search_workers) as pool:
-            for hit, (promoted_hit, local_stats) in zip(
-                pre_parent_candidates, pool.map(_search_parent_hit, pre_parent_candidates)
-            ):
-                diagnostics["parent_search_input_hits"] += local_stats.get(
-                    "parent_search_input_hits", 0
-                )
-                diagnostics["parent_search_candidates"] += local_stats.get(
-                    "parent_search_candidates", 0
-                )
-                if promoted_hit.template_id != hit.template_id or promoted_hit.bbox != hit.bbox:
-                    diagnostics["promoted_parent_search_hits"] += 1
-                parent_search_candidates.append(promoted_hit)
-    timings["parent_search"] = time.perf_counter() - phase_start
+    if detector_profile == "color":
+        # Color PDFs used to be fast and this expensive 11 -> 10/12 fallback
+        # produced no promotions in the slow regression trace. Keep it out of
+        # the color path; gray can still use it while we tune black PDFs.
+        parent_search_candidates = pre_parent_candidates
+        parent_search_workers = 0
+        timings["parent_search"] = 0.0
+    else:
+        _progress("parent_search", 88, "Szukanie pelniejszych symboli")
+
+        def _search_parent_hit(hit: CandidateHit) -> tuple[CandidateHit, dict[str, int]]:
+            local_stats: dict[str, int] = {}
+            promoted_hit = _maybe_promote_switch_parent_search(
+                hit,
+                plan_image,
+                templates,
+                plan_masks_by_template,
+                dilated_plan_masks_by_template,
+                variants_lookup,
+                socket_07_promotions,
+                local_stats,
+                plan_hsv=plan_hsv,
+            )
+            return promoted_hit, local_stats
+
+        parent_search_workers = max(1, min(len(pre_parent_candidates), postprocess_workers))
+        if pre_parent_candidates:
+            with ThreadPoolExecutor(max_workers=parent_search_workers) as pool:
+                for hit, (promoted_hit, local_stats) in zip(
+                    pre_parent_candidates, pool.map(_search_parent_hit, pre_parent_candidates)
+                ):
+                    diagnostics["parent_search_input_hits"] += local_stats.get(
+                        "parent_search_input_hits", 0
+                    )
+                    diagnostics["parent_search_candidates"] += local_stats.get(
+                        "parent_search_candidates", 0
+                    )
+                    if promoted_hit.template_id != hit.template_id or promoted_hit.bbox != hit.bbox:
+                        diagnostics["promoted_parent_search_hits"] += 1
+                    parent_search_candidates.append(promoted_hit)
+        timings["parent_search"] = time.perf_counter() - phase_start
 
     phase_start = time.perf_counter()
     _progress("final_clustering", 94, "Finalne laczenie wynikow")

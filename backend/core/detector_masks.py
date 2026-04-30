@@ -552,6 +552,7 @@ def _roi_color_similarity(
     plan_mask: np.ndarray,
     bbox: tuple[int, int, int, int],
     dominant_hsv: tuple[int, int, int] | None,
+    hsv_image: np.ndarray | None = None,
 ) -> float:
     """Compare ROI hue with template hue and return a [0, 1] similarity score."""
 
@@ -564,7 +565,11 @@ def _roi_color_similarity(
     if roi_image.size == 0 or roi_mask.size == 0:
         return 0.0
 
-    hsv_roi = cv2.cvtColor(roi_image, cv2.COLOR_BGR2HSV)
+    hsv_roi = (
+        hsv_image[y : y + h, x : x + w]
+        if hsv_image is not None
+        else cv2.cvtColor(roi_image, cv2.COLOR_BGR2HSV)
+    )
     colored_pixels = hsv_roi[roi_mask > 0]
     if len(colored_pixels) == 0:
         return 0.0
@@ -622,6 +627,7 @@ def _validate_template_hit(
     plan_mask: np.ndarray,
     plan_image: np.ndarray,
     reasons: dict[str, int] | None = None,
+    plan_hsv: np.ndarray | None = None,
 ) -> bool:
     """Validate a candidate by foreground overlap, purity and hue consistency.
 
@@ -791,7 +797,13 @@ def _validate_template_hit(
         _record("low_match_strict")
         return False
 
-    color_similarity = _roi_color_similarity(plan_image, plan_mask, hit.bbox, hit.dominant_hsv)
+    color_similarity = _roi_color_similarity(
+        plan_image,
+        plan_mask,
+        hit.bbox,
+        hit.dominant_hsv,
+        plan_hsv,
+    )
     if color_similarity <= 0.0:
         _record("color_similarity")
         return False

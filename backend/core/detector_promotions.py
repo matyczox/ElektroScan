@@ -37,6 +37,7 @@ def _maybe_promote_socket_06_to_07(
     dilated_plan_masks: dict[int, np.ndarray],
     variants_lookup: dict[tuple[int, float, int, bool], TemplateVariant],
     promotions: dict[tuple[int, float, int, bool], list[TargetedPromotionRule]],
+    plan_hsv: np.ndarray | None = None,
 ) -> CandidateHit:
     """Apply cheap family promotions when parent-only extension pixels are present."""
 
@@ -135,7 +136,12 @@ def _maybe_promote_socket_06_to_07(
                     is_text_label=templates[rule.parent_template_id].is_text_label,
                     promoted_from_template_id=hit.template_id,
                 )
-                if not _validate_template_hit(promoted_hit, promotion_plan_mask, plan_image):
+                if not _validate_template_hit(
+                    promoted_hit,
+                    promotion_plan_mask,
+                    plan_image,
+                    plan_hsv=plan_hsv,
+                ):
                     continue
                 if parent_prefix == "07":
                     max_drop = SOCKET_PROMOTED_MAX_VERIFICATION_DROP
@@ -189,6 +195,7 @@ def _maybe_promote_switch_parent_search(
     variants_lookup: dict[tuple[int, float, int, bool], TemplateVariant],
     promotions: dict[tuple[int, float, int, bool], list[TargetedPromotionRule]],
     stats: dict[str, int] | None = None,
+    plan_hsv: np.ndarray | None = None,
 ) -> CandidateHit:
     """Run the expensive 11 -> 10/12 parent search only on prefiltered hits."""
 
@@ -301,7 +308,12 @@ def _maybe_promote_switch_parent_search(
                     is_text_label=templates[rule.parent_template_id].is_text_label,
                     promoted_from_template_id=hit.template_id,
                 )
-                if not _validate_template_hit(promoted_hit, parent_plan_mask, plan_image):
+                if not _validate_template_hit(
+                    promoted_hit,
+                    parent_plan_mask,
+                    plan_image,
+                    plan_hsv=plan_hsv,
+                ):
                     continue
 
                 max_drop = (
