@@ -47,6 +47,10 @@ interface AnalysisContext {
   sourcePdf?: string;
   hiddenLayersUsed?: string[];
   excludedZonesUsed?: Array<[number, number, number, number]>;
+  manualExcludedZonesUsed?: Array<[number, number, number, number]>;
+  legendZoneUsed?: [number, number, number, number] | null;
+  planZoneUsed?: [number, number, number, number] | null;
+  planZoneOutsideExcluded?: Array<[number, number, number, number]>;
   hiddenLayerDebug?: {
     matched?: string[];
     unmatched?: string[];
@@ -71,10 +75,14 @@ interface CanvasViewProps {
   focusedBoxId?: string | null;
   excludedZones?: ExcludedZone[];
   legendZone?: ExcludedZone | null;
+  planZone?: ExcludedZone | null;
   onAddExcludedZone?: (x: number, y: number, w: number, h: number) => void;
   onRemoveExcludedZone?: (index: number) => void;
   onSetLegendZone?: (x: number, y: number, w: number, h: number) => void;
   onClearLegendZone?: () => void;
+  onSetPlanZone?: (x: number, y: number, w: number, h: number) => void;
+  onClearPlanZone?: () => void;
+  onInspectZone?: (x: number, y: number, w: number, h: number) => void;
   symbolNames?: string[];
   onAddManualBox?: (box: Omit<Box, 'id' | 'color'> & { symbolName: string }) => void;
 }
@@ -90,10 +98,14 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
   focusedBoxId,
   excludedZones = [],
   legendZone = null,
+  planZone = null,
   onAddExcludedZone,
   onRemoveExcludedZone,
   onSetLegendZone,
   onClearLegendZone,
+  onSetPlanZone,
+  onClearPlanZone,
+  onInspectZone,
   symbolNames = [],
   onAddManualBox,
 }) => {
@@ -103,8 +115,8 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
   const [isDragging, setIsDragging] = useState(false);
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
 
-  // Tryb rysowania strefy wykluczonej albo legendy
-  const [drawMode, setDrawMode] = useState<'none' | 'exclude' | 'legend'>('none');
+  // Tryb rysowania strefy wykluczonej, legendy, planu albo inspektora.
+  const [drawMode, setDrawMode] = useState<'none' | 'exclude' | 'legend' | 'plan' | 'inspect'>('none');
   const [isDrawing, setIsDrawing] = useState(false);
   const [drawStart, setDrawStart] = useState({ x: 0, y: 0 });
   const [drawCurrent, setDrawCurrent] = useState({ x: 0, y: 0 });
@@ -203,6 +215,8 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
       const h = Math.abs(drawCurrent.y - drawStart.y);
       if (w > 5 && h > 5) {
         if (drawMode === 'legend') onSetLegendZone?.(x, y, w, h);
+        else if (drawMode === 'plan') onSetPlanZone?.(x, y, w, h);
+        else if (drawMode === 'inspect') onInspectZone?.(x, y, w, h);
         else onAddExcludedZone?.(x, y, w, h);
       }
       setDrawMode('none');
@@ -261,6 +275,12 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
     const excludedZones = analysisContext?.excludedZonesUsed?.length
       ? analysisContext.excludedZonesUsed.map(zone => zone.join(",")).join(" | ")
       : "(none)";
+    const planZoneUsed = analysisContext?.planZoneUsed
+      ? analysisContext.planZoneUsed.join(",")
+      : "(none)";
+    const planZoneOutside = analysisContext?.planZoneOutsideExcluded?.length
+      ? analysisContext.planZoneOutsideExcluded.map(zone => zone.join(",")).join(" | ")
+      : "(none)";
     const lines = [
       `symbol=${box.symbolName}`,
       `bbox=${box.x},${box.y},${box.width},${box.height}`,
@@ -282,6 +302,8 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
       `source_pdf=${box.sourcePdf ?? analysisContext?.sourcePdf ?? 'n/a'}`,
       `hidden_layers_used=${hiddenLayers}`,
       `excluded_zones_used=${excludedZones}`,
+      `plan_zone_used=${planZoneUsed}`,
+      `plan_zone_outside_excluded=${planZoneOutside}`,
       `hidden_layers_unmatched=${hiddenLayerUnmatched}`,
       `hidden_layers_repr=${hiddenLayerReprs}`,
       `frontend_boxes_count=${boxes.length}`,
@@ -376,6 +398,36 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
         </button>
         <button
           className="btn-secondary"
+          onClick={() => setDrawMode(mode => mode === 'plan' ? 'none' : 'plan')}
+          title="Zaznacz glowny obszar planu do analizy"
+          style={{
+            borderColor: drawMode === 'plan' ? '#22c55e' : undefined,
+            color: drawMode === 'plan' ? '#22c55e' : undefined,
+            padding: '6px 10px',
+            fontSize: 11,
+            fontWeight: 700,
+          }}
+        >
+          <Maximize size={14} />
+          {drawMode === 'plan' ? 'Plan...' : 'Plan'}
+        </button>
+        <button
+          className="btn-secondary"
+          onClick={() => setDrawMode(mode => mode === 'inspect' ? 'none' : 'inspect')}
+          title="Sprawdz, co silnik widzi w zaznaczonym fragmencie"
+          style={{
+            borderColor: drawMode === 'inspect' ? '#a78bfa' : undefined,
+            color: drawMode === 'inspect' ? '#a78bfa' : undefined,
+            padding: '6px 10px',
+            fontSize: 11,
+            fontWeight: 700,
+          }}
+        >
+          <AlertTriangle size={14} />
+          {drawMode === 'inspect' ? 'ROI...' : 'Inspektor'}
+        </button>
+        <button
+          className="btn-secondary"
           onClick={() => setIsManualMode(value => !value)}
           title="Dodaj symbol ręcznie"
           style={{
@@ -408,11 +460,23 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
       {drawMode !== 'none' && (
         <div style={{
           position: 'absolute', top: 64, left: '50%', transform: 'translateX(-50%)',
-          background: drawMode === 'legend' ? 'rgba(14,165,233,0.92)' : 'rgba(249,115,22,0.92)', color: '#fff',
+          background: drawMode === 'legend'
+            ? 'rgba(14,165,233,0.92)'
+            : drawMode === 'plan'
+            ? 'rgba(34,197,94,0.92)'
+            : drawMode === 'inspect'
+            ? 'rgba(124,58,237,0.92)'
+            : 'rgba(249,115,22,0.92)', color: '#fff',
           padding: '6px 18px', borderRadius: 6, fontSize: 12, fontWeight: 700,
           zIndex: 20, pointerEvents: 'none',
         }}>
-          {drawMode === 'legend' ? 'Zaznacz obszar legendy' : 'Zaznacz strefe wykluczona'}
+          {drawMode === 'legend'
+            ? 'Zaznacz obszar legendy'
+            : drawMode === 'plan'
+            ? 'Zaznacz glowny obszar planu'
+            : drawMode === 'inspect'
+            ? 'Zaznacz symbol do inspekcji'
+            : 'Zaznacz strefe wykluczona'}
         </div>
       )}
 
@@ -460,6 +524,58 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
               </div>
             </div>
           ))}
+
+          {/* Manual plan zone */}
+          {planZone && (
+            <div
+              style={{
+                position: 'absolute',
+                left: planZone.x,
+                top: planZone.y,
+                width: planZone.width,
+                height: planZone.height,
+                border: '3px dashed #22c55e',
+                backgroundColor: 'rgba(34,197,94,0.05)',
+                boxSizing: 'border-box',
+                pointerEvents: 'auto',
+              }}
+            >
+              <div style={{
+                position: 'absolute',
+                top: -22,
+                left: 0,
+                background: '#16a34a',
+                color: '#fff',
+                fontSize: 10,
+                fontWeight: 800,
+                padding: '2px 6px',
+                borderRadius: 4,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 4,
+                whiteSpace: 'nowrap',
+              }}>
+                PLAN
+                {onClearPlanZone && (
+                  <button
+                    onClick={e => { e.stopPropagation(); onClearPlanZone(); }}
+                    style={{
+                      background: 'rgba(0,0,0,0.35)',
+                      border: 'none',
+                      cursor: 'pointer',
+                      color: '#fff',
+                      display: 'flex',
+                      padding: 2,
+                      borderRadius: 3,
+                    }}
+                    title="Usun strefe planu"
+                  >
+                    <X size={12} />
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* Manual legend zone */}
           {legendZone && (
@@ -719,8 +835,22 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
               top: Math.min(drawStart.y, drawCurrent.y),
               width: Math.abs(drawCurrent.x - drawStart.x),
               height: Math.abs(drawCurrent.y - drawStart.y),
-              border: `2px dashed ${drawMode === 'legend' ? '#38bdf8' : 'var(--accent-orange)'}`,
-              backgroundColor: drawMode === 'legend' ? 'rgba(14,165,233,0.12)' : 'rgba(249,115,22,0.12)',
+              border: `2px dashed ${
+                drawMode === 'legend'
+                  ? '#38bdf8'
+                  : drawMode === 'plan'
+                  ? '#22c55e'
+                  : drawMode === 'inspect'
+                  ? '#a78bfa'
+                  : 'var(--accent-orange)'
+              }`,
+              backgroundColor: drawMode === 'legend'
+                ? 'rgba(14,165,233,0.12)'
+                : drawMode === 'plan'
+                ? 'rgba(34,197,94,0.10)'
+                : drawMode === 'inspect'
+                ? 'rgba(124,58,237,0.12)'
+                : 'rgba(249,115,22,0.12)',
               pointerEvents: 'none',
             }} />
           )}

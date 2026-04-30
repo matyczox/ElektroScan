@@ -13,6 +13,10 @@ from core.detector_config import (
     CROSS_COLOR_CENTER_DISTANCE_RATIO,
     CROSS_COLOR_CLUSTER_IOM_THRESHOLD,
     CROSS_COLOR_CLUSTER_IOU_THRESHOLD,
+    GRAY_FULLER_SYMBOL_MAX_VERIFICATION_DROP,
+    GRAY_FULLER_SYMBOL_MIN_AREA_RATIO,
+    GRAY_FULLER_SYMBOL_MIN_COVERAGE,
+    GRAY_FULLER_SYMBOL_MIN_PURITY,
     PREFILTER_NMS_IOU_THRESHOLD,
     PREFILTER_NMS_MIN_CANDIDATES,
     PROMOTED_PARENT_MIN_AREA_RATIO,
@@ -313,6 +317,49 @@ def _maybe_prefer_fuller_text_label(
     )
 
 
+def _maybe_prefer_fuller_gray_symbol(
+    group_hits: list[CandidateHit],
+    base_winner: CandidateHit,
+) -> CandidateHit:
+    """Prefer a fuller gray symbol over a smaller core when both overlap."""
+
+    if base_winner.dominant_hsv is not None or base_winner.is_text_label:
+        return base_winner
+
+    base_area = max(1, base_winner.bbox[2] * base_winner.bbox[3])
+    contenders: list[CandidateHit] = []
+    for hit in group_hits:
+        if hit is base_winner or hit.dominant_hsv is not None or hit.is_text_label:
+            continue
+
+        area = max(1, hit.bbox[2] * hit.bbox[3])
+        if area < base_area * GRAY_FULLER_SYMBOL_MIN_AREA_RATIO:
+            continue
+        if hit.coverage < GRAY_FULLER_SYMBOL_MIN_COVERAGE:
+            continue
+        if hit.purity < GRAY_FULLER_SYMBOL_MIN_PURITY:
+            continue
+        if (
+            hit.verification_score + GRAY_FULLER_SYMBOL_MAX_VERIFICATION_DROP
+            < base_winner.verification_score
+        ):
+            continue
+
+        contenders.append(hit)
+
+    if not contenders:
+        return base_winner
+
+    return max(
+        contenders + [base_winner],
+        key=lambda hit: (
+            max(1, hit.bbox[2] * hit.bbox[3]),
+            float(hit.verification_score),
+            float(hit.match_score),
+        ),
+    )
+
+
 def _select_cluster_winner(
     group_hits: list[CandidateHit],
     parent_ids_by_child: dict[int, set[int]],
@@ -321,6 +368,7 @@ def _select_cluster_winner(
 
     base_winner = max(group_hits, key=_candidate_rank_key)
     base_winner = _maybe_prefer_fuller_text_label(group_hits, base_winner)
+    base_winner = _maybe_prefer_fuller_gray_symbol(group_hits, base_winner)
     override_candidates: list[CandidateHit] = []
 
     for hit in group_hits:

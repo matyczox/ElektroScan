@@ -65,7 +65,11 @@ def _derive_text_tokens(name: str) -> list[str]:
     return [candidate]
 
 
-def _prepare_variants(template_id: int, template: TemplateInfo) -> list[TemplateVariant]:
+def _prepare_variants(
+    template_id: int,
+    template: TemplateInfo,
+    scales: list[float] | tuple[float, ...] | None = None,
+) -> list[TemplateVariant]:
     """Precompute all scale/rotation variants for one template."""
 
     variants: list[TemplateVariant] = []
@@ -73,7 +77,8 @@ def _prepare_variants(template_id: int, template: TemplateInfo) -> list[Template
     template_prefix = _template_numeric_prefix(Path(template.path).name)
     allow_mirror = template.is_text_label or template_prefix in MIRRORED_VARIANT_PREFIXES
 
-    for scale in SCALES:
+    scale_list = list(scales) if scales is not None else list(SCALES)
+    for scale in scale_list:
         if scale != 1.0:
             new_w = max(1, int(round(base_mask.shape[1] * scale)))
             new_h = max(1, int(round(base_mask.shape[0] * scale)))

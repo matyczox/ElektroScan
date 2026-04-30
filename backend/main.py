@@ -17,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from core.detector import detect_symbols, draw_results, load_templates
+from core.roi_inspector import inspect_roi
 
 # Importujemy nasze core'owe moduły
 from core.legend_extractor import _normalize_layer_name, extract_legend, get_pdf_layers, pdf_to_png
@@ -284,6 +285,62 @@ class LegendZone(BaseModel):
     height: float
 
 
+def _zone_to_rect(zone: Optional[LegendZone]) -> tuple[int, int, int, int] | None:
+    if zone is None:
+        return None
+    rect = (
+        int(round(zone.x)),
+        int(round(zone.y)),
+        int(round(zone.width)),
+        int(round(zone.height)),
+    )
+    if rect[2] <= 0 or rect[3] <= 0:
+        return None
+    return rect
+
+
+def _clamp_rect_to_image(
+    rect: tuple[int, int, int, int],
+    image_shape: tuple[int, ...],
+) -> tuple[int, int, int, int] | None:
+    image_h, image_w = image_shape[:2]
+    x, y, w, h = rect
+    x1 = max(0, min(image_w, x))
+    y1 = max(0, min(image_h, y))
+    x2 = max(0, min(image_w, x + w))
+    y2 = max(0, min(image_h, y + h))
+    if x2 - x1 <= 1 or y2 - y1 <= 1:
+        return None
+    return (x1, y1, x2 - x1, y2 - y1)
+
+
+def _outside_plan_zone_rects(
+    plan_zone: Optional[LegendZone],
+    image_shape: tuple[int, ...],
+) -> tuple[tuple[int, int, int, int] | None, list[tuple[int, int, int, int]]]:
+    rect = _zone_to_rect(plan_zone)
+    if rect is None:
+        return None, []
+    clamped = _clamp_rect_to_image(rect, image_shape)
+    if clamped is None:
+        return None, []
+
+    image_h, image_w = image_shape[:2]
+    x, y, w, h = clamped
+    x2 = x + w
+    y2 = y + h
+    outside: list[tuple[int, int, int, int]] = []
+    if y > 0:
+        outside.append((0, 0, image_w, y))
+    if y2 < image_h:
+        outside.append((0, y2, image_w, image_h - y2))
+    if x > 0:
+        outside.append((0, y, x, h))
+    if x2 < image_w:
+        outside.append((x2, y, image_w - x2, h))
+    return clamped, outside
+
+
 class ExtractRequest(BaseModel):
     excluded_zones: Optional[List[dict]] = []
     hidden_layers: Optional[List[str]] = []
@@ -448,6 +505,15 @@ class AnalyzeRequest(BaseModel):
     include_debug_candidates: Optional[bool] = None
     include_image: Optional[bool] = None
     detector_profile: Optional[str] = "auto"
+    legend_zone: Optional[LegendZone] = None
+    plan_zone: Optional[LegendZone] = None
+
+
+class RoiInspectRequest(BaseModel):
+    hidden_layers: Optional[List[str]] = []
+    detector_profile: Optional[str] = "auto"
+    roi: LegendZone
+    top_n: Optional[int] = 15
 
 
 @app.get("/api/analysis-progress")
@@ -535,17 +601,39 @@ def api_analyze(session_id: str, body: AnalyzeRequest = None):
         # 3. Strefy wykluczone → lista krotek (x, y, w, h)
         phase_start = time.perf_counter()
         exclude_rects = []
+        manual_exclude_rects = []
+        legend_rect = None
+        plan_zone_rect = None
+        plan_zone_outside_rects = []
         if body and body.excluded_zones:
             for zone in body.excluded_zones:
                 try:
-                    exclude_rects.append(
-                        (int(zone["x"]), int(zone["y"]), int(zone["width"]), int(zone["height"]))
-                    )
+                    rect = (int(zone["x"]), int(zone["y"]), int(zone["width"]), int(zone["height"]))
+                    exclude_rects.append(rect)
+                    manual_exclude_rects.append(rect)
                 except (KeyError, ValueError):
                     pass
             _log(f"Strefy wykluczone: {exclude_rects}")
+        if body and body.legend_zone:
+            legend_rect = _zone_to_rect(body.legend_zone)
+        if legend_rect is not None:
+            exclude_rects.append(legend_rect)
+            _log(f"Strefa legendy wykluczona z analizy: {legend_rect}")
+        if body and body.plan_zone:
+            plan_zone_rect, plan_zone_outside_rects = _outside_plan_zone_rects(
+                body.plan_zone,
+                plan_img.shape,
+            )
+            if plan_zone_rect is not None:
+                exclude_rects.extend(plan_zone_outside_rects)
+                _log(
+                    "Strefa planu aktywna: "
+                    f"{plan_zone_rect}; poza planem wykluczono {len(plan_zone_outside_rects)} prostokaty"
+                )
         timings_ms["parseExcludedZones"] = _elapsed_ms(phase_start)
         counters["excludedZones"] = len(exclude_rects)
+        counters["manualExcludedZones"] = len(manual_exclude_rects)
+        counters["planZoneOutsideRects"] = len(plan_zone_outside_rects)
 
         phase_start = time.perf_counter()
         hidden_layer_debug = (
@@ -612,6 +700,10 @@ def api_analyze(session_id: str, body: AnalyzeRequest = None):
             "sourcePdf": session_meta.get("sourcePdf", plan_path.name),
             "hiddenLayersUsed": hidden_layers,
             "excludedZonesUsed": exclude_rects,
+            "manualExcludedZonesUsed": manual_exclude_rects,
+            "legendZoneUsed": legend_rect,
+            "planZoneUsed": plan_zone_rect,
+            "planZoneOutsideExcluded": plan_zone_outside_rects,
             "detectorProfileRequested": requested_profile,
             "detectorProfileUsed": resolved_profile,
             "includeDebugCandidates": include_debug_candidates,
@@ -771,6 +863,49 @@ def api_analyze(session_id: str, body: AnalyzeRequest = None):
             done=True,
             error=str(e),
         )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/inspect-roi")
+def api_inspect_roi(session_id: str, body: RoiInspectRequest):
+    plan_path = UPLOAD_DIR / f"{session_id}.pdf"
+    if not plan_path.exists():
+        raise HTTPException(status_code=404, detail="Nie znaleziono pliku sesji.")
+
+    try:
+        hidden_layers = body.hidden_layers if body else []
+        requested_profile = _normalize_detector_profile(body.detector_profile if body else "auto")
+        plan_img = pdf_to_png(str(plan_path), dpi=300, hidden_layers=hidden_layers)
+        pdf_diagnostics = _build_pdf_diagnostics(str(plan_path), plan_img)
+        resolved_profile = (
+            pdf_diagnostics.get("recommendedProfile", "color")
+            if requested_profile == "auto"
+            else requested_profile
+        )
+        if resolved_profile not in {"color", "gray"}:
+            resolved_profile = "color"
+
+        templates = load_templates(str(TEMPLATES_DIR))
+        roi = (
+            int(round(body.roi.x)),
+            int(round(body.roi.y)),
+            int(round(body.roi.width)),
+            int(round(body.roi.height)),
+        )
+        return {
+            "inspection": inspect_roi(
+                plan_img,
+                templates,
+                roi,
+                detector_profile=resolved_profile,
+                top_n=body.top_n or 15,
+            ),
+            "detectorProfileRequested": requested_profile,
+            "detectorProfileUsed": resolved_profile,
+            "pdfDiagnostics": pdf_diagnostics,
+        }
+    except Exception as e:
+        print(f"Blad inspektora ROI: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

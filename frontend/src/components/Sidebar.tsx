@@ -47,6 +47,8 @@ interface SidebarProps {
   pdfDiagnostics?: PdfDiagnostics | null;
   hasLegendZone?: boolean;
   onClearLegendZone?: () => void;
+  hasPlanZone?: boolean;
+  onClearPlanZone?: () => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -71,6 +73,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
   pdfDiagnostics,
   hasLegendZone = false,
   onClearLegendZone,
+  hasPlanZone = false,
+  onClearPlanZone,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [editingPatternIndex, setEditingPatternIndex] = useState<number | null>(null);
@@ -237,6 +241,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 disabled={isProcessing}
               >
                 Wyczysc strefe legendy
+              </button>
+            )}
+            {hasPlanZone && (
+              <button
+                className="btn-secondary"
+                onClick={onClearPlanZone}
+                disabled={isProcessing}
+              >
+                Wyczysc strefe planu
               </button>
             )}
             <button 

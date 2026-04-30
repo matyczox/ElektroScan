@@ -12,9 +12,26 @@ from core.detector_config import (
     COLOR_VAL_TOLERANCE,
     CONTEXT_MARGIN_RATIO,
     DILATE_KERNEL,
+    GRAY_LARGE_SCALE_PARTIAL_MAX_COVERAGE,
+    GRAY_LARGE_SCALE_PARTIAL_MIN_CONTEXT,
+    GRAY_LARGE_SCALE_PARTIAL_MIN_PURITY,
+    GRAY_LARGE_SCALE_PARTIAL_MIN_SCALE,
+    GRAY_SMALL_SCALE_COMPACT_MAX_ASPECT,
+    GRAY_SMALL_SCALE_COMPACT_MIN_COVERAGE,
+    GRAY_SMALL_SCALE_ELONGATED_ASPECT,
+    GRAY_SMALL_SCALE_ELONGATED_MAX_DENSITY,
+    GRAY_SMALL_SCALE_ELONGATED_MIN_CONTEXT,
+    GRAY_SMALL_SCALE_ELONGATED_MIN_COVERAGE,
+    GRAY_SMALL_SCALE_ELONGATED_MIN_PURITY,
+    GRAY_SMALL_SCALE_HIGH_PURITY_MAX_CONTEXT,
+    GRAY_SMALL_SCALE_HIGH_PURITY_MAX_COVERAGE,
+    GRAY_SMALL_SCALE_HIGH_PURITY_MAX_SCALE,
+    GRAY_SMALL_SCALE_HIGH_PURITY_MIN_PURITY,
     GRAY_SMALL_SCALE_MIN_COVERAGE,
     GRAY_SMALL_SCALE_SUSPICIOUS_PURITY,
     GRAY_SMALL_SCALE_THRESHOLD,
+    GRAY_STRONG_GEOMETRY_MIN_COVERAGE,
+    GRAY_STRONG_GEOMETRY_MIN_PURITY,
     GRAY_SUPPRESS_HORIZONTAL_KERNEL_PX,
     GRAY_SUPPRESS_VERTICAL_KERNEL_PX,
     HSV_LOWER,
@@ -698,6 +715,51 @@ def _validate_template_hit(
         _record("gray_small_scale_anomaly")
         return False
 
+    strong_gray_elongated_geometry = False
+    if hit.dominant_hsv is None and hit.scale <= GRAY_SMALL_SCALE_THRESHOLD:
+        template_area = max(1, hit.bbox[2] * hit.bbox[3])
+        template_density = hit.pixel_count / template_area
+        aspect = max(hit.bbox[2] / max(1, hit.bbox[3]), hit.bbox[3] / max(1, hit.bbox[2]))
+        is_sparse_elongated = (
+            template_density <= GRAY_SMALL_SCALE_ELONGATED_MAX_DENSITY
+            and aspect >= GRAY_SMALL_SCALE_ELONGATED_ASPECT
+        )
+        if is_sparse_elongated:
+            strong_gray_elongated_geometry = (
+                coverage >= GRAY_SMALL_SCALE_ELONGATED_MIN_COVERAGE
+                and purity >= GRAY_SMALL_SCALE_ELONGATED_MIN_PURITY
+                and context_purity >= GRAY_SMALL_SCALE_ELONGATED_MIN_CONTEXT
+            )
+        if is_sparse_elongated and coverage < GRAY_SMALL_SCALE_ELONGATED_MIN_COVERAGE:
+            _record("gray_small_scale_elongated_coverage")
+            return False
+        if (
+            aspect <= GRAY_SMALL_SCALE_COMPACT_MAX_ASPECT
+            and coverage < GRAY_SMALL_SCALE_COMPACT_MIN_COVERAGE
+        ):
+            _record("gray_small_scale_compact_coverage")
+            return False
+
+    if (
+        hit.dominant_hsv is None
+        and hit.scale <= GRAY_SMALL_SCALE_HIGH_PURITY_MAX_SCALE
+        and coverage < GRAY_SMALL_SCALE_HIGH_PURITY_MAX_COVERAGE
+        and purity > GRAY_SMALL_SCALE_HIGH_PURITY_MIN_PURITY
+        and context_purity < GRAY_SMALL_SCALE_HIGH_PURITY_MAX_CONTEXT
+    ):
+        _record("gray_small_scale_high_purity_partial")
+        return False
+
+    if (
+        hit.dominant_hsv is None
+        and hit.scale >= GRAY_LARGE_SCALE_PARTIAL_MIN_SCALE
+        and coverage < GRAY_LARGE_SCALE_PARTIAL_MAX_COVERAGE
+        and purity > GRAY_LARGE_SCALE_PARTIAL_MIN_PURITY
+        and context_purity > GRAY_LARGE_SCALE_PARTIAL_MIN_CONTEXT
+    ):
+        _record("gray_large_scale_partial")
+        return False
+
     template_centroid = _mask_centroid(hit.transformed_mask)
     intersection_centroid = _mask_centroid(intersection_mask)
     if template_centroid is None or intersection_centroid is None:
@@ -716,7 +778,16 @@ def _validate_template_hit(
         _record("centroid_offset")
         return False
 
-    if hit.match_score < LOW_MATCH_STRICT_THRESHOLD and context_purity < MIN_CONTEXT_PURITY:
+    strong_gray_geometry = (
+        hit.dominant_hsv is None
+        and coverage >= GRAY_STRONG_GEOMETRY_MIN_COVERAGE
+        and purity >= GRAY_STRONG_GEOMETRY_MIN_PURITY
+    ) or strong_gray_elongated_geometry
+    if (
+        hit.match_score < LOW_MATCH_STRICT_THRESHOLD
+        and context_purity < MIN_CONTEXT_PURITY
+        and not strong_gray_geometry
+    ):
         _record("low_match_strict")
         return False
 
