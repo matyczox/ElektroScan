@@ -13,9 +13,7 @@ def _load_json(path: Path) -> dict[str, Any]:
 
 def _performance_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     return (
-        snapshot.get("performance")
-        or snapshot.get("analysisContext", {}).get("performance")
-        or {}
+        snapshot.get("performance") or snapshot.get("analysisContext", {}).get("performance") or {}
     )
 
 
@@ -42,7 +40,11 @@ def _snapshot_paths(inputs: list[str], latest: int) -> list[Path]:
     for raw in inputs:
         path = Path(raw)
         if path.is_dir():
-            paths.extend(sorted(path.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True)[:latest])
+            paths.extend(
+                sorted(path.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True)[
+                    :latest
+                ]
+            )
         elif path.is_file():
             paths.append(path)
     return paths
@@ -62,7 +64,7 @@ def summarize(path: Path, limit: int) -> str:
         f"Snapshot: {path}",
         f"analysisId={context.get('analysisId', 'n/a')}",
         f"sourcePdf={context.get('sourcePdf', 'n/a')}",
-        f"total={_format_ms(backend_timings.get('total') or backend_timings.get('totalBeforeSnapshot'))}",
+        f"total={_format_ms(backend_timings.get('total') or backend_timings.get('totalBeforeSnapshot'))}",  # noqa: E501
     ]
 
     if not performance:
@@ -100,14 +102,18 @@ def summarize(path: Path, limit: int) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Summarize ElektroScan analysis performance snapshots.")
+    parser = argparse.ArgumentParser(
+        description="Summarize ElektroScan analysis performance snapshots."
+    )
     parser.add_argument(
         "paths",
         nargs="*",
         default=["backend/analysis_debug"],
         help="Snapshot JSON files or directories. Defaults to backend/analysis_debug.",
     )
-    parser.add_argument("--latest", type=int, default=3, help="How many newest snapshots to read per directory.")
+    parser.add_argument(
+        "--latest", type=int, default=3, help="How many newest snapshots to read per directory."
+    )
     parser.add_argument("--top", type=int, default=8, help="How many timing stages to print.")
     args = parser.parse_args()
 

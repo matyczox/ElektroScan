@@ -150,8 +150,12 @@ def _find_local_maxima(
     if match_result.size == 0:
         return []
 
-    kernel_w = min(match_result.shape[1], _odd_size(max(3, int(template_width * LOCAL_MAX_KERNEL_RATIO))))
-    kernel_h = min(match_result.shape[0], _odd_size(max(3, int(template_height * LOCAL_MAX_KERNEL_RATIO))))
+    kernel_w = min(
+        match_result.shape[1], _odd_size(max(3, int(template_width * LOCAL_MAX_KERNEL_RATIO)))
+    )
+    kernel_h = min(
+        match_result.shape[0], _odd_size(max(3, int(template_height * LOCAL_MAX_KERNEL_RATIO)))
+    )
     kernel = np.ones((kernel_h, kernel_w), np.uint8)
 
     local_max = cv2.dilate(match_result, kernel)
@@ -212,7 +216,6 @@ def _extract_label_content_mask(mask: np.ndarray) -> np.ndarray | None:
         content = np.zeros_like(mask)
         for component_id in range(1, components):
             x = int(stats[component_id, cv2.CC_STAT_LEFT])
-            y = int(stats[component_id, cv2.CC_STAT_TOP])
             w = int(stats[component_id, cv2.CC_STAT_WIDTH])
             h = int(stats[component_id, cv2.CC_STAT_HEIGHT])
             area = int(stats[component_id, cv2.CC_STAT_AREA])
@@ -247,11 +250,7 @@ def _extract_label_content_mask(mask: np.ndarray) -> np.ndarray | None:
             return None
 
         content_x, _, content_w, _ = content_bbox
-        if (
-            not suffix_mode
-            and content_x <= int(width * 0.10)
-            and content_w < int(width * 0.55)
-        ):
+        if not suffix_mode and content_x <= int(width * 0.10) and content_w < int(width * 0.55):
             return None
 
         return content
@@ -271,7 +270,9 @@ def _extract_label_content_mask(mask: np.ndarray) -> np.ndarray | None:
     line_mask = cv2.bitwise_or(horizontal, vertical)
     line_ratio = int(cv2.countNonZero(line_mask)) / max(1, foreground_pixels)
     if line_ratio >= LABEL_LINE_MIN_RATIO:
-        content = collect_components(cv2.bitwise_and(mask, cv2.bitwise_not(line_mask)), suffix_mode=False)
+        content = collect_components(
+            cv2.bitwise_and(mask, cv2.bitwise_not(line_mask)), suffix_mode=False
+        )
         if content is not None:
             return content
 
@@ -335,10 +336,7 @@ def _rects_touch_or_overlap(
     lx, ly, lw, lh = left
     rx, ry, rw, rh = right
     return not (
-        lx + lw + gap < rx
-        or rx + rw + gap < lx
-        or ly + lh + gap < ry
-        or ry + rh + gap < ly
+        lx + lw + gap < rx or rx + rw + gap < lx or ly + lh + gap < ry or ry + rh + gap < ly
     )
 
 
@@ -393,7 +391,9 @@ def _merge_search_rois(
     return merged
 
 
-def _full_scan_roi(image_shape: tuple[int, int, int] | tuple[int, int]) -> tuple[int, int, int, int]:
+def _full_scan_roi(
+    image_shape: tuple[int, int, int] | tuple[int, int]
+) -> tuple[int, int, int, int]:
     """Return a full-image scan rectangle."""
 
     return (0, 0, int(image_shape[1]), int(image_shape[0]))
@@ -568,9 +568,7 @@ def _validate_template_hit(
     if coverage < MIN_COVERAGE_RATIO or purity < MIN_PURITY_RATIO:
         return False
 
-    if (
-        context_purity := _context_purity(plan_mask, hit.bbox, intersection_mask)
-    ) <= 0.0:
+    if (context_purity := _context_purity(plan_mask, hit.bbox, intersection_mask)) <= 0.0:
         return False
 
     if (
@@ -604,10 +602,7 @@ def _validate_template_hit(
         return False
 
     verification_score = (
-        0.45 * hit.match_score
-        + 0.20 * coverage
-        + 0.15 * purity
-        + 0.20 * context_purity
+        0.45 * hit.match_score + 0.20 * coverage + 0.15 * purity + 0.20 * context_purity
     )
 
     content_score = 0.0
@@ -628,9 +623,8 @@ def _validate_template_hit(
         if content_score < content_threshold:
             return False
         verification_score = (
-            (1.0 - LABEL_CONTENT_SCORE_WEIGHT) * verification_score
-            + LABEL_CONTENT_SCORE_WEIGHT * content_score
-        )
+            1.0 - LABEL_CONTENT_SCORE_WEIGHT
+        ) * verification_score + LABEL_CONTENT_SCORE_WEIGHT * content_score
 
     if verification_score < MIN_VERIFICATION_SCORE:
         return False

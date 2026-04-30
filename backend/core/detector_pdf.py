@@ -8,16 +8,8 @@ import fitz
 import numpy as np
 
 from core.detector_clustering import _bbox_metrics
-from core.detector_config import (
-    DEFAULT_PDF_DPI,
-    LEGEND_HEIGHT_PT,
-    LEGEND_KEYWORD,
-    LEGEND_WIDTH_PT,
-    PDF_TEXT_MAX_TOKEN_LENGTH,
-    PDF_TEXT_MIN_TOKEN_LENGTH,
-)
+from core.detector_config import DEFAULT_PDF_DPI, LEGEND_HEIGHT_PT, LEGEND_KEYWORD, LEGEND_WIDTH_PT
 from core.detector_models import CandidateHit, TemplateInfo
-from core.detector_templates import _derive_text_tokens
 
 
 def _apply_hidden_layers(doc: fitz.Document, hidden_layers: list[str] | None) -> None:

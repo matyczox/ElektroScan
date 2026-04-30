@@ -13,9 +13,13 @@ from concurrent.futures import ThreadPoolExecutor
 import cv2
 import numpy as np
 
-from core.detector_clustering import _bbox_metrics, _cluster_candidates, _prefilter_candidates, _prefilter_raw_template_hits
+from core.detector_clustering import (
+    _bbox_metrics,
+    _cluster_candidates,
+    _prefilter_candidates,
+    _prefilter_raw_template_hits,
+)
 from core.detector_config import (
-    DEFAULT_PDF_DPI,
     DEBUG_ACCEPTED_UNCERTAIN_CANDIDATES_LIMIT,
     DEBUG_ACCEPTED_UNCERTAIN_MAX_CONTEXT_PURITY,
     DEBUG_ACCEPTED_UNCERTAIN_MAX_SCORE,
@@ -31,6 +35,7 @@ from core.detector_config import (
     DEBUG_UNEXPLAINED_MAX_AREA,
     DEBUG_UNEXPLAINED_MIN_AREA,
     DEBUG_UNEXPLAINED_PER_UNCERTAIN_BOX,
+    DEFAULT_PDF_DPI,
     DETECTOR_POSTPROCESS_MAX_WORKERS,
     DETECTOR_SCAN_MAX_WORKERS,
     LABEL_CONTENT_SCAN_MIN_PIXELS,
@@ -52,9 +57,18 @@ from core.detector_masks import (
     _tight_mask_crop,
     _validate_template_hit,
 )
-from core.detector_models import CandidateHit, Detection, DetectionResult, TemplateInfo, TemplateVariant
+from core.detector_models import (
+    CandidateHit,
+    Detection,
+    DetectionResult,
+    TemplateInfo,
+    TemplateVariant,
+)
 from core.detector_pdf import _collect_pdf_text_hits, _estimate_legend_exclude_rect
-from core.detector_promotions import _maybe_promote_socket_06_to_07, _maybe_promote_switch_parent_search
+from core.detector_promotions import (
+    _maybe_promote_socket_06_to_07,
+    _maybe_promote_switch_parent_search,
+)
 from core.detector_templates import _build_socket_07_promotions, _prepare_variants, load_templates
 
 
@@ -97,7 +111,10 @@ def _debug_candidate_from_hit(
 
     x, y, w, h = [int(value) for value in hit.bbox]
     payload = {
-        "id": f"debug_{reason}_{hit.template_id}_{x}_{y}_{w}_{h}_{hit.rotation}_{int(hit.scale * 100)}_{int(hit.mirrored)}",
+        "id": (
+            f"debug_{reason}_{hit.template_id}_{x}_{y}_{w}_{h}"
+            f"_{hit.rotation}_{int(hit.scale * 100)}_{int(hit.mirrored)}"
+        ),
         "reason": reason,
         "symbolName": templates[hit.template_id].name,
         "x": x,
@@ -218,14 +235,19 @@ def _accepted_uncertainty_score(hit: CandidateHit, final_hits: list[CandidateHit
         if other is hit:
             continue
         ox, oy = _bbox_center(other.bbox)
-        if abs(cx - ox) <= DEBUG_ACCEPTED_UNCERTAIN_NEARBY_PX and abs(cy - oy) <= DEBUG_ACCEPTED_UNCERTAIN_NEARBY_PX:
+        if (
+            abs(cx - ox) <= DEBUG_ACCEPTED_UNCERTAIN_NEARBY_PX
+            and abs(cy - oy) <= DEBUG_ACCEPTED_UNCERTAIN_NEARBY_PX
+        ):
             nearby += 1
 
     if nearby == 0:
         return 0.0
 
     low_score = max(0.0, DEBUG_ACCEPTED_UNCERTAIN_MAX_SCORE - score)
-    low_context = max(0.0, DEBUG_ACCEPTED_UNCERTAIN_MAX_CONTEXT_PURITY - float(hit.context_purity)) * 2.0
+    low_context = (
+        max(0.0, DEBUG_ACCEPTED_UNCERTAIN_MAX_CONTEXT_PURITY - float(hit.context_purity)) * 2.0
+    )
     low_coverage = max(0.0, 0.70 - float(hit.coverage)) * 0.50
     quality_signal = low_score + low_context + low_coverage
     if quality_signal <= 0.0:
@@ -265,7 +287,10 @@ def _collect_debug_candidates(
 
     rejected_count = 0
     for candidate in sorted(rejected_hits, key=_hit_score, reverse=True):
-        if len(debug_candidates) >= DEBUG_CANDIDATES_LIMIT or rejected_count >= DEBUG_REJECTED_CANDIDATES_LIMIT:
+        if (
+            len(debug_candidates) >= DEBUG_CANDIDATES_LIMIT
+            or rejected_count >= DEBUG_REJECTED_CANDIDATES_LIMIT
+        ):
             break
         if candidate.match_score < DEBUG_REJECTED_MIN_MATCH:
             continue
@@ -336,11 +361,15 @@ def _collect_debug_candidates(
                 and abs(cy - _bbox_center(uncertain_box)[1]) <= DEBUG_NEAR_UNCERTAIN_COMPONENT_PX
             ]
             near_uncertain = bool(near_uncertain_indexes)
-            if not near_uncertain and not _is_symbol_like_unexplained_component(component_bbox, area):
+            if not near_uncertain and not _is_symbol_like_unexplained_component(
+                component_bbox, area
+            ):
                 continue
             if near_uncertain and (w <= 3 or h <= 3):
                 continue
-            score = _unexplained_component_score(component_bbox, area) + (1000.0 if near_uncertain else 0.0)
+            score = _unexplained_component_score(component_bbox, area) + (
+                1000.0 if near_uncertain else 0.0
+            )
             payload = _debug_candidate_from_component(component_bbox, area)
             components_payloads.append((score, payload))
             for index in near_uncertain_indexes:
@@ -348,7 +377,9 @@ def _collect_debug_candidates(
 
         unexplained_count = 0
         for payloads in near_uncertain_payloads.values():
-            for _, payload in sorted(payloads, key=lambda item: item[0], reverse=True)[:DEBUG_UNEXPLAINED_PER_UNCERTAIN_BOX]:
+            for _, payload in sorted(payloads, key=lambda item: item[0], reverse=True)[
+                :DEBUG_UNEXPLAINED_PER_UNCERTAIN_BOX
+            ]:
                 if (
                     len(debug_candidates) >= DEBUG_CANDIDATES_LIMIT
                     or unexplained_count >= DEBUG_UNEXPLAINED_CANDIDATES_LIMIT
@@ -373,7 +404,10 @@ def _collect_debug_candidates(
 
     conflict_count = 0
     for candidate in sorted(validated_candidates, key=_hit_score, reverse=True):
-        if len(debug_candidates) >= DEBUG_CANDIDATES_LIMIT or conflict_count >= DEBUG_CONFLICT_CANDIDATES_LIMIT:
+        if (
+            len(debug_candidates) >= DEBUG_CANDIDATES_LIMIT
+            or conflict_count >= DEBUG_CONFLICT_CANDIDATES_LIMIT
+        ):
             break
         for final_hit in final_hits:
             if candidate is final_hit:
@@ -387,7 +421,10 @@ def _collect_debug_candidates(
             final_score = _hit_score(final_hit)
             if candidate_score + DEBUG_CONFLICT_MAX_SCORE_DROP < final_score:
                 continue
-            if _bbox_center_inside(candidate.bbox, final_hit.bbox) and candidate_score <= final_score + 0.03:
+            if (
+                _bbox_center_inside(candidate.bbox, final_hit.bbox)
+                and candidate_score <= final_score + 0.03
+            ):
                 continue
             if candidate.template_id == final_hit.template_id:
                 reason = "partial_ghost"
@@ -485,7 +522,9 @@ def detect_symbols(
     parent_ids_by_child: dict[int, set[int]] = {}
     for rules in socket_07_promotions.values():
         for rule in rules:
-            parent_ids_by_child.setdefault(rule.child_template_id, set()).add(rule.parent_template_id)
+            parent_ids_by_child.setdefault(rule.child_template_id, set()).add(
+                rule.parent_template_id
+            )
     plan_masks_by_template: dict[int, np.ndarray] = {}
     unique_mask_keys = {
         f"{template.dominant_hsv}_{template.requires_precision}"
@@ -520,14 +559,23 @@ def detect_symbols(
     }
     max_variant_size_by_template = {
         template_id: (
-            max((variant.width for variant in variants), default=templates[template_id].mask.shape[1]),
-            max((variant.height for variant in variants), default=templates[template_id].mask.shape[0]),
+            max(
+                (variant.width for variant in variants),
+                default=templates[template_id].mask.shape[1],
+            ),
+            max(
+                (variant.height for variant in variants),
+                default=templates[template_id].mask.shape[0],
+            ),
         )
         for template_id, variants in variants_by_template.items()
     }
     search_rois_by_template: dict[int, list[tuple[int, int, int, int]]] = {}
     search_roi_stats_by_template: dict[int, tuple[bool, int, int]] = {}
-    def _prepare_search_roi(item: tuple[int, np.ndarray]) -> tuple[int, list[tuple[int, int, int, int]], tuple[bool, int, int]]:
+
+    def _prepare_search_roi(
+        item: tuple[int, np.ndarray]
+    ) -> tuple[int, list[tuple[int, int, int, int]], tuple[bool, int, int]]:
         template_id, plan_mask = item
         max_width, max_height = max_variant_size_by_template[template_id]
         rois, uses_full_scan, roi_area, foreground_pixels = _build_search_rois(
@@ -563,9 +611,13 @@ def detect_symbols(
         "pre_parent_clusters": 0,
         "final_hits": 0,
         "search_rois": sum(len(rois) for rois in search_rois_by_template.values()),
-        "full_scan_templates": sum(1 for uses_full, _, _ in search_roi_stats_by_template.values() if uses_full),
+        "full_scan_templates": sum(
+            1 for uses_full, _, _ in search_roi_stats_by_template.values() if uses_full
+        ),
         "roi_area_pixels": sum(area for _, area, _ in search_roi_stats_by_template.values()),
-        "roi_foreground_pixels": sum(pixels for _, _, pixels in search_roi_stats_by_template.values()),
+        "roi_foreground_pixels": sum(
+            pixels for _, _, pixels in search_roi_stats_by_template.values()
+        ),
     }
 
     def _scan_template(template_id: int) -> list[CandidateHit]:
@@ -716,7 +768,9 @@ def detect_symbols(
     phase_start = time.perf_counter()
     postprocess_workers = max(1, DETECTOR_POSTPROCESS_MAX_WORKERS)
 
-    def _validate_and_promote_hit(hit: CandidateHit) -> tuple[CandidateHit, CandidateHit, CandidateHit | None]:
+    def _validate_and_promote_hit(
+        hit: CandidateHit,
+    ) -> tuple[CandidateHit, CandidateHit, CandidateHit | None]:
         plan_mask = plan_masks_by_template[hit.template_id]
         if _validate_template_hit(hit, plan_mask, plan_image):
             promoted_hit = _maybe_promote_socket_06_to_07(
@@ -743,7 +797,10 @@ def detect_symbols(
                 if rejected_hit is not None:
                     rejected_hits.append(rejected_hit)
                     continue
-                if promoted_hit.template_id != original_hit.template_id or promoted_hit.bbox != original_hit.bbox:
+                if (
+                    promoted_hit.template_id != original_hit.template_id
+                    or promoted_hit.bbox != original_hit.bbox
+                ):
                     diagnostics["promoted_targeted_hits"] += 1
                 validated_hits.append(promoted_hit)
     validated_candidates.extend(validated_hits)
@@ -762,6 +819,7 @@ def detect_symbols(
     timings["pre_parent_clustering"] = time.perf_counter() - phase_start
 
     phase_start = time.perf_counter()
+
     def _search_parent_hit(hit: CandidateHit) -> tuple[CandidateHit, dict[str, int]]:
         local_stats: dict[str, int] = {}
         promoted_hit = _maybe_promote_switch_parent_search(
@@ -780,9 +838,15 @@ def detect_symbols(
     parent_search_workers = max(1, min(len(pre_parent_candidates), postprocess_workers))
     if pre_parent_candidates:
         with ThreadPoolExecutor(max_workers=parent_search_workers) as pool:
-            for hit, (promoted_hit, local_stats) in zip(pre_parent_candidates, pool.map(_search_parent_hit, pre_parent_candidates)):
-                diagnostics["parent_search_input_hits"] += local_stats.get("parent_search_input_hits", 0)
-                diagnostics["parent_search_candidates"] += local_stats.get("parent_search_candidates", 0)
+            for hit, (promoted_hit, local_stats) in zip(
+                pre_parent_candidates, pool.map(_search_parent_hit, pre_parent_candidates)
+            ):
+                diagnostics["parent_search_input_hits"] += local_stats.get(
+                    "parent_search_input_hits", 0
+                )
+                diagnostics["parent_search_candidates"] += local_stats.get(
+                    "parent_search_candidates", 0
+                )
                 if promoted_hit.template_id != hit.template_id or promoted_hit.bbox != hit.bbox:
                     diagnostics["promoted_parent_search_hits"] += 1
                 parent_search_candidates.append(promoted_hit)
@@ -809,10 +873,7 @@ def detect_symbols(
     diagnostics["debug_candidates"] = len(debug_candidates)
     timings["debug_candidates"] = time.perf_counter() - phase_start
 
-    timings_ms = {
-        name: round(seconds * 1000.0, 3)
-        for name, seconds in timings.items()
-    }
+    timings_ms = {name: round(seconds * 1000.0, 3) for name, seconds in timings.items()}
     if debug_profile is not None:
         debug_profile.clear()
         debug_profile.update(
@@ -823,7 +884,9 @@ def detect_symbols(
                     "scanWorkers": int(scan_workers),
                     "configuredScanWorkers": int(DETECTOR_SCAN_MAX_WORKERS),
                     "validationWorkers": int(validation_workers if raw_template_hits else 0),
-                    "parentSearchWorkers": int(parent_search_workers if pre_parent_candidates else 0),
+                    "parentSearchWorkers": int(
+                        parent_search_workers if pre_parent_candidates else 0
+                    ),
                     "configuredPostprocessWorkers": int(DETECTOR_POSTPROCESS_MAX_WORKERS),
                     "opencvThreads": int(OPENCV_NUM_THREADS),
                     "cpuCount": int(_safe_cpu_count()),
@@ -836,9 +899,9 @@ def detect_symbols(
                     "fullImageAreaPixels": int(plan_image.shape[0] * plan_image.shape[1]),
                 },
                 "debugCandidates": debug_candidates,
-                "slowestPhase": max(timings_ms.items(), key=lambda item: item[1])[0]
-                if timings_ms
-                else None,
+                "slowestPhase": (
+                    max(timings_ms.items(), key=lambda item: item[1])[0] if timings_ms else None
+                ),
             }
         )
 
@@ -847,7 +910,7 @@ def detect_symbols(
         f" prepared_variants={diagnostics['prepared_variants']},"
         f" skipped_empty_color_masks={diagnostics['skipped_empty_color_masks']},"
         f" raw_peaks={diagnostics['raw_peaks']},"
-        f" raw_after_prefilter={diagnostics['raw_prefilter_hits']}(-{diagnostics['raw_prefilter_removed']}),"
+        f" raw_after_prefilter={diagnostics['raw_prefilter_hits']}(-{diagnostics['raw_prefilter_removed']}),"  # noqa: E501
         f" validated_template_hits={diagnostics['validated_template_hits']},"
         f" promoted_targeted_hits={diagnostics['promoted_targeted_hits']},"
         f" parent_search_input_hits={diagnostics['parent_search_input_hits']},"
@@ -857,8 +920,8 @@ def detect_symbols(
         f" after_prefilter={diagnostics['prefilter_hits']},"
         f" pre_parent_clusters={diagnostics['pre_parent_clusters']},"
         f" final_clusters={diagnostics['final_hits']},"
-        f" rois={diagnostics['search_rois']} full_scan_templates={diagnostics['full_scan_templates']},"
-        f" threads=scan:{scan_workers}/{DETECTOR_SCAN_MAX_WORKERS}|post:{postprocess_workers}/{DETECTOR_POSTPROCESS_MAX_WORKERS}|opencv:{OPENCV_NUM_THREADS},"
+        f" rois={diagnostics['search_rois']} full_scan_templates={diagnostics['full_scan_templates']},"  # noqa: E501
+        f" threads=scan:{scan_workers}/{DETECTOR_SCAN_MAX_WORKERS}|post:{postprocess_workers}/{DETECTOR_POSTPROCESS_MAX_WORKERS}|opencv:{OPENCV_NUM_THREADS},"  # noqa: E501
         f" timings_ms="
         f"pdf_text:{timings_ms['pdf_text']:.0f}|"
         f"prepare:{timings_ms['prepare']:.0f}|"
@@ -922,7 +985,9 @@ def detect_symbols(
                 symbol_name=templates[template_id].name,
                 count=count,
                 color="#22c55e",
-                detections=detections[:count] if subtract_legend and legend_rect is None else detections,
+                detections=(
+                    detections[:count] if subtract_legend and legend_rect is None else detections
+                ),
             )
         )
 
@@ -976,7 +1041,11 @@ if __name__ == "__main__":
 
     total = 0
     for result in results:
-        mode = "[PRECISE]" if any(word in result.symbol_name.lower() for word in PRECISE_KEYWORDS) else "[DILATE]"
+        mode = (
+            "[PRECISE]"
+            if any(word in result.symbol_name.lower() for word in PRECISE_KEYWORDS)
+            else "[DILATE]"
+        )
         print(f"{result.symbol_name[:43]:<45} | {mode:<10} | {result.count:>5}")
         total += result.count
 

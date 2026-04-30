@@ -1,22 +1,23 @@
-import os
-import shutil
-import uuid
 import base64
 import json
+import os
+import shutil
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-import cv2
-from fastapi import FastAPI, UploadFile, File, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from pathlib import Path
+from typing import List, Optional
+
+import cv2
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, List
+
+from core.detector import detect_symbols, draw_results, load_templates
 
 # Importujemy nasze core'owe moduły
-from core.legend_extractor import pdf_to_png, extract_legend, get_pdf_layers, _normalize_layer_name
-from core.detector import load_templates, detect_symbols, draw_results
+from core.legend_extractor import _normalize_layer_name, extract_legend, get_pdf_layers, pdf_to_png
 
 app = FastAPI(title="ElektroScan AI API")
 
@@ -37,6 +38,7 @@ async def disable_response_caching(request: Request, call_next):
     response.headers["Pragma"] = "no-cache"
     response.headers["Expires"] = "0"
     return response
+
 
 # Ścieżki robocze
 BASE_DIR = Path(__file__).parent
@@ -122,7 +124,9 @@ def _slowest_stages(timings_ms: dict[str, float], limit: int = 8) -> list[dict]:
 
 def _build_hidden_layer_debug(pdf_path: str, hidden_layers: list[str]) -> dict:
     available_layers = get_pdf_layers(pdf_path)
-    available_names = [str(layer.get("name", "")) for layer in available_layers if layer.get("name")]
+    available_names = [
+        str(layer.get("name", "")) for layer in available_layers if layer.get("name")
+    ]
     normalized_available = {}
     for name in available_names:
         normalized_available.setdefault(_normalize_layer_name(name), []).append(name)
@@ -153,36 +157,40 @@ def _build_hidden_layer_debug(pdf_path: str, hidden_layers: list[str]) -> dict:
         "unmatched": unmatched,
     }
 
+
 @app.get("/")
 async def root():
     return {"message": "ElektroScan AI API is running"}
+
 
 class ExtractRequest(BaseModel):
     excluded_zones: Optional[List[dict]] = []
     hidden_layers: Optional[List[str]] = []
 
+
 class RenderRequest(BaseModel):
     hidden_layers: Optional[List[str]] = []
+
 
 @app.post("/api/preview")
 async def api_preview(file: UploadFile = File(...)):
     if not file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Tylko pliki PDF są obsługiwane.")
-    
+
     session_id = str(uuid.uuid4())
     file_path = UPLOAD_DIR / f"{session_id}.pdf"
-    
+
     # Zapis
     with file_path.open("wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
     _write_session_meta(session_id, source_pdf=file.filename or file_path.name)
-        
+
     try:
         # Render podglądu (300 DPI — identycznie jak detekcja)
         plan_img = pdf_to_png(str(file_path), dpi=300)
-        _, buffer_plan = cv2.imencode('.jpg', plan_img, [cv2.IMWRITE_JPEG_QUALITY, 80])
-        plan_base64 = base64.b64encode(buffer_plan).decode('utf-8')
-        
+        _, buffer_plan = cv2.imencode(".jpg", plan_img, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        plan_base64 = base64.b64encode(buffer_plan).decode("utf-8")
+
         return {
             "planPreview": f"data:image/jpeg;base64,{plan_base64}",
             "sessionId": session_id,
@@ -190,6 +198,7 @@ async def api_preview(file: UploadFile = File(...)):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/api/layers")
 async def api_layers(session_id: str):
@@ -199,6 +208,7 @@ async def api_layers(session_id: str):
     layers = get_pdf_layers(str(file_path))
     return {"layers": layers}
 
+
 @app.post("/api/render-preview")
 async def api_render_preview(session_id: str, body: RenderRequest = None):
     file_path = UPLOAD_DIR / f"{session_id}.pdf"
@@ -207,71 +217,60 @@ async def api_render_preview(session_id: str, body: RenderRequest = None):
     try:
         hidden_layers = body.hidden_layers if body else []
         plan_img = pdf_to_png(str(file_path), dpi=300, hidden_layers=hidden_layers)
-        _, buffer_plan = cv2.imencode('.jpg', plan_img, [cv2.IMWRITE_JPEG_QUALITY, 80])
-        plan_base64 = base64.b64encode(buffer_plan).decode('utf-8')
-        return {
-            "planPreview": f"data:image/jpeg;base64,{plan_base64}"
-        }
+        _, buffer_plan = cv2.imencode(".jpg", plan_img, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        plan_base64 = base64.b64encode(buffer_plan).decode("utf-8")
+        return {"planPreview": f"data:image/jpeg;base64,{plan_base64}"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/api/extract-legend")
 async def api_extract_legend(session_id: str, body: ExtractRequest = None):
     file_path = UPLOAD_DIR / f"{session_id}.pdf"
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="Nie znaleziono pliku sesji.")
-        
+
     try:
         _log("Renderowanie planu do ekstrakcji (300 DPI)")
         hidden_layers = body.hidden_layers if body else []
         plan_img = pdf_to_png(str(file_path), dpi=300, hidden_layers=hidden_layers)
-        
+
         # Strefy wykluczone
         exclude_rects = []
         if body and body.excluded_zones:
             for zone in body.excluded_zones:
                 try:
-                    exclude_rects.append((
-                        int(zone["x"]), int(zone["y"]),
-                        int(zone["width"]), int(zone["height"])
-                    ))
+                    exclude_rects.append(
+                        (int(zone["x"]), int(zone["y"]), int(zone["width"]), int(zone["height"]))
+                    )
                 except (KeyError, ValueError):
                     pass
-        
+
         _log("Ekstrakcja legendy...")
         if TEMPLATES_DIR.exists():
             shutil.rmtree(TEMPLATES_DIR)
         TEMPLATES_DIR.mkdir(exist_ok=True)
-        
+
         symbols = extract_legend(
-            str(file_path), 
-            plan_img, 
-            output_dir=str(TEMPLATES_DIR),
-            exclude_rects=exclude_rects
+            str(file_path), plan_img, output_dir=str(TEMPLATES_DIR), exclude_rects=exclude_rects
         )
-        
+
         # Generujemy podgląd jeszcze raz na wypadek gdyby UI go potrzebowało w pełnej rozdz.
         # Ale zwracamy wzorce.
         patterns_list = []
         for s in symbols:
-            _, buffer_s = cv2.imencode('.png', s.image)
-            img_b64 = base64.b64encode(buffer_s).decode('utf-8')
-            patterns_list.append({
-                "id": s.name,
-                "name": s.name,
-                "imgBase64": f"data:image/png;base64,{img_b64}"
-            })
-            
-        return {
-            "patterns": patterns_list
-        }
-        
+            _, buffer_s = cv2.imencode(".png", s.image)
+            img_b64 = base64.b64encode(buffer_s).decode("utf-8")
+            patterns_list.append(
+                {"id": s.name, "name": s.name, "imgBase64": f"data:image/png;base64,{img_b64}"}
+            )
+
+        return {"patterns": patterns_list}
+
     except Exception as e:
         print(f"Błąd podczas ekstrakcji: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Błąd serwera: {str(e)}")
 
-from pydantic import BaseModel
-from typing import Optional, List
 
 class AnalyzeRequest(BaseModel):
     excluded_zones: Optional[List[dict]] = []
@@ -279,13 +278,14 @@ class AnalyzeRequest(BaseModel):
     include_debug: Optional[bool] = None
     include_image: Optional[bool] = None
 
+
 @app.post("/api/analyze")
 async def api_analyze(session_id: str, body: AnalyzeRequest = None):
     plan_path = UPLOAD_DIR / f"{session_id}.pdf"
-    
+
     if not plan_path.exists():
         raise HTTPException(status_code=404, detail="Nie znaleziono pliku sesji.")
-        
+
     request_start = time.perf_counter()
     timings_ms: dict[str, float] = {}
     counters: dict[str, int] = {}
@@ -293,7 +293,11 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
     try:
         phase_start = time.perf_counter()
         hidden_layers = body.hidden_layers if body else []
-        include_debug = body.include_debug if body and body.include_debug is not None else DEFAULT_ANALYSIS_DEBUG
+        include_debug = (
+            body.include_debug
+            if body and body.include_debug is not None
+            else DEFAULT_ANALYSIS_DEBUG
+        )
         include_image = body.include_image if body and body.include_image is not None else True
         session_meta = _read_session_meta(session_id)
         timings_ms["requestSetup"] = _elapsed_ms(phase_start)
@@ -305,23 +309,22 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
         counters["planWidth"] = int(plan_img.shape[1])
         counters["planHeight"] = int(plan_img.shape[0])
         counters["hiddenLayers"] = len(hidden_layers)
-        
+
         # 2. Ładujemy wzorce
         phase_start = time.perf_counter()
         templates = load_templates(str(TEMPLATES_DIR))
         timings_ms["loadTemplates"] = _elapsed_ms(phase_start)
         counters["templatesLoaded"] = len(templates)
-        
+
         # 3. Strefy wykluczone → lista krotek (x, y, w, h)
         phase_start = time.perf_counter()
         exclude_rects = []
         if body and body.excluded_zones:
             for zone in body.excluded_zones:
                 try:
-                    exclude_rects.append((
-                        int(zone["x"]), int(zone["y"]),
-                        int(zone["width"]), int(zone["height"])
-                    ))
+                    exclude_rects.append(
+                        (int(zone["x"]), int(zone["y"]), int(zone["width"]), int(zone["height"]))
+                    )
                 except (KeyError, ValueError):
                     pass
             _log(f"Strefy wykluczone: {exclude_rects}")
@@ -329,9 +332,11 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
         counters["excludedZones"] = len(exclude_rects)
 
         phase_start = time.perf_counter()
-        hidden_layer_debug = _build_hidden_layer_debug(str(plan_path), hidden_layers) if include_debug else None
+        hidden_layer_debug = (
+            _build_hidden_layer_debug(str(plan_path), hidden_layers) if include_debug else None
+        )
         timings_ms["hiddenLayerDebug"] = _elapsed_ms(phase_start)
-        
+
         # 4. Detekcja
         detector_profile: dict = {}
         phase_start = time.perf_counter()
@@ -345,7 +350,7 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
             debug_profile=detector_profile if include_debug else None,
         )
         timings_ms["detectSymbolsTotal"] = _elapsed_ms(phase_start)
-        
+
         result_image_payload: str | None = None
         if include_image:
             phase_start = time.perf_counter()
@@ -353,12 +358,12 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
             timings_ms["drawResults"] = _elapsed_ms(phase_start)
 
             phase_start = time.perf_counter()
-            _, buffer_res = cv2.imencode('.jpg', result_img, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            _, buffer_res = cv2.imencode(".jpg", result_img, [cv2.IMWRITE_JPEG_QUALITY, 80])
             timings_ms["encodeResultJpeg"] = _elapsed_ms(phase_start)
             counters["resultJpegBytes"] = int(len(buffer_res))
 
             phase_start = time.perf_counter()
-            result_base64 = base64.b64encode(buffer_res).decode('utf-8')
+            result_base64 = base64.b64encode(buffer_res).decode("utf-8")
             result_image_payload = f"data:image/jpeg;base64,{result_base64}"
             timings_ms["base64Result"] = _elapsed_ms(phase_start)
         else:
@@ -366,10 +371,10 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
             timings_ms["encodeResultJpeg"] = 0.0
             timings_ms["base64Result"] = 0.0
             counters["resultJpegBytes"] = 0
-        
+
         # Przygotowujemy dane o ramkach dla frontendu (opcjonalnie)
         # Na razie wysyłamy gotowy obraz i listę wyników
-        
+
         analysis_context = {
             "analysisId": str(uuid.uuid4()),
             "generatedAtUtc": datetime.now(timezone.utc).isoformat(),
@@ -387,11 +392,13 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
 
         for r in results:
             # Podsumowanie per typ symbolu (do CostPanel)
-            formatted_results.append({
-                "name": r.symbol_name,
-                "count": r.count,
-                "color": r.color,
-            })
+            formatted_results.append(
+                {
+                    "name": r.symbol_name,
+                    "count": r.count,
+                    "color": r.color,
+                }
+            )
             # Każda indywidualna detekcja (do Canvas)
             for det in r.detections:
                 box_payload = {
@@ -405,26 +412,28 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
                     "color": r.color,
                 }
                 if include_debug:
-                    box_payload.update({
-                        "verificationScore": det.verification_score,
-                        "source": det.source,
-                        "rotation": det.rotation,
-                        "scale": det.scale,
-                        "mirrored": det.mirrored,
-                        "coverage": det.coverage,
-                        "purity": det.purity,
-                        "contextPurity": det.context_purity,
-                        "colorSimilarity": det.color_similarity,
-                        "isTextLabel": det.is_text_label,
-                        "contentScore": det.content_score,
-                        "contentBBox": det.content_bbox,
-                        "contentSource": det.content_source,
-                        "analysisId": analysis_context["analysisId"],
-                        "analysisGeneratedUtc": analysis_context["generatedAtUtc"],
-                        "analysisSession": analysis_context["sessionId"],
-                        "sourcePdf": analysis_context["sourcePdf"],
-                        "hiddenLayersUsed": analysis_context["hiddenLayersUsed"],
-                    })
+                    box_payload.update(
+                        {
+                            "verificationScore": det.verification_score,
+                            "source": det.source,
+                            "rotation": det.rotation,
+                            "scale": det.scale,
+                            "mirrored": det.mirrored,
+                            "coverage": det.coverage,
+                            "purity": det.purity,
+                            "contextPurity": det.context_purity,
+                            "colorSimilarity": det.color_similarity,
+                            "isTextLabel": det.is_text_label,
+                            "contentScore": det.content_score,
+                            "contentBBox": det.content_bbox,
+                            "contentSource": det.content_source,
+                            "analysisId": analysis_context["analysisId"],
+                            "analysisGeneratedUtc": analysis_context["generatedAtUtc"],
+                            "analysisSession": analysis_context["sessionId"],
+                            "sourcePdf": analysis_context["sourcePdf"],
+                            "hiddenLayersUsed": analysis_context["hiddenLayersUsed"],
+                        }
+                    )
                 all_boxes.append(box_payload)
         timings_ms["formatResultsAndBoxes"] = _elapsed_ms(phase_start)
         counters["resultGroups"] = len(formatted_results)
@@ -467,7 +476,9 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
                 "analysisContext": analysis_context,
                 "results": formatted_results,
                 "boxes": all_boxes,
-                "debugCandidates": detector_profile.get("debugCandidates", []) if include_debug else [],
+                "debugCandidates": (
+                    detector_profile.get("debugCandidates", []) if include_debug else []
+                ),
                 "resultImageLength": len(response_payload["resultImage"] or ""),
                 "performance": performance,
             }
@@ -500,10 +511,11 @@ async def api_analyze(session_id: str, body: AnalyzeRequest = None):
         )
 
         return response_payload
-        
+
     except Exception as e:
         print(f"Błąd podczas analizy: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/api/templates")
 async def api_get_templates():
@@ -512,24 +524,27 @@ async def api_get_templates():
         for file_path in TEMPLATES_DIR.glob("*.png"):
             img = cv2.imread(str(file_path))
             if img is not None:
-                _, buffer = cv2.imencode('.png', img)
-                img_b64 = base64.b64encode(buffer).decode('utf-8')
-                patterns_list.append({
-                    "id": file_path.stem,
-                    "name": file_path.stem,
-                    "imgBase64": f"data:image/png;base64,{img_b64}"
-                })
+                _, buffer = cv2.imencode(".png", img)
+                img_b64 = base64.b64encode(buffer).decode("utf-8")
+                patterns_list.append(
+                    {
+                        "id": file_path.stem,
+                        "name": file_path.stem,
+                        "imgBase64": f"data:image/png;base64,{img_b64}",
+                    }
+                )
     return {"patterns": patterns_list}
+
 
 @app.post("/api/templates/upload")
 async def api_upload_template(file: UploadFile = File(...)):
     """Ręczny upload wzorca PNG do bazy wiedzy."""
     if not file.filename.lower().endswith(".png"):
         raise HTTPException(status_code=400, detail="Tylko pliki PNG są obsługiwane.")
-    
+
     safe_name = Path(file.filename).stem
     dest_path = TEMPLATES_DIR / f"{safe_name}.png"
-    
+
     try:
         with dest_path.open("wb") as f_out:
             shutil.copyfileobj(file.file, f_out)
@@ -537,12 +552,14 @@ async def api_upload_template(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.delete("/api/templates")
 async def api_delete_templates():
     if TEMPLATES_DIR.exists():
         shutil.rmtree(TEMPLATES_DIR)
         TEMPLATES_DIR.mkdir(exist_ok=True)
     return {"message": "Baza wiedzy wyczyszczona."}
+
 
 @app.delete("/api/templates/{template_name}")
 async def api_delete_template(template_name: str):
@@ -553,6 +570,7 @@ async def api_delete_template(template_name: str):
     target.unlink()
     return {"message": f"Wzorzec '{template_name}' usunięty."}
 
+
 @app.post("/api/clear")
 async def api_clear():
     # Czyścimy wszystko
@@ -562,6 +580,8 @@ async def api_clear():
             folder.mkdir(exist_ok=True)
     return {"message": "Wyczyszczono dane robocze."}
 
+
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)

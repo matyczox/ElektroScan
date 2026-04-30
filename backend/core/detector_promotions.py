@@ -94,10 +94,15 @@ def _maybe_promote_socket_06_to_07(
                 extension_roi = _roi_mask(extension_plan_mask, parent_bbox)
                 if parent_roi is None or parent_roi.shape != parent_variant.transformed_mask.shape:
                     continue
-                if extension_roi is None or extension_roi.shape != parent_variant.transformed_mask.shape:
+                if (
+                    extension_roi is None
+                    or extension_roi.shape != parent_variant.transformed_mask.shape
+                ):
                     continue
 
-                extra_overlap = int(cv2.countNonZero(cv2.bitwise_and(extension_roi, rule.extension_mask)))
+                extra_overlap = int(
+                    cv2.countNonZero(cv2.bitwise_and(extension_roi, rule.extension_mask))
+                )
                 extra_coverage = extra_overlap / max(1, rule.extension_pixels)
                 if extra_coverage < rule.min_extra_coverage:
                     continue
@@ -126,7 +131,7 @@ def _maybe_promote_socket_06_to_07(
                     bbox=parent_bbox,
                     match_score=local_match,
                     dominant_hsv=templates[rule.parent_template_id].dominant_hsv,
-                    source=f"template_promoted_{rule.child_template_id}_to_{rule.parent_template_id}",
+                    source=f"template_promoted_{rule.child_template_id}_to_{rule.parent_template_id}",  # noqa: E501
                     is_text_label=templates[rule.parent_template_id].is_text_label,
                     promoted_from_template_id=hit.template_id,
                 )
@@ -136,8 +141,7 @@ def _maybe_promote_socket_06_to_07(
                     max_drop = SOCKET_PROMOTED_MAX_VERIFICATION_DROP
                     if (
                         child_prefix == "06"
-                        and
-                        extra_coverage >= SOCKET_07_STRONG_EXTRA_COVERAGE
+                        and extra_coverage >= SOCKET_07_STRONG_EXTRA_COVERAGE
                         and promoted_hit.coverage >= SOCKET_07_STRONG_MIN_COVERAGE
                         and promoted_hit.context_purity >= SOCKET_07_STRONG_MIN_CONTEXT_PURITY
                     ):
@@ -154,8 +158,7 @@ def _maybe_promote_socket_06_to_07(
                         promoted_hit.purity < SWITCH_PROMOTED_MIN_PURITY
                         or promoted_hit.context_purity < SWITCH_PROMOTED_MIN_CONTEXT_PURITY
                         or promoted_hit.verification_score < SWITCH_PROMOTED_MIN_VERIFICATION
-                        or promoted_hit.verification_score
-                        < (hit.verification_score - max_drop)
+                        or promoted_hit.verification_score < (hit.verification_score - max_drop)
                     ):
                         continue
                     if (
@@ -231,8 +234,12 @@ def _maybe_promote_switch_parent_search(
         base_x = int(round(child_center[0] - parent_variant.width / 2.0))
         base_y = int(round(child_center[1] - parent_variant.height / 2.0))
 
-        for delta_y in range(-SWITCH_PARENT_FALLBACK_SEARCH_RADIUS, SWITCH_PARENT_FALLBACK_SEARCH_RADIUS + 1):
-            for delta_x in range(-SWITCH_PARENT_FALLBACK_SEARCH_RADIUS, SWITCH_PARENT_FALLBACK_SEARCH_RADIUS + 1):
+        for delta_y in range(
+            -SWITCH_PARENT_FALLBACK_SEARCH_RADIUS, SWITCH_PARENT_FALLBACK_SEARCH_RADIUS + 1
+        ):
+            for delta_x in range(
+                -SWITCH_PARENT_FALLBACK_SEARCH_RADIUS, SWITCH_PARENT_FALLBACK_SEARCH_RADIUS + 1
+            ):
                 parent_bbox = (
                     base_x + delta_x,
                     base_y + delta_y,
@@ -240,10 +247,15 @@ def _maybe_promote_switch_parent_search(
                     parent_variant.height,
                 )
                 extension_roi = _roi_mask(extension_plan_mask, parent_bbox)
-                if extension_roi is None or extension_roi.shape != parent_variant.transformed_mask.shape:
+                if (
+                    extension_roi is None
+                    or extension_roi.shape != parent_variant.transformed_mask.shape
+                ):
                     continue
 
-                extra_overlap = int(cv2.countNonZero(cv2.bitwise_and(extension_roi, rule.extension_mask)))
+                extra_overlap = int(
+                    cv2.countNonZero(cv2.bitwise_and(extension_roi, rule.extension_mask))
+                )
                 extra_coverage = extra_overlap / max(1, rule.extension_pixels)
                 if extra_coverage < rule.min_extra_coverage:
                     continue
