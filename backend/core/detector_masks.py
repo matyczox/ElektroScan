@@ -12,6 +12,8 @@ from core.detector_config import (
     COLOR_VAL_TOLERANCE,
     CONTEXT_MARGIN_RATIO,
     DILATE_KERNEL,
+    GRAY_DARK_EVIDENCE_MIN_COVERAGE,
+    GRAY_DARK_EVIDENCE_MIN_PIXELS,
     GRAY_LARGE_SCALE_PARTIAL_MAX_COVERAGE,
     GRAY_LARGE_SCALE_PARTIAL_MIN_CONTEXT,
     GRAY_LARGE_SCALE_PARTIAL_MIN_PURITY,
@@ -628,6 +630,7 @@ def _validate_template_hit(
     plan_image: np.ndarray,
     reasons: dict[str, int] | None = None,
     plan_hsv: np.ndarray | None = None,
+    evidence_mask: np.ndarray | None = None,
 ) -> bool:
     """Validate a candidate by foreground overlap, purity and hue consistency.
 
@@ -675,6 +678,22 @@ def _validate_template_hit(
     ):
         _record("noisy_partial")
         return False
+
+    if hit.dominant_hsv is None and evidence_mask is not None:
+        evidence_roi = _roi_mask(evidence_mask, hit.bbox)
+        if evidence_roi is None or evidence_roi.shape != hit.transformed_mask.shape:
+            _record("gray_dark_evidence")
+            return False
+        evidence_intersection = int(
+            cv2.countNonZero(cv2.bitwise_and(evidence_roi, hit.transformed_mask))
+        )
+        evidence_coverage = evidence_intersection / max(1, hit.pixel_count)
+        if (
+            evidence_intersection < GRAY_DARK_EVIDENCE_MIN_PIXELS
+            or evidence_coverage < GRAY_DARK_EVIDENCE_MIN_COVERAGE
+        ):
+            _record("gray_dark_evidence")
+            return False
 
     if hit.dominant_hsv is None:
         template_area = max(1, hit.bbox[2] * hit.bbox[3])

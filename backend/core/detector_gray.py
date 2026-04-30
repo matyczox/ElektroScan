@@ -14,7 +14,9 @@ import numpy as np
 
 from core.detector_clustering import _bbox_metrics
 from core.detector_config import (
+    GRAY_DARK_EVIDENCE_THRESHOLD,
     GRAY_DARK_INK_THRESHOLD,
+    GRAY_DARK_ZONE_THRESHOLD,
     GRAY_ELONGATED_SCAN_MAX_TEMPLATE_PIXELS,
     GRAY_ELONGATED_SCAN_THRESHOLD,
     GRAY_RAW_MAX_HITS_PER_TEMPLATE,
@@ -23,6 +25,7 @@ from core.detector_config import (
     GRAY_RAW_SCAN_MIN_TEMPLATE_AREA,
     GRAY_RAW_SCAN_MIN_TEMPLATE_PIXELS,
     GRAY_RAW_SCAN_THRESHOLD,
+    GRAY_SEARCH_COMPONENT_PADDING_RATIO,
     GRAY_SEARCH_MAX_ROIS,
     GRAY_SEARCH_MAX_TILE_ROIS,
     GRAY_SEARCH_TILE_MIN_FOREGROUND,
@@ -42,10 +45,16 @@ from core.detector_models import CandidateHit, TemplateInfo
 @dataclass(slots=True)
 class GrayScanMasks:
     scan_masks_by_template: dict[int, np.ndarray]
+    scan_mask_kinds_by_template: dict[int, str]
+    zone_mask: np.ndarray
+    evidence_mask: np.ndarray
     raw_ink_pixels: int
     suppressed_pixels: int
     dark_ink_pixels: int
+    zone_ink_pixels: int
+    evidence_ink_pixels: int
     dark_suppressed_pixels: int
+    zone_suppressed_pixels: int
 
     @property
     def suppressed_ratio(self) -> float:
@@ -54,6 +63,10 @@ class GrayScanMasks:
     @property
     def dark_suppressed_ratio(self) -> float:
         return round(self.dark_suppressed_pixels / max(1, self.dark_ink_pixels), 3)
+
+    @property
+    def zone_suppressed_ratio(self) -> float:
+        return round(self.zone_suppressed_pixels / max(1, self.zone_ink_pixels), 3)
 
 
 def _clamp_roi(
@@ -129,7 +142,7 @@ def build_gray_scan_masks(
     exclude_rects: list[tuple[int, int, int, int]],
     raw_dilated: np.ndarray,
 ) -> GrayScanMasks:
-    """Build dark gray scan masks while keeping raw masks for validation."""
+    """Build strict dark gray scan masks while keeping raw masks for validation."""
 
     raw_ink_pixels = int(cv2.countNonZero(raw_dilated))
     dark_base = _ink_mask(
@@ -137,11 +150,26 @@ def build_gray_scan_masks(
         dilate=False,
         threshold=GRAY_DARK_INK_THRESHOLD,
     )
+    zone_base = _ink_mask(
+        plan_image,
+        dilate=False,
+        threshold=GRAY_DARK_ZONE_THRESHOLD,
+    )
+    evidence_base = _ink_mask(
+        plan_image,
+        dilate=False,
+        threshold=GRAY_DARK_EVIDENCE_THRESHOLD,
+    )
     for ex, ey, ew, eh in exclude_rects:
         cv2.rectangle(dark_base, (ex, ey), (ex + ew, ey + eh), 0, -1)
+        cv2.rectangle(zone_base, (ex, ey), (ex + ew, ey + eh), 0, -1)
+        cv2.rectangle(evidence_base, (ex, ey), (ex + ew, ey + eh), 0, -1)
 
     dark_dilated = cv2.dilate(dark_base, np.ones((3, 3), np.uint8), iterations=1)
+    zone_dilated = cv2.dilate(zone_base, np.ones((3, 3), np.uint8), iterations=1)
     dark_ink_pixels = int(cv2.countNonZero(dark_dilated))
+    zone_ink_pixels = int(cv2.countNonZero(zone_dilated))
+    evidence_ink_pixels = int(cv2.countNonZero(evidence_base))
     suppressed = _suppress_long_strokes(
         raw_dilated,
         GRAY_SUPPRESS_HORIZONTAL_KERNEL_PX,
@@ -152,20 +180,35 @@ def build_gray_scan_masks(
         GRAY_SUPPRESS_HORIZONTAL_KERNEL_PX,
         GRAY_SUPPRESS_VERTICAL_KERNEL_PX,
     )
+    zone_suppressed = _suppress_long_strokes(
+        zone_dilated,
+        GRAY_SUPPRESS_HORIZONTAL_KERNEL_PX,
+        GRAY_SUPPRESS_VERTICAL_KERNEL_PX,
+    )
 
     scan_masks_by_template: dict[int, np.ndarray] = {}
+    scan_mask_kinds_by_template: dict[int, str] = {}
     for template_id in plan_masks_by_template:
         template = templates[template_id]
-        scan_masks_by_template[template_id] = (
-            dark_dilated if use_raw_gray_scan_mask(template) else dark_suppressed
-        )
+        if use_raw_gray_scan_mask(template):
+            scan_masks_by_template[template_id] = zone_dilated
+            scan_mask_kinds_by_template[template_id] = "zone_raw"
+        else:
+            scan_masks_by_template[template_id] = zone_suppressed
+            scan_mask_kinds_by_template[template_id] = "zone_suppressed"
 
     return GrayScanMasks(
         scan_masks_by_template=scan_masks_by_template,
+        scan_mask_kinds_by_template=scan_mask_kinds_by_template,
+        zone_mask=zone_dilated,
+        evidence_mask=evidence_base,
         raw_ink_pixels=raw_ink_pixels,
         suppressed_pixels=raw_ink_pixels - int(cv2.countNonZero(suppressed)),
         dark_ink_pixels=dark_ink_pixels,
+        zone_ink_pixels=zone_ink_pixels,
+        evidence_ink_pixels=evidence_ink_pixels,
         dark_suppressed_pixels=dark_ink_pixels - int(cv2.countNonZero(dark_suppressed)),
+        zone_suppressed_pixels=zone_ink_pixels - int(cv2.countNonZero(zone_suppressed)),
     )
 
 
@@ -179,6 +222,9 @@ def _append_gray_tile_rois(
     image_shape: tuple[int, int, int] | tuple[int, int],
 ) -> list[tuple[int, int, int, int]]:
     """Add coarse gray tiles so symbols connected to walls still get scanned."""
+
+    if GRAY_SEARCH_MAX_TILE_ROIS <= 0:
+        return rois
 
     tile_size = max(64, int(GRAY_SEARCH_TILE_SIZE))
     padding = max(0, int(GRAY_SEARCH_TILE_PADDING))
@@ -248,8 +294,9 @@ def build_gray_search_rois(
     max_component_width = max(80, int(max_template_width * 4.0))
     max_component_height = max(80, int(max_template_height * 4.0))
     max_component_area = max(120, int(template_area * 8.0))
-    pad_x = max(6, int(round(max_template_width * 1.35)))
-    pad_y = max(6, int(round(max_template_height * 1.35)))
+    component_padding_ratio = max(0.25, float(GRAY_SEARCH_COMPONENT_PADDING_RATIO))
+    pad_x = max(6, int(round(max_template_width * component_padding_ratio)))
+    pad_y = max(6, int(round(max_template_height * component_padding_ratio)))
 
     component_rects: list[tuple[float, int, tuple[int, int, int, int]]] = []
     target_area = max(1, int(max_template_width) * int(max_template_height))

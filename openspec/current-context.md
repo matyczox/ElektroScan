@@ -56,6 +56,7 @@ Strategie i pomocnicy:
 
 ```powershell
 py -3 -m compileall -q backend
+cd frontend
 npm run build
 ```
 
@@ -91,13 +92,22 @@ Obecne problemy:
 
 Preferowany nastepny eksperyment:
 
-- Dla gray budowac kandydackie strefy z ciemnego tuszu, np. progiem jasnosci
-  typu `<190`, najlepiej adaptacyjnie z legendy.
-- Skanowac mocniej w okolicach tych czarnych komponentow, a szare cienkie
-  linie traktowac jako tlo/szum.
+- Dla gray budowac kandydackie strefy z bardzo ciemnego tuszu (`dark_zone`).
+- `dark_zone` ma decydowac nie tylko gdzie skanowac, ale tez byc maska
+  `matchTemplate` przez `zone_raw` / `zone_suppressed`.
+- Szersze `dark_raw` / `dark_suppressed` zostaja diagnostyka/pomoca, ale nie
+  powinny same produkowac trafien z jasnoszarych linii planu.
+- Kandydat gray musi przejsc `dark_evidence`: bardzo czarny, niedylatowany tusz
+  musi pokrywac wystarczajaca czesc template'u wewnatrz bboxa.
+- Duzy tile fallback dla gray jest domyslnie wylaczony, bo robil nachodzace
+  okna `512x512` i spowalnial skanowanie.
 - Nie obnizac globalnie progow dla wszystkich symboli, bo to zwieksza false
   positives.
 - Najpierw logowac i porownywac w Inspektorze ROI, potem dopiero zmieniac final.
+
+Szczegolowy plan tej zmiany jest w:
+
+- `openspec/gray-dark-ink-plan.md`
 
 ## Kolorowe PDF - Inwariant
 

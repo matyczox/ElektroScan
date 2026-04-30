@@ -17,6 +17,7 @@ Jesli starsze pliki sa sprzeczne z `current-context.md`, traktuj
 | Plik | Zawartosc |
 | --- | --- |
 | [current-context.md](current-context.md) | Aktualny kontekst roboczy dla AI |
+| [gray-dark-ink-plan.md](gray-dark-ink-plan.md) | Plan zmiany dla szarych PDF: dark ink zones |
 | [architecture.md](architecture.md) | Struktura projektu i pipeline detektora |
 | [detection.md](detection.md) | Metryki detekcji, walidacja, promocje |
 | [api.md](api.md) | Endpointy API i formaty odpowiedzi |

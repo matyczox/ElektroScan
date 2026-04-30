@@ -31,6 +31,7 @@ class ScanResult:
     scan_workers: int
     skipped_empty_color_masks: int
     timing_seconds: float
+    raw_hits_by_mask_kind: dict[str, int]
 
 
 def _is_content_scan_eligible(variant: TemplateVariant) -> bool:
@@ -52,6 +53,7 @@ def scan_template_candidates(
     templates: list[TemplateInfo],
     variants_by_template: dict[int, list[TemplateVariant]],
     scan_masks_by_template: dict[int, np.ndarray],
+    scan_mask_kinds_by_template: dict[int, str] | None = None,
     search_rois_by_template: dict[int, list[tuple[int, int, int, int]]],
     plan_mask_foregrounds: dict[int, int],
     detector_profile: str,
@@ -202,6 +204,7 @@ def scan_template_candidates(
     skipped_empty_color_masks = len(variants_by_template) - len(template_ids_to_scan)
 
     raw_template_hits: list[CandidateHit] = []
+    raw_hits_by_mask_kind: dict[str, int] = {}
     phase_start = time.perf_counter()
     scan_workers = max(1, min(len(template_ids_to_scan), DETECTOR_SCAN_MAX_WORKERS))
     if template_ids_to_scan:
@@ -210,6 +213,13 @@ def scan_template_candidates(
         with ThreadPoolExecutor(max_workers=scan_workers) as pool:
             for hits in pool.map(_scan_template, template_ids_to_scan):
                 raw_template_hits.extend(hits)
+                for hit in hits:
+                    mask_kind = (
+                        scan_mask_kinds_by_template.get(hit.template_id, "raw")
+                        if scan_mask_kinds_by_template is not None
+                        else "raw"
+                    )
+                    raw_hits_by_mask_kind[mask_kind] = raw_hits_by_mask_kind.get(mask_kind, 0) + 1
                 completed_scans += 1
                 if (
                     completed_scans == 1
@@ -229,4 +239,5 @@ def scan_template_candidates(
         scan_workers=scan_workers,
         skipped_empty_color_masks=skipped_empty_color_masks,
         timing_seconds=time.perf_counter() - phase_start,
+        raw_hits_by_mask_kind=raw_hits_by_mask_kind,
     )

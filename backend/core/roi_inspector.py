@@ -14,7 +14,8 @@ import cv2
 import numpy as np
 
 from core.detector_config import (
-    GRAY_DARK_INK_THRESHOLD,
+    GRAY_DARK_EVIDENCE_THRESHOLD,
+    GRAY_DARK_ZONE_THRESHOLD,
     GRAY_ELONGATED_SCAN_MAX_TEMPLATE_PIXELS,
     GRAY_ELONGATED_SCAN_THRESHOLD,
     GRAY_SCALES,
@@ -130,8 +131,8 @@ def _scan_mask_for_template(
 
     if detector_profile == "gray" or template.dominant_hsv is None:
         if _use_raw_gray_scan_mask(template):
-            return gray_raw_mask, gray_dark_raw_mask, "dark_raw"
-        return gray_raw_mask, gray_dark_scan_mask, "dark_suppressed"
+            return gray_raw_mask, gray_dark_raw_mask, "zone_raw"
+        return gray_raw_mask, gray_dark_scan_mask, "zone_suppressed"
 
     color_mask = _color_mask_for_template(
         plan_image,
@@ -175,7 +176,12 @@ def inspect_roi(
     gray_dark_raw_mask = _ink_mask(
         plan_image,
         dilate=True,
-        threshold=GRAY_DARK_INK_THRESHOLD,
+        threshold=GRAY_DARK_ZONE_THRESHOLD,
+    )
+    gray_evidence_mask = _ink_mask(
+        plan_image,
+        dilate=False,
+        threshold=GRAY_DARK_EVIDENCE_THRESHOLD,
     )
     gray_dark_scan_mask = _suppress_long_strokes(
         gray_dark_raw_mask,
@@ -282,7 +288,13 @@ def inspect_roi(
 
             raw_hits_by_scale[variant.scale] = raw_hits_by_scale.get(variant.scale, 0) + 1
             reasons: dict[str, int] = {}
-            accepted = _validate_template_hit(hit, validation_mask, plan_image, reasons=reasons)
+            accepted = _validate_template_hit(
+                hit,
+                validation_mask,
+                plan_image,
+                reasons=reasons,
+                evidence_mask=gray_evidence_mask if detector_profile == "gray" else None,
+            )
             reason = next(iter(reasons), "accepted" if accepted else "unknown")
             if not accepted:
                 rejected_by_reason[reason] = rejected_by_reason.get(reason, 0) + 1
@@ -343,7 +355,9 @@ def inspect_roi(
         "roiScanPixels": int(cv2.countNonZero(roi_scan_mask)),
         "roiDarkInkPixels": int(cv2.countNonZero(roi_dark_raw_mask)),
         "roiDarkScanPixels": int(cv2.countNonZero(roi_dark_scan_mask)),
-        "grayDarkInkThreshold": int(GRAY_DARK_INK_THRESHOLD),
+        "grayDarkInkThreshold": int(GRAY_DARK_ZONE_THRESHOLD),
+        "grayDarkEvidenceThreshold": int(GRAY_DARK_EVIDENCE_THRESHOLD),
+        "roiDarkEvidencePixels": int(cv2.countNonZero(_crop(gray_evidence_mask, clamped))),
         "roiImage": _image_data_url(roi_image),
         "roiRawMask": _mask_data_url(roi_raw_mask),
         "roiScanMask": _mask_data_url(roi_scan_mask),

@@ -26,7 +26,9 @@ from core.detector_config import (
     DEFAULT_PDF_DPI,
     DETECTOR_POSTPROCESS_MAX_WORKERS,
     DETECTOR_SCAN_MAX_WORKERS,
+    GRAY_DARK_EVIDENCE_THRESHOLD,
     GRAY_DARK_INK_THRESHOLD,
+    GRAY_DARK_ZONE_THRESHOLD,
     GRAY_SCALES,
     GRAY_SUPPRESS_HORIZONTAL_KERNEL_PX,
     GRAY_SUPPRESS_VERTICAL_KERNEL_PX,
@@ -242,6 +244,48 @@ def _detect_symbols_pipeline(
         )
         for template_id, variants in variants_by_template.items()
     }
+
+    # Gray stroke suppression - build dedicated dark scan masks before ROI.
+    # Gray ROIs should be seeded from the same dark ink mask used by scanning,
+    # otherwise pale architectural lines still create too many search windows.
+    gray_suppressed_pixels = 0
+    gray_raw_ink_pixels = 0
+    gray_dark_ink_pixels = 0
+    gray_dark_zone_pixels = 0
+    gray_dark_evidence_pixels = 0
+    gray_dark_suppressed_pixels = 0
+    gray_dark_zone_suppressed_pixels = 0
+    scan_masks_by_template: dict[int, np.ndarray]
+    scan_mask_kinds_by_template: dict[int, str]
+    gray_zone_mask: np.ndarray | None = None
+    gray_evidence_mask: np.ndarray | None = None
+    timings["gray_suppress"] = 0.0
+    if detector_profile == "gray":
+        _t_suppress = time.perf_counter()
+        _raw_dilated = _get_ink_plan_mask(dilate=True)
+        gray_scan_masks = gray_strategy.build_gray_scan_masks(
+            plan_image=plan_image,
+            templates=templates,
+            plan_masks_by_template=plan_masks_by_template,
+            exclude_rects=exclude_rects,
+            raw_dilated=_raw_dilated,
+        )
+        gray_raw_ink_pixels = gray_scan_masks.raw_ink_pixels
+        gray_suppressed_pixels = gray_scan_masks.suppressed_pixels
+        gray_dark_ink_pixels = gray_scan_masks.dark_ink_pixels
+        gray_dark_zone_pixels = gray_scan_masks.zone_ink_pixels
+        gray_dark_evidence_pixels = gray_scan_masks.evidence_ink_pixels
+        gray_dark_suppressed_pixels = gray_scan_masks.dark_suppressed_pixels
+        gray_dark_zone_suppressed_pixels = gray_scan_masks.zone_suppressed_pixels
+        scan_masks_by_template = gray_scan_masks.scan_masks_by_template
+        scan_mask_kinds_by_template = gray_scan_masks.scan_mask_kinds_by_template
+        gray_zone_mask = gray_scan_masks.zone_mask
+        gray_evidence_mask = gray_scan_masks.evidence_mask
+        timings["gray_suppress"] = time.perf_counter() - _t_suppress
+    else:
+        scan_masks_by_template = plan_masks_by_template
+        scan_mask_kinds_by_template = {template_id: "color" for template_id in plan_masks_by_template}
+
     search_rois_by_template: dict[int, list[tuple[int, int, int, int]]] = {}
     search_roi_stats_by_template: dict[int, tuple[bool, int, int]] = {}
 
@@ -251,8 +295,9 @@ def _detect_symbols_pipeline(
         template_id, plan_mask = item
         max_width, max_height = max_variant_size_by_template[template_id]
         if detector_profile == "gray":
+            roi_seed_mask = gray_zone_mask if gray_zone_mask is not None else plan_mask
             rois, uses_full_scan, roi_area, foreground_pixels = gray_strategy.build_gray_search_rois(
-                plan_mask,
+                roi_seed_mask,
                 plan_image.shape,
                 max_width,
                 max_height,
@@ -275,35 +320,6 @@ def _detect_symbols_pipeline(
     dilated_plan_masks_by_template: dict[int, np.ndarray] = {}
     timings["prepare"] = time.perf_counter() - phase_start
 
-    # Gray stroke suppression â€” build dedicated dark scan masks.  matchTemplate
-    # should see the electrical ink, not the pale architectural underlay.
-    # Validation still uses the full ink mask so geometry checks stay tolerant
-    # when a real symbol has anti-aliased or slightly lighter edges.
-    gray_suppressed_pixels = 0
-    gray_raw_ink_pixels = 0
-    gray_dark_ink_pixels = 0
-    gray_dark_suppressed_pixels = 0
-    scan_masks_by_template: dict[int, np.ndarray]
-    timings["gray_suppress"] = 0.0
-    if detector_profile == "gray":
-        _t_suppress = time.perf_counter()
-        _raw_dilated = _get_ink_plan_mask(dilate=True)
-        gray_scan_masks = gray_strategy.build_gray_scan_masks(
-            plan_image=plan_image,
-            templates=templates,
-            plan_masks_by_template=plan_masks_by_template,
-            exclude_rects=exclude_rects,
-            raw_dilated=_raw_dilated,
-        )
-        gray_raw_ink_pixels = gray_scan_masks.raw_ink_pixels
-        gray_suppressed_pixels = gray_scan_masks.suppressed_pixels
-        gray_dark_ink_pixels = gray_scan_masks.dark_ink_pixels
-        gray_dark_suppressed_pixels = gray_scan_masks.dark_suppressed_pixels
-        scan_masks_by_template = gray_scan_masks.scan_masks_by_template
-        timings["gray_suppress"] = time.perf_counter() - _t_suppress
-    else:
-        scan_masks_by_template = plan_masks_by_template
-
     diagnostics = {
         "detector_profile": 1 if detector_profile == "gray" else 0,
         "gray_text_exclude_rects": len(gray_text_exclude_rects),
@@ -311,9 +327,15 @@ def _detect_symbols_pipeline(
         "gray_suppressed_pixels": gray_suppressed_pixels,
         "gray_suppressed_ratio": round(gray_suppressed_pixels / max(1, gray_raw_ink_pixels), 3),
         "gray_dark_ink_pixels": gray_dark_ink_pixels,
+        "gray_dark_zone_pixels": gray_dark_zone_pixels,
+        "gray_dark_evidence_pixels": gray_dark_evidence_pixels,
         "gray_dark_suppressed_pixels": gray_dark_suppressed_pixels,
         "gray_dark_suppressed_ratio": round(
             gray_dark_suppressed_pixels / max(1, gray_dark_ink_pixels), 3
+        ),
+        "gray_dark_zone_suppressed_pixels": gray_dark_zone_suppressed_pixels,
+        "gray_dark_zone_suppressed_ratio": round(
+            gray_dark_zone_suppressed_pixels / max(1, gray_dark_zone_pixels), 3
         ),
         "raw_peaks": 0,
         "raw_budget_hits": 0,
@@ -350,6 +372,7 @@ def _detect_symbols_pipeline(
         templates=templates,
         variants_by_template=variants_by_template,
         scan_masks_by_template=scan_masks_by_template,
+        scan_mask_kinds_by_template=scan_mask_kinds_by_template,
         search_rois_by_template=search_rois_by_template,
         plan_mask_foregrounds=plan_mask_foregrounds,
         detector_profile=detector_profile,
@@ -422,6 +445,7 @@ def _detect_symbols_pipeline(
         plan_hsv=plan_hsv,
         postprocess_workers=postprocess_workers,
         progress_callback=_progress,
+        gray_evidence_mask=gray_evidence_mask if detector_profile == "gray" else None,
     )
     validated_hits = validation_result.validated_hits
     rejection_reasons = validation_result.rejection_reasons
@@ -516,6 +540,12 @@ def _detect_symbols_pipeline(
                     "ratio": float(diagnostics["gray_suppressed_ratio"]),
                     "darkThreshold": int(GRAY_DARK_INK_THRESHOLD),
                     "darkPixels": int(diagnostics["gray_dark_ink_pixels"]),
+                    "zoneThreshold": int(GRAY_DARK_ZONE_THRESHOLD),
+                    "zonePixels": int(diagnostics["gray_dark_zone_pixels"]),
+                    "evidenceThreshold": int(GRAY_DARK_EVIDENCE_THRESHOLD),
+                    "evidencePixels": int(diagnostics["gray_dark_evidence_pixels"]),
+                    "zoneRemovedPixels": int(diagnostics["gray_dark_zone_suppressed_pixels"]),
+                    "zoneRemovedRatio": float(diagnostics["gray_dark_zone_suppressed_ratio"]),
                     "darkRemovedPixels": int(diagnostics["gray_dark_suppressed_pixels"]),
                     "darkRemovedRatio": float(diagnostics["gray_dark_suppressed_ratio"]),
                     "timingMs": round(timings_ms.get("gray_suppress", 0.0), 3),
@@ -534,6 +564,9 @@ def _detect_symbols_pipeline(
                         round(float(s), 3): int(c) for s, c in sorted(accepted_by_scale.items())
                     },
                 },
+                "scanMaskRawHits": {
+                    str(k): int(v) for k, v in sorted(scan_result.raw_hits_by_mask_kind.items())
+                },
                 "rejectionReasons": {k: int(v) for k, v in rejection_reasons.items()},
                 "slowestPhase": (
                     max(timings_ms.items(), key=lambda item: item[1])[0] if timings_ms else None
@@ -551,6 +584,11 @@ def _detect_symbols_pipeline(
         if rejection_reasons
         else "-"
     )
+    scan_mask_summary = (
+        ",".join(f"{k}:{v}" for k, v in sorted(scan_result.raw_hits_by_mask_kind.items()))
+        if scan_result.raw_hits_by_mask_kind
+        else "-"
+    )
 
     print(
         "Detection diagnostics:"
@@ -561,6 +599,7 @@ def _detect_symbols_pipeline(
         f" color_no_hsv_templates={diagnostics['color_no_hsv_templates']},"
         f" skipped_empty_color_masks={diagnostics['skipped_empty_color_masks']},"
         f" raw_peaks={diagnostics['raw_peaks']} per_scale={_fmt_scale_hist(raw_peaks_by_scale)},"
+        f" raw_peaks_by_mask={scan_mask_summary},"
         f" raw_budget={diagnostics['raw_budget_hits']}(-{diagnostics['raw_budget_removed']}),"
         f" raw_budget_protected={int(gray_budget_profile.get('geometryProtectedKept', 0))}/{int(gray_budget_profile.get('geometryProtected', 0))},"
         f" raw_after_prefilter={diagnostics['raw_prefilter_hits']}(-{diagnostics['raw_prefilter_removed']})"  # noqa: E501
@@ -579,6 +618,9 @@ def _detect_symbols_pipeline(
         f" rois={diagnostics['search_rois']} full_scan_templates={diagnostics['full_scan_templates']},"  # noqa: E501
         f" gray_suppress={diagnostics['gray_suppressed_pixels']}px({diagnostics['gray_suppressed_ratio']:.0%}),"
         f" gray_dark<{GRAY_DARK_INK_THRESHOLD}={diagnostics['gray_dark_ink_pixels']}px,"
+        f" gray_zone<{GRAY_DARK_ZONE_THRESHOLD}={diagnostics['gray_dark_zone_pixels']}px,"
+        f" gray_evidence<{GRAY_DARK_EVIDENCE_THRESHOLD}={diagnostics['gray_dark_evidence_pixels']}px,"
+        f" gray_zone_suppress={diagnostics['gray_dark_zone_suppressed_pixels']}px({diagnostics['gray_dark_zone_suppressed_ratio']:.0%}),"
         f" gray_dark_suppress={diagnostics['gray_dark_suppressed_pixels']}px({diagnostics['gray_dark_suppressed_ratio']:.0%}),"
         f" threads=scan:{scan_workers}/{DETECTOR_SCAN_MAX_WORKERS}|post:{postprocess_workers}/{DETECTOR_POSTPROCESS_MAX_WORKERS}|opencv:{OPENCV_NUM_THREADS},"  # noqa: E501
         f" timings_ms="
