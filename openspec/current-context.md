@@ -6,8 +6,8 @@ plikiem, ten plik opisuje aktualniejszy stan.
 
 ## Workspace
 
-- Aktywny folder projektu: `C:\Users\Admin\Desktop\elektroskan_claude`
-- Nie pracowac w `C:\Users\Admin\Desktop\elektroskanNOWYSWIEZYSTART`, chyba ze
+- Aktywny folder projektu: `C:\Users\Admin\Desktop\elektroskanNOWYSWIEZYSTART\ElektroScan`
+- Nie pracowac w `C:\Users\Admin\Desktop\elektroskan_claude`, chyba ze
   uzytkownik jawnie o to poprosi.
 - Przed zmianami uruchomic `git status --short`.
 - Nie ruszac przypadkowych zmian w `.claude/skills`, `.agents/skills`,
@@ -188,7 +188,7 @@ Kolorowe PDF dzialaly dobrze i szybko przed praca nad gray. Przy zmianach gray:
 ## Minimalny Prompt Dla Nowego AI
 
 ```text
-Pracujesz w C:\Users\Admin\Desktop\elektroskan_claude. Najpierw przeczytaj
+Pracujesz w C:\Users\Admin\Desktop\elektroskanNOWYSWIEZYSTART\ElektroScan. Najpierw przeczytaj
 openspec/current-context.md. Detektor ma rozdzielone wejscia color/gray, ale
 wciaz ma wspolny pipeline. Nie hardcoduj koordynat ani nazw symboli. Gray PDF
 tunuj tylko w gray-only sciezce. Kolorowy silnik ma zostac szybki i nietkniety.
