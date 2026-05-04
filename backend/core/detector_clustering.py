@@ -175,6 +175,35 @@ def _raw_candidates_overlap_strongly(left: CandidateHit, right: CandidateHit) ->
     )
 
 
+def _should_keep_gray_scale_alternative(
+    candidate: CandidateHit,
+    existing: CandidateHit,
+    kept: list[CandidateHit],
+) -> bool:
+    """Keep a nearby gray scale variant until full geometry validation decides."""
+
+    if candidate.dominant_hsv is not None or existing.dominant_hsv is not None:
+        return False
+    if candidate.is_text_label or existing.is_text_label:
+        return False
+    if candidate.template_id != existing.template_id:
+        return False
+    if abs(float(candidate.scale) - float(existing.scale)) < 0.09:
+        return False
+
+    cx, cy = _box_center(candidate.bbox)
+    candidate_diag = max(1.0, float(np.hypot(candidate.bbox[2], candidate.bbox[3])))
+    nearby_alternatives = 0
+    for other in kept:
+        if other.template_id != candidate.template_id:
+            continue
+        ox, oy = _box_center(other.bbox)
+        if float(np.hypot(cx - ox, cy - oy)) <= candidate_diag * 0.25:
+            nearby_alternatives += 1
+
+    return nearby_alternatives < 3
+
+
 def _prefilter_raw_template_hits(candidates: list[CandidateHit]) -> list[CandidateHit]:
     """Drop near-identical raw candidates only inside the same template family member."""
 
@@ -189,7 +218,19 @@ def _prefilter_raw_template_hits(candidates: list[CandidateHit]) -> list[Candida
     for template_hits in grouped.values():
         kept: list[CandidateHit] = []
         for candidate in sorted(template_hits, key=lambda hit: hit.match_score, reverse=True):
-            if any(_raw_candidates_overlap_strongly(candidate, existing) for existing in kept):
+            overlapping_existing = next(
+                (
+                    existing
+                    for existing in kept
+                    if _raw_candidates_overlap_strongly(candidate, existing)
+                ),
+                None,
+            )
+            if overlapping_existing is not None and not _should_keep_gray_scale_alternative(
+                candidate,
+                overlapping_existing,
+                kept,
+            ):
                 continue
             kept.append(candidate)
         filtered.extend(kept)

@@ -32,6 +32,8 @@ from core.detector_config import (
     GRAY_SCALES,
     GRAY_SUPPRESS_HORIZONTAL_KERNEL_PX,
     GRAY_SUPPRESS_VERTICAL_KERNEL_PX,
+    GRAY_TINY_FRAGMENT_MAX_DIMENSION,
+    GRAY_TINY_FRAGMENT_MAX_SCALE,
     OPENCV_NUM_THREADS,
     SCALES,
     _safe_cpu_count,
@@ -190,6 +192,19 @@ def _detect_symbols_pipeline(
             )
         )
     variants_by_template = dict(prepared_variant_items)
+    if detector_profile == "gray":
+        variants_by_template = {
+            template_id: [
+                variant
+                for variant in variants
+                if not (
+                    not templates[template_id].is_text_label
+                    and variant.scale <= GRAY_TINY_FRAGMENT_MAX_SCALE
+                    and max(variant.width, variant.height) <= GRAY_TINY_FRAGMENT_MAX_DIMENSION
+                )
+            ]
+            for template_id, variants in variants_by_template.items()
+        }
     variants_lookup = {
         (variant.template_id, variant.scale, variant.rotation, variant.mirrored): variant
         for variants in variants_by_template.values()

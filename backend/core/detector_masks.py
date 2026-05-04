@@ -41,6 +41,13 @@ from core.detector_config import (
     GRAY_SMALL_SCALE_MIN_COVERAGE,
     GRAY_SMALL_SCALE_SUSPICIOUS_PURITY,
     GRAY_SMALL_SCALE_THRESHOLD,
+    GRAY_SPARSE_TINY_FRAGMENT_MAX_DENSITY,
+    GRAY_SPARSE_TINY_FRAGMENT_MAX_DIMENSION,
+    GRAY_SPARSE_TINY_FRAGMENT_MAX_SCALE,
+    GRAY_SPARSE_TINY_FRAGMENT_MIN_ASPECT,
+    GRAY_TINY_FRAGMENT_MAX_CONTEXT,
+    GRAY_TINY_FRAGMENT_MAX_DIMENSION,
+    GRAY_TINY_FRAGMENT_MAX_SCALE,
     GRAY_STRONG_GEOMETRY_MIN_COVERAGE,
     GRAY_STRONG_GEOMETRY_MIN_MATCH,
     GRAY_STRONG_RESCUE_MIN_PURITY,
@@ -876,6 +883,29 @@ def _validate_template_hit(
         and context_purity < GRAY_SMALL_SCALE_HIGH_PURITY_MAX_CONTEXT
     ):
         _record("gray_small_scale_high_purity_partial")
+        return False
+
+    if (
+        hit.dominant_hsv is None
+        and not hit.is_text_label
+        and hit.scale <= GRAY_TINY_FRAGMENT_MAX_SCALE
+        and max(hit.bbox[2], hit.bbox[3]) <= GRAY_TINY_FRAGMENT_MAX_DIMENSION
+        and context_purity < GRAY_TINY_FRAGMENT_MAX_CONTEXT
+    ):
+        _record("gray_tiny_fragment")
+        return False
+
+    if (
+        hit.dominant_hsv is None
+        and not hit.is_text_label
+        and hit.scale <= GRAY_SPARSE_TINY_FRAGMENT_MAX_SCALE
+        and max(hit.bbox[2], hit.bbox[3]) <= GRAY_SPARSE_TINY_FRAGMENT_MAX_DIMENSION
+        and max(hit.bbox[2], hit.bbox[3]) / max(1, min(hit.bbox[2], hit.bbox[3]))
+        >= GRAY_SPARSE_TINY_FRAGMENT_MIN_ASPECT
+        and template_density <= GRAY_SPARSE_TINY_FRAGMENT_MAX_DENSITY
+        and context_purity < GRAY_TINY_FRAGMENT_MAX_CONTEXT
+    ):
+        _record("gray_sparse_tiny_fragment")
         return False
 
     if (

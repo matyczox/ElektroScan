@@ -141,6 +141,15 @@ def _elapsed_ms(start: float) -> float:
     return round((time.perf_counter() - start) * 1000.0, 3)
 
 
+def _clear_directory_contents(directory: Path) -> None:
+    directory.mkdir(exist_ok=True)
+    for entry in directory.iterdir():
+        if entry.is_dir():
+            shutil.rmtree(entry)
+        else:
+            entry.unlink()
+
+
 def _slowest_stages(timings_ms: dict[str, float], limit: int = 8) -> list[dict]:
     ignored = {"total", "totalBeforeSnapshot"}
     ranked = sorted(
@@ -501,9 +510,7 @@ async def api_extract_legend(session_id: str, body: ExtractRequest = None):
             )
 
         _log("Ekstrakcja legendy...")
-        if TEMPLATES_DIR.exists():
-            shutil.rmtree(TEMPLATES_DIR)
-        TEMPLATES_DIR.mkdir(exist_ok=True)
+        _clear_directory_contents(TEMPLATES_DIR)
 
         symbols = extract_legend(
             str(file_path),
@@ -1067,9 +1074,7 @@ async def api_upload_template(file: UploadFile = File(...)):
 
 @app.delete("/api/templates")
 async def api_delete_templates():
-    if TEMPLATES_DIR.exists():
-        shutil.rmtree(TEMPLATES_DIR)
-        TEMPLATES_DIR.mkdir(exist_ok=True)
+    _clear_directory_contents(TEMPLATES_DIR)
     return {"message": "Baza wiedzy wyczyszczona."}
 
 
@@ -1087,9 +1092,7 @@ async def api_delete_template(template_name: str):
 async def api_clear():
     # Czyścimy wszystko
     for folder in [UPLOAD_DIR, TEMPLATES_DIR]:
-        if folder.exists():
-            shutil.rmtree(folder)
-            folder.mkdir(exist_ok=True)
+        _clear_directory_contents(folder)
     return {"message": "Wyczyszczono dane robocze."}
 
 
