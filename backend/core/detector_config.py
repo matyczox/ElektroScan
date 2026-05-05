@@ -291,7 +291,7 @@ ROI_FULL_SCAN_AREA_RATIO = 0.70
 # Strokes longer than these thresholds are treated as text/dimension lines and
 # removed from the scan mask before matchTemplate.  Symbols like 01/04/ZG have
 # internal strokes shorter than this; text and dimension annotations are longer.
-# Only affects the scan-time mask â€” validation still uses the raw ink mask.
+# Only affects the scan-time mask - validation still uses the raw ink mask.
 GRAY_SUPPRESS_HORIZONTAL_KERNEL_PX = 40
 GRAY_SUPPRESS_VERTICAL_KERNEL_PX = 40
 

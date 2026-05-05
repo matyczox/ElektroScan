@@ -24,6 +24,8 @@ Jesli starsze pliki sa sprzeczne z `current-context.md`, traktuj
 | [performance.md](performance.md) | Wydajnosc, env vars, diagnostyka |
 | [known-issues.md](known-issues.md) | Znane problemy i przypadki regresyjne |
 | [workflow.md](workflow.md) | Uruchamianie, testowanie, praca z AI |
+| [legend-manual-table-plan.md](legend-manual-table-plan.md) | Plan recznego zaznaczania legendy i obslugi legend tabelarycznych |
+| [legend-review-plan.md](legend-review-plan.md) | Plan przegladu, akceptacji i recznej korekty wzorcow legendy |
 | [decisions.md](decisions.md) | Decyzje architektoniczne i inwarianty |
 | [devops.md](devops.md) | Docker, CI, lint, testy |
 | [changelog.md](changelog.md) | Historia zmian |

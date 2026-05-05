@@ -93,6 +93,7 @@ h1, h2, h3 {
   display: flex;
   flex-direction: column;
   gap: 24px;
+  min-height: 0;
 }
 
 /* Custom Scrollbar */
@@ -188,6 +189,11 @@ h1, h2, h3 {
   background: rgba(255, 255, 255, 0.1);
 }
 
+.btn-icon:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
 /* ── Upload Area ── */
 .upload-area {
   border: 2px dashed var(--border-light);
@@ -230,6 +236,7 @@ h1, h2, h3 {
   color: var(--text-muted);
   margin-bottom: 12px;
   font-weight: 600;
+  flex-shrink: 0;
 }
 
 /* ── Progress Bar ── */
@@ -318,6 +325,20 @@ h1, h2, h3 {
   padding: 2px;
 }
 
+.knowledge-card {
+  flex: 1 1 260px;
+  min-height: 220px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.knowledge-list {
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
 /* ── Modals ── */
 .modal-overlay {
   position: fixed;
@@ -337,6 +358,128 @@ h1, h2, h3 {
   padding: 24px;
   width: 400px;
   box-shadow: var(--shadow-panel);
+}
+
+/* ── Legend Review ── */
+.legend-review-panel {
+  position: fixed;
+  left: 340px;
+  top: 18px;
+  bottom: 18px;
+  width: 460px;
+  z-index: 70;
+  background: rgba(20, 20, 23, 0.96);
+  border: 1px solid rgba(198, 168, 124, 0.32);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-panel);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.legend-review-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.legend-review-header h2 {
+  font-size: 16px;
+  line-height: 1.2;
+  margin: 0;
+}
+
+.legend-review-active {
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  background: rgba(14, 165, 233, 0.08);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+}
+
+.legend-review-active > div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.legend-review-list {
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-right: 2px;
+}
+
+.legend-review-item {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  gap: 12px;
+  background: rgba(0, 0, 0, 0.22);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+}
+
+.legend-review-item img {
+  width: 76px;
+  height: 76px;
+  object-fit: contain;
+  background: #fff;
+  border-radius: 4px;
+  border: 1px solid var(--border-light);
+}
+
+.legend-review-empty-preview {
+  width: 76px;
+  height: 76px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px dashed var(--border-light);
+  border-radius: 4px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.legend-review-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.legend-review-name-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 28px;
+  gap: 6px;
+  align-items: center;
+}
+
+.legend-review-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.legend-review-status {
+  min-width: 104px;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  padding: 3px 6px;
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  text-align: center;
 }
 
 /* ── Form inputs ── */

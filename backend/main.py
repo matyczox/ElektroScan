@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import re
 import shutil
 import time
 import uuid
@@ -17,16 +18,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from core import detector_gray as gray_strategy
-from core.detector_config import (
-    GRAY_SCALES,
-)
 from core.detector import detect_symbols, draw_results, load_templates
+from core.detector_config import GRAY_SCALES
 from core.detector_masks import _ink_mask
 from core.detector_templates import _prepare_variants
-from core.roi_inspector import inspect_roi
 
 # Importujemy nasze core'owe moduły
 from core.legend_extractor import _normalize_layer_name, extract_legend, get_pdf_layers, pdf_to_png
+from core.roi_inspector import inspect_roi
 
 app = FastAPI(title="ElektroScan AI API")
 
@@ -148,6 +147,48 @@ def _clear_directory_contents(directory: Path) -> None:
             shutil.rmtree(entry)
         else:
             entry.unlink()
+
+
+def _safe_template_stem(raw_name: str) -> str:
+    """Return a safe template file stem while keeping human-readable labels."""
+
+    value = Path(str(raw_name or "").replace("\\", "/")).stem.strip()
+    value = re.sub(r"[^\w\s.-]", "", value, flags=re.UNICODE)
+    value = re.sub(r"\s+", "_", value, flags=re.UNICODE).strip("._")
+    if not value:
+        raise HTTPException(status_code=400, detail="Nazwa wzorca jest pusta.")
+    return value[:120]
+
+
+def _display_template_name(stem: str) -> str:
+    """Strip extraction ordering prefixes in UI labels."""
+
+    return re.sub(r"^\d+_+", "", stem)
+
+
+def _template_path_for_id(template_id: str) -> Path | None:
+    """Find a template by exact stem, with a suffix fallback for legacy responses."""
+
+    safe_stem = _safe_template_stem(template_id)
+    exact = TEMPLATES_DIR / f"{safe_stem}.png"
+    if exact.exists():
+        return exact
+
+    suffix_matches = sorted(TEMPLATES_DIR.glob(f"*_{safe_stem}.png"))
+    return suffix_matches[0] if suffix_matches else None
+
+
+def _template_payload_from_path(file_path: Path) -> dict | None:
+    img = cv2.imread(str(file_path))
+    if img is None:
+        return None
+    _, buffer = cv2.imencode(".png", img)
+    img_b64 = base64.b64encode(buffer).decode("utf-8")
+    return {
+        "id": file_path.stem,
+        "name": _display_template_name(file_path.stem),
+        "imgBase64": f"data:image/png;base64,{img_b64}",
+    }
 
 
 def _slowest_stages(timings_ms: dict[str, float], limit: int = 8) -> list[dict]:
@@ -359,7 +400,11 @@ def _outside_plan_zone_rects(
 def _extract_exclude_rects_from_request(
     body: object | None,
     image_shape: tuple[int, ...],
-) -> tuple[list[tuple[int, int, int, int]], tuple[int, int, int, int] | None, list[tuple[int, int, int, int]]]:
+) -> tuple[
+    list[tuple[int, int, int, int]],
+    tuple[int, int, int, int] | None,
+    list[tuple[int, int, int, int]],
+]:
     exclude_rects: list[tuple[int, int, int, int]] = []
     legend_rect = None
     plan_zone_rect = None
@@ -408,6 +453,7 @@ async def api_preview(file: UploadFile = File(...)):
 
     session_id = str(uuid.uuid4())
     file_path = UPLOAD_DIR / f"{session_id}.pdf"
+    _clear_directory_contents(TEMPLATES_DIR)
 
     # Zapis
     with file_path.open("wb") as buffer:
@@ -509,6 +555,12 @@ async def api_extract_legend(session_id: str, body: ExtractRequest = None):
                 int(round(body.legend_zone.height)),
             )
 
+        if legend_rect_px is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Brak strefy legendy. Zaznacz obszar legendy na planie przed ekstrakcją.",
+            )
+
         _log("Ekstrakcja legendy...")
         _clear_directory_contents(TEMPLATES_DIR)
 
@@ -527,8 +579,14 @@ async def api_extract_legend(session_id: str, body: ExtractRequest = None):
         for s in symbols:
             _, buffer_s = cv2.imencode(".png", s.image)
             img_b64 = base64.b64encode(buffer_s).decode("utf-8")
+            template_id = f"{s.index:02d}_{s.name}"
             patterns_list.append(
-                {"id": s.name, "name": s.name, "imgBase64": f"data:image/png;base64,{img_b64}"}
+                {
+                    "id": template_id,
+                    "name": s.name,
+                    "imgBase64": f"data:image/png;base64,{img_b64}",
+                    "status": "pending",
+                }
             )
 
         return {
@@ -568,6 +626,20 @@ class GrayDebugZonesRequest(BaseModel):
     detector_profile: Optional[str] = "auto"
     legend_zone: Optional[LegendZone] = None
     plan_zone: Optional[LegendZone] = None
+
+
+class TemplateCropRequest(BaseModel):
+    session_id: str
+    x: float
+    y: float
+    width: float
+    height: float
+    name: Optional[str] = None
+    hidden_layers: Optional[List[str]] = []
+
+
+class TemplateUpdateRequest(BaseModel):
+    name: Optional[str] = None
 
 
 @app.get("/api/analysis-progress")
@@ -617,7 +689,9 @@ def api_analyze(session_id: str, body: AnalyzeRequest = None):
         timings_ms["requestSetup"] = _elapsed_ms(phase_start)
 
         # 1. Ładujemy plan
-        _set_analysis_progress(session_id, "render_pdf", 5, "Renderowanie PDF", analysis_id=analysis_id)
+        _set_analysis_progress(
+            session_id, "render_pdf", 5, "Renderowanie PDF", analysis_id=analysis_id
+        )
         phase_start = time.perf_counter()
         plan_img = pdf_to_png(str(plan_path), dpi=300, hidden_layers=hidden_layers)
         timings_ms["renderPdf"] = _elapsed_ms(phase_start)
@@ -625,7 +699,9 @@ def api_analyze(session_id: str, body: AnalyzeRequest = None):
         counters["planHeight"] = int(plan_img.shape[0])
         counters["hiddenLayers"] = len(hidden_layers)
 
-        _set_analysis_progress(session_id, "diagnostics", 8, "Diagnostyka PDF", analysis_id=analysis_id)
+        _set_analysis_progress(
+            session_id, "diagnostics", 8, "Diagnostyka PDF", analysis_id=analysis_id
+        )
         phase_start = time.perf_counter()
         pdf_diagnostics = _build_pdf_diagnostics(str(plan_path), plan_img)
         resolved_profile = (
@@ -641,7 +717,9 @@ def api_analyze(session_id: str, body: AnalyzeRequest = None):
         counters["pdfImagesPage1"] = int(pdf_diagnostics.get("imagesPage1", 0))
 
         # 2. Ładujemy wzorce
-        _set_analysis_progress(session_id, "load_templates", 10, "Ladowanie wzorcow", analysis_id=analysis_id)
+        _set_analysis_progress(
+            session_id, "load_templates", 10, "Ladowanie wzorcow", analysis_id=analysis_id
+        )
         phase_start = time.perf_counter()
         templates = load_templates(str(TEMPLATES_DIR))
         timings_ms["loadTemplates"] = _elapsed_ms(phase_start)
@@ -718,7 +796,9 @@ def api_analyze(session_id: str, body: AnalyzeRequest = None):
 
         result_image_payload: str | None = None
         if include_image:
-            _set_analysis_progress(session_id, "draw_results", 96, "Rysowanie wynikow", analysis_id=analysis_id)
+            _set_analysis_progress(
+                session_id, "draw_results", 96, "Rysowanie wynikow", analysis_id=analysis_id
+            )
             phase_start = time.perf_counter()
             result_img = draw_results(plan_img, results)
             timings_ms["drawResults"] = _elapsed_ms(phase_start)
@@ -759,7 +839,9 @@ def api_analyze(session_id: str, body: AnalyzeRequest = None):
         if include_debug:
             analysis_context["hiddenLayerDebug"] = hidden_layer_debug
 
-        _set_analysis_progress(session_id, "format_response", 98, "Przygotowanie odpowiedzi", analysis_id=analysis_id)
+        _set_analysis_progress(
+            session_id, "format_response", 98, "Przygotowanie odpowiedzi", analysis_id=analysis_id
+        )
         phase_start = time.perf_counter()
         formatted_results = []
         all_boxes = []
@@ -958,9 +1040,11 @@ def api_gray_debug_zones(session_id: str, body: GrayDebugZonesRequest = None):
         hidden_layers = body.hidden_layers if body else []
         plan_img = pdf_to_png(str(plan_path), dpi=300, hidden_layers=hidden_layers)
         templates = load_templates(str(TEMPLATES_DIR))
-        exclude_rects, plan_zone_rect, plan_zone_outside_rects = _extract_exclude_rects_from_request(
-            body,
-            plan_img.shape,
+        exclude_rects, plan_zone_rect, plan_zone_outside_rects = (
+            _extract_exclude_rects_from_request(
+                body,
+                plan_img.shape,
+            )
         )
 
         raw_dilated = _ink_mask(plan_img, dilate=True)
@@ -1040,18 +1124,10 @@ def api_gray_debug_zones(session_id: str, body: GrayDebugZonesRequest = None):
 async def api_get_templates():
     patterns_list = []
     if TEMPLATES_DIR.exists():
-        for file_path in TEMPLATES_DIR.glob("*.png"):
-            img = cv2.imread(str(file_path))
-            if img is not None:
-                _, buffer = cv2.imencode(".png", img)
-                img_b64 = base64.b64encode(buffer).decode("utf-8")
-                patterns_list.append(
-                    {
-                        "id": file_path.stem,
-                        "name": file_path.stem,
-                        "imgBase64": f"data:image/png;base64,{img_b64}",
-                    }
-                )
+        for file_path in sorted(TEMPLATES_DIR.glob("*.png")):
+            payload = _template_payload_from_path(file_path)
+            if payload is not None:
+                patterns_list.append(payload)
     return {"patterns": patterns_list}
 
 
@@ -1072,6 +1148,92 @@ async def api_upload_template(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/templates/{template_name}/crop")
+async def api_crop_template(template_name: str, body: TemplateCropRequest):
+    """Replace or create a template from a user-selected crop on the rendered plan."""
+
+    plan_path = UPLOAD_DIR / f"{body.session_id}.pdf"
+    if not plan_path.exists():
+        raise HTTPException(status_code=404, detail="Nie znaleziono pliku sesji.")
+
+    try:
+        plan_img = pdf_to_png(
+            str(plan_path),
+            dpi=300,
+            hidden_layers=body.hidden_layers or [],
+        )
+        rect = (
+            int(round(body.x)),
+            int(round(body.y)),
+            int(round(body.width)),
+            int(round(body.height)),
+        )
+        clamped = _clamp_rect_to_image(rect, plan_img.shape)
+        if clamped is None:
+            raise HTTPException(status_code=400, detail="Zaznaczenie wzorca jest puste.")
+
+        x, y, w, h = clamped
+        crop = plan_img[y : y + h, x : x + w]
+        if crop.size == 0:
+            raise HTTPException(status_code=400, detail="Zaznaczenie wzorca jest puste.")
+
+        old_path = _template_path_for_id(template_name)
+        if body.name:
+            target_stem = _safe_template_stem(body.name)
+        elif old_path is not None:
+            target_stem = old_path.stem
+        else:
+            target_stem = _safe_template_stem(template_name)
+
+        target_path = TEMPLATES_DIR / f"{target_stem}.png"
+        if old_path is not None and old_path != target_path and target_path.exists():
+            raise HTTPException(
+                status_code=409,
+                detail=f"Wzorzec '{target_stem}' już istnieje.",
+            )
+
+        ok, buffer = cv2.imencode(".png", crop)
+        if not ok:
+            raise RuntimeError("Nie udało się zakodować wzorca PNG.")
+        target_path.write_bytes(buffer.tobytes())
+
+        if old_path is not None and old_path != target_path:
+            old_path.unlink(missing_ok=True)
+
+        payload = _template_payload_from_path(target_path)
+        if payload is None:
+            raise RuntimeError("Nie udało się odczytać zapisanego wzorca.")
+        payload["status"] = "fixed"
+        payload["correctedBBoxPx"] = [x, y, w, h]
+        return {"message": f"Wzorzec '{payload['name']}' poprawiony.", "pattern": payload}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.patch("/api/templates/{template_name}")
+async def api_update_template(template_name: str, body: TemplateUpdateRequest):
+    target = _template_path_for_id(template_name)
+    if target is None:
+        raise HTTPException(status_code=404, detail="Nie znaleziono wzorca.")
+
+    if not body.name:
+        payload = _template_payload_from_path(target)
+        return {"message": "Brak zmian.", "pattern": payload}
+
+    new_stem = _safe_template_stem(body.name)
+    new_path = TEMPLATES_DIR / f"{new_stem}.png"
+    if new_path != target and new_path.exists():
+        raise HTTPException(status_code=409, detail=f"Wzorzec '{new_stem}' już istnieje.")
+
+    target.rename(new_path)
+    payload = _template_payload_from_path(new_path)
+    if payload is None:
+        raise HTTPException(status_code=500, detail="Nie udało się odczytać wzorca po zmianie.")
+    return {"message": f"Wzorzec zmieniony na '{payload['name']}'.", "pattern": payload}
+
+
 @app.delete("/api/templates")
 async def api_delete_templates():
     _clear_directory_contents(TEMPLATES_DIR)
@@ -1080,8 +1242,8 @@ async def api_delete_templates():
 
 @app.delete("/api/templates/{template_name}")
 async def api_delete_template(template_name: str):
-    target = TEMPLATES_DIR / f"{template_name}.png"
-    if not target.exists():
+    target = _template_path_for_id(template_name)
+    if target is None:
         raise HTTPException(status_code=404, detail="Nie znaleziono wzorca.")
 
     target.unlink()
