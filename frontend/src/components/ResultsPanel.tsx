@@ -114,10 +114,10 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
       if (res.ok) {
         onTemplateUploaded?.();
       } else {
-        alert('BĹ‚Ä…d uploadu wzorca.');
+        alert('Błąd uploadu wzorca.');
       }
     } catch {
-      alert('BĹ‚Ä…d poĹ‚Ä…czenia z backendem.');
+      alert('Błąd połączenia z backendem.');
     } finally {
       setUploading(false);
       if (uploadRef.current) uploadRef.current.value = '';
@@ -162,7 +162,7 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
                 transition: 'all 0.2s',
               }}
             >
-              {tab === 'correction' ? 'đź”Ť Korekta' : 'đź’° Kosztorys'}
+              {tab === 'correction' ? 'Korekta' : 'Kosztorys'}
             </button>
           ))}
         </div>
@@ -171,12 +171,12 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
       {empty ? (
         <div className="sidebar-content" style={{ alignItems: 'center', justifyContent: 'center', textAlign: 'center' }}>
           <Layers size={36} style={{ opacity: 0.2, marginBottom: 12 }} />
-          <p className="text-sm text-muted">Brak wynikĂłw.<br />Wgraj plan i uruchom analizÄ™.</p>
+          <p className="text-sm text-muted">Brak wyników.<br />Wgraj plan i uruchom analizę.</p>
         </div>
       ) : (
         <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
 
-          {/* â”€â”€ KOREKTA TAB â”€â”€ */}
+          {/* KOREKTA TAB */}
           {activeTab === 'correction' && (
             <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
 
@@ -184,7 +184,7 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
               <div className="card" style={{ padding: '12px 16px' }}>
                 <div className="flex-row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
                   <span className="text-xs text-muted" style={{ textTransform: 'uppercase', fontWeight: 600 }}>
-                    Min. PewnoĹ›Ä‡
+                    Min. Pewność
                   </span>
                   <span className="text-xs" style={{ color: 'var(--accent-gold)', fontWeight: 700 }}>
                     {minConfidence}%
@@ -205,7 +205,7 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
                 </div>
               </div>
 
-              {/* Upload rÄ™cznego wzorca */}
+              {/* Upload ręcznego wzorca */}
               <div>
                 <button
                   className="btn-secondary flex-row gap-2"
@@ -232,7 +232,7 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
                 const isOpen = expandedGroups.has(group.name);
                 return (
                   <div key={group.name} className="card" style={{ padding: 0, overflow: 'hidden' }}>
-                    {/* NagĹ‚Ăłwek grupy */}
+                    {/* Nagłówek grupy */}
                     <button
                       onClick={() => toggleGroup(group.name)}
                       style={{
@@ -277,12 +277,12 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
                       </span>
                     </button>
 
-                    {/* RozwiniÄ™ta lista detekcji */}
+                    {/* Rozwinięta lista detekcji */}
                     {isOpen && (
                       <div style={{ borderTop: '1px solid var(--border-light)' }}>
                         {groupBoxes.length === 0 ? (
                           <p className="text-xs text-muted" style={{ padding: '10px 14px' }}>
-                            Wszystkie odfiltrowane przez prĂłg pewnoĹ›ci.
+                            Wszystkie odfiltrowane przez próg pewności.
                           </p>
                         ) : (
                           groupBoxes.map(box => {
@@ -340,10 +340,10 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
                                   ))}
                                 </select>
                               )}
-                              {/* OdrzuÄ‡ */}
+                              {/* Odrzuć */}
                               <button
                                 onClick={e => { e.stopPropagation(); onRejectBox(box.id); }}
-                                title="OdrzuÄ‡ (faĹ‚szywe trafienie)"
+                                title="Odrzuć (fałszywe trafienie)"
                                 style={{
                                   background: 'none',
                                   border: 'none',
@@ -371,7 +371,7 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
             </div>
           )}
 
-          {/* â”€â”€ KOSZTORYS TAB â”€â”€ */}
+          {/* KOSZTORYS TAB */}
           {activeTab === 'cost' && (
             <>
               <div style={{ padding: 16, flex: 1, display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -384,7 +384,7 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
                         <div className="estimate-card-title">{group.name}</div>
                         <div className="estimate-inputs">
                           <div className="estimate-input-group">
-                            <label className="estimate-input-label">ILOĹšÄ†</label>
+                            <label className="estimate-input-label">ILOŚĆ</label>
                             <input
                               type="number"
                               className="estimate-input"
@@ -414,7 +414,7 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
               <div className="estimate-total-footer">
                 <div className="flex-row gap-2">
                   <Calculator size={16} color="var(--text-muted)" />
-                  <span className="text-xs text-muted" style={{ textTransform: 'uppercase' }}>Suma CaĹ‚kowita</span>
+                  <span className="text-xs text-muted" style={{ textTransform: 'uppercase' }}>Suma Całkowita</span>
                 </div>
                 <span style={{ fontSize: 18, fontWeight: 700, color: 'var(--accent-gold)' }}>
                   {totalSum.toFixed(2)} PLN

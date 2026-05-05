@@ -25,6 +25,12 @@ interface AnalysisProgress {
   error?: string | null;
 }
 
+interface PatternSummary {
+  id?: string;
+  name: string;
+  imgBase64: string;
+}
+
 interface SidebarProps {
   fileName: string | null;
   onFileSelect: (file: File) => void;
@@ -35,7 +41,11 @@ interface SidebarProps {
   isProcessing: boolean;
   progressText: string;
   analysisProgress?: AnalysisProgress | null;
-  patterns: any[];
+  patterns: PatternSummary[];
+  legendReviewTotal?: number;
+  legendReviewCompleted?: number;
+  isLegendReviewComplete?: boolean;
+  onOpenLegendReview?: () => void;
   onUpdatePattern: (index: number, newName: string) => void;
   onDeletePattern: (index: number) => void;
   layers?: {name: string, visible: boolean}[];
@@ -60,6 +70,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
   progressText,
   analysisProgress,
   patterns,
+  legendReviewTotal = 0,
+  legendReviewCompleted = 0,
+  isLegendReviewComplete = true,
+  onOpenLegendReview,
   onUpdatePattern,
   onDeletePattern,
   layers = [],
@@ -83,6 +97,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     analysisProgress?.detail ||
     progressText ||
     'Przetwarzanie...';
+  const hasLegendReview = legendReviewTotal > 0;
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
@@ -212,14 +227,20 @@ export const Sidebar: React.FC<SidebarProps> = ({
         <div className="card">
           <div className="card-header">Operacje</div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            <button 
-              className="btn-primary" 
+            <button
+              className="btn-primary"
               onClick={onExtractLegend}
-              disabled={!fileName || isProcessing}
+              disabled={!fileName || isProcessing || !hasLegendZone}
+              title={!hasLegendZone ? 'Zaznacz strefę legendy na planie (tryb Legenda)' : undefined}
             >
               <Layers size={18} />
-              {hasLegendZone ? '1. Legenda z zaznaczenia' : '1. Auto-Legenda (Extract)'}
+              {hasLegendZone ? '1. Wyciągnij legendę z zaznaczenia' : '1. Zaznacz strefę legendy'}
             </button>
+            {!hasLegendZone && fileName && (
+              <div className="text-xs text-muted" style={{ marginTop: -6, lineHeight: 1.4 }}>
+                Użyj trybu <b>Legenda</b> na canvasie aby zaznaczyć obszar legendy.
+              </div>
+            )}
             {hasLegendZone && (
               <button
                 className="btn-secondary"
@@ -238,14 +259,34 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 Wyczysc strefe planu
               </button>
             )}
+            {hasLegendReview && (
+              <button
+                className="btn-secondary"
+                onClick={onOpenLegendReview}
+                disabled={isProcessing}
+                style={{
+                  borderColor: isLegendReviewComplete ? 'rgba(34,197,94,0.45)' : 'rgba(245,158,11,0.5)',
+                  color: isLegendReviewComplete ? '#22c55e' : '#f59e0b',
+                }}
+              >
+                <Layers size={18} />
+                2. Sprawdź wzorce ({legendReviewCompleted}/{legendReviewTotal})
+              </button>
+            )}
             <button 
               className="btn-primary" 
               onClick={onDetect}
-              disabled={!fileName || patterns.length === 0 || isProcessing}
+              disabled={!fileName || patterns.length === 0 || isProcessing || !isLegendReviewComplete}
+              title={!isLegendReviewComplete ? 'Sprawdź wszystkie wzorce legendy przed analizą' : undefined}
             >
               <Cpu size={18} />
-              2. Analizuj Plan (Hybrid)
+              {hasLegendReview ? '3. Analizuj Plan (Hybrid)' : '2. Analizuj Plan (Hybrid)'}
             </button>
+            {!isLegendReviewComplete && (
+              <div className="text-xs text-muted" style={{ marginTop: -6, lineHeight: 1.4 }}>
+                Analiza odblokuje się po sprawdzeniu wzorców legendy.
+              </div>
+            )}
             
             <button 
               className="btn-secondary btn-danger" 
@@ -285,7 +326,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
         {/* Knowledge Base */}
         {patterns.length > 0 && (
-          <div className="card" style={{ flex: 1, overflowY: 'auto' }}>
+          <div className="card knowledge-card">
             <div className="card-header flex-row" style={{ justifyContent: 'space-between' }}>
               <span>Baza Wzorców</span>
               <div className="flex-row gap-2">
@@ -295,19 +336,21 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 </button>
               </div>
             </div>
-            {patterns.map((pat, i) => (
-              <div key={i} className="list-item">
-                <div className="flex-row gap-2 text-sm" style={{ flex: 1, overflow: 'hidden' }}>
-                  <img src={pat.imgBase64} alt="wzorzec" />
-                  <span style={{ textOverflow: 'ellipsis', whiteSpace: 'nowrap', overflow: 'hidden' }} title={pat.name}>
-                    {pat.name}
-                  </span>
+            <div className="knowledge-list">
+              {patterns.map((pat, i) => (
+                <div key={pat.id ?? `${pat.name}-${i}`} className="list-item">
+                  <div className="flex-row gap-2 text-sm" style={{ flex: 1, minWidth: 0, overflow: 'hidden' }}>
+                    <img src={pat.imgBase64} alt="wzorzec" />
+                    <span style={{ textOverflow: 'ellipsis', whiteSpace: 'nowrap', overflow: 'hidden' }} title={pat.name}>
+                      {pat.name}
+                    </span>
+                  </div>
+                  <button className="btn-icon" onClick={() => setEditingPatternIndex(i)}>
+                    <Edit3 size={16} />
+                  </button>
                 </div>
-                <button className="btn-icon" onClick={() => setEditingPatternIndex(i)}>
-                  <Edit3 size={16} />
-                </button>
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
         )}
         

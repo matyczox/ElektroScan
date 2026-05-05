@@ -1,8 +1,8 @@
 """
-legend_extractor.py — Automatyczna ekstrakcja wzorców symboli z legendy PDF.
+legend_extractor.py — Ekstrakcja wzorców symboli z ręcznie zaznaczonej strefy legendy PDF.
 
 Algorytm:
-  1. Znajduje słowo "LEGENDA" w PDF (PyMuPDF).
+  1. Przyjmuje współrzędne legend_rect_px zaznaczone przez użytkownika w UI.
   2. Wycina obszar legendy z planu PNG (300 DPI).
   3. Filtruje HSV → maska kolorowych pikseli.
   4. Morphological CLOSE (kernel 4×40) skleja rozbite symbole (np. -[INT).
@@ -44,6 +44,10 @@ MIN_SYMBOL_SIZE = 15
 
 # Margines wokół wyciętego symbolu (px) — zapobiega ucinaniu krawędzi
 SYMBOL_PADDING = 2
+
+# Liczba pikseli przycinanych z każdej krawędzi komórki TABLE przed findNonZero —
+# usuwa ciemne linie ramki tabeli, które rozszerzałyby boundingRect do pełnej szerokości.
+CELL_BORDER_TRIM = 2
 
 # Minimalna gęstość pikseli — symbol musi mieć przynajmniej X% kolorowych
 # pikseli w swoim bboxie, żeby nie złapać jednej kolorowej kreski jako symbolu
@@ -146,8 +150,7 @@ def _filter_gray_legend_symbol_contours(
 
         center_y = y + h / 2
         has_row_description = any(
-            tx > x + w
-            and abs((ty + th / 2) - center_y) <= max(24, h * 1.6, th * 1.6)
+            tx > x + w and abs((ty + th / 2) - center_y) <= max(24, h * 1.6, th * 1.6)
             for tx, ty, tw, th in long_text_rects
         )
         if not has_row_description:
@@ -207,8 +210,7 @@ def _detect_gray_description_cut(symbol_mask: np.ndarray) -> int | None:
     usable_runs = [
         (start, end)
         for start, end in runs
-        if end - start >= min_gap_width
-        and int(legend_w * 0.08) <= start <= int(legend_w * 0.55)
+        if end - start >= min_gap_width and int(legend_w * 0.08) <= start <= int(legend_w * 0.55)
     ]
     if usable_runs:
         start, end = max(usable_runs, key=lambda item: item[1] - item[0])
@@ -353,6 +355,214 @@ def _gray_row_symbol_bboxes(
     return symbol_mask, bboxes
 
 
+def _detect_legend_format(legend_area: np.ndarray) -> str:
+    """Zwraca 'table' jeśli w obszarze legendy wykryto siatkę tabelaryczną, inaczej 'classic'."""
+    h, w = legend_area.shape[:2]
+    if h < 40 or w < 40:
+        return "classic"
+    gray = cv2.cvtColor(legend_area, cv2.COLOR_BGR2GRAY)
+    _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
+    horiz_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(10, w // 2), 1))
+    horiz_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, horiz_kernel)
+    row_sums = horiz_lines.sum(axis=1)
+    line_threshold = w * 0.5 * 255
+    in_line = False
+    line_count = 0
+    for s in row_sums:
+        if s >= line_threshold:
+            if not in_line:
+                line_count += 1
+                in_line = True
+        else:
+            in_line = False
+    return "table" if line_count >= 3 else "classic"
+
+
+def _merge_close_indices(indices: np.ndarray, gap: int = 5) -> list[int]:
+    """Grupuje bliskie indeksy (odległość <= gap) i zwraca medianę każdej grupy."""
+    if len(indices) == 0:
+        return []
+    groups: list[list[int]] = []
+    current: list[int] = [int(indices[0])]
+    for idx in indices[1:]:
+        if int(idx) - current[-1] <= gap:
+            current.append(int(idx))
+        else:
+            groups.append(current)
+            current = [int(idx)]
+    groups.append(current)
+    return [int(np.median(g)) for g in groups]
+
+
+def _cell_has_content(cell: np.ndarray, min_density: float = 0.004) -> bool:
+    """Sprawdza czy komórka tabeli zawiera rysunek (ciemne piksele > min_density lub >= 8 px).
+
+    Niski próg gęstości (0.4%) bo małe, cienkie symbole (kółka, strzałki) w wysokich
+    wierszach tabeli mają bardzo małą gęstość względem całej komórki.
+    """
+    if cell.size == 0:
+        return False
+    gray = cv2.cvtColor(cell, cv2.COLOR_BGR2GRAY)
+    dark_count = int(np.sum(gray < 210))
+    total = cell.shape[0] * cell.shape[1]
+    return total > 0 and (dark_count >= 8 or dark_count / total >= min_density)
+
+
+def _get_row_index_text(
+    text_blocks: list,
+    x_start: int,
+    y_start: int,
+    scale: float,
+    row_top_px: int,
+    row_bottom_px: int,
+    col_right_px: int,
+) -> str | None:
+    """Szuka krótkiego kodu indeksu (np. A1, AW2) w drugiej kolumnie wiersza tabeli."""
+    row_top_pt = (y_start + row_top_px) / scale
+    row_bottom_pt = (y_start + row_bottom_px) / scale
+    col2_left_pt = (x_start + col_right_px) / scale
+    col2_right_pt = col2_left_pt + 120
+    for block in text_blocks:
+        if len(block) < 5:
+            continue
+        if len(block) >= 7 and block[6] != 0:
+            continue
+        bx0 = float(block[0])
+        by0 = float(block[1])
+        bx1 = float(block[2])
+        by1 = float(block[3])
+        text = str(block[4]).strip().replace("\n", " ")
+        block_center_y = (by0 + by1) / 2.0
+        if not (row_top_pt - 2 <= block_center_y <= row_bottom_pt + 2):
+            continue
+        if not (bx0 >= col2_left_pt - 10 and bx1 <= col2_right_pt):
+            continue
+        if 1 <= len(text) <= 10 and not any(c in text for c in ["/", "(", "+", "="]):
+            return _sanitize_filename(text)
+    return None
+
+
+def _extract_table_legend_raw(
+    legend_area: np.ndarray,
+    text_blocks: list,
+    x_start: int,
+    y_start: int,
+    scale: float,
+) -> list[tuple[np.ndarray, str]]:
+    """Wyciąga symbole z legendy w formacie tabelarycznym (siatka z wierszami)."""
+    h, w = legend_area.shape[:2]
+    gray = cv2.cvtColor(legend_area, cv2.COLOR_BGR2GRAY)
+    _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
+
+    horiz_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(10, w // 2), 1))
+    horiz_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, horiz_kernel)
+    row_sums = horiz_lines.sum(axis=1)
+    line_threshold = w * 0.4 * 255
+    line_row_indices = np.where(row_sums >= line_threshold)[0]
+    row_boundaries = _merge_close_indices(line_row_indices, gap=5)
+
+    if len(row_boundaries) < 2:
+        return []
+
+    vert_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(10, h // 3)))
+    vert_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, vert_kernel)
+    col_sums = vert_lines.sum(axis=0)
+    col_threshold = h * 0.3 * 255
+    col_indices = np.where(col_sums >= col_threshold)[0]
+    col_boundaries = _merge_close_indices(col_indices, gap=5)
+
+    first_col_right = col_boundaries[0] if col_boundaries else max(20, int(w * 0.12))
+
+    row_spans = [
+        (row_boundaries[i], row_boundaries[i + 1])
+        for i in range(len(row_boundaries) - 1)
+        if row_boundaries[i + 1] - row_boundaries[i] >= 8
+    ]
+    if not row_spans:
+        return []
+
+    row_centers = [(top + bottom) / 2.0 for top, bottom in row_spans]
+    assigned_components: list[list[tuple[int, int, int, int]]] = [[] for _ in row_spans]
+    cell_right = max(5, first_col_right - 2)
+
+    symbol_strip = legend_area[:, 0:cell_right]
+    strip_gray = cv2.cvtColor(symbol_strip, cv2.COLOR_BGR2GRAY)
+    strip_mask = (strip_gray < 200).astype(np.uint8) * 255
+    if symbol_strip.shape[1] > CELL_BORDER_TRIM * 4:
+        strip_mask[:, :CELL_BORDER_TRIM] = 0
+        strip_mask[:, -CELL_BORDER_TRIM:] = 0
+
+    component_count, _labels, stats, centroids = cv2.connectedComponentsWithStats(strip_mask, 8)
+    for component_index in range(1, component_count):
+        x = int(stats[component_index, cv2.CC_STAT_LEFT])
+        y = int(stats[component_index, cv2.CC_STAT_TOP])
+        cw = int(stats[component_index, cv2.CC_STAT_WIDTH])
+        ch = int(stats[component_index, cv2.CC_STAT_HEIGHT])
+        area = int(stats[component_index, cv2.CC_STAT_AREA])
+        if area < 4 or cw < 2 or ch < 2:
+            continue
+
+        component_center_y = float(centroids[component_index][1])
+        nearest_row = min(
+            range(len(row_centers)),
+            key=lambda index: abs(component_center_y - row_centers[index]),
+        )
+        row_top, row_bottom = row_spans[nearest_row]
+        row_height = row_bottom - row_top
+        if not (
+            row_top - row_height * 0.45 <= component_center_y <= row_bottom + row_height * 0.45
+        ):
+            continue
+
+        assigned_components[nearest_row].append((x, y, cw, ch))
+
+    results: list[tuple[np.ndarray, str]] = []
+    counter = 1
+
+    for (row_top, row_bottom), components in zip(row_spans, assigned_components):
+        if not components:
+            continue
+
+        x1 = min(x for x, _y, _w, _h in components)
+        y1 = min(y for _x, y, _w, _h in components)
+        x2 = max(x + w for x, _y, w, _h in components)
+        y2 = max(y + h for _x, y, _w, h in components)
+        if x2 - x1 < 3 or y2 - y1 < 3:
+            continue
+
+        pad = 4
+        sx1 = max(0, x1 - pad)
+        sy1 = max(0, y1 - pad)
+        sx2 = min(symbol_strip.shape[1], x2 + pad)
+        sy2 = min(symbol_strip.shape[0], y2 + pad)
+
+        symbol_crop = symbol_strip[sy1:sy2, sx1:sx2]
+        if symbol_crop.size == 0:
+            continue
+
+        symbol_image = np.full_like(symbol_crop, 255)
+        crop_gray = cv2.cvtColor(symbol_crop, cv2.COLOR_BGR2GRAY)
+        dark_px = crop_gray < 200
+        symbol_image[dark_px] = symbol_crop[dark_px]
+
+        name = _get_row_index_text(
+            text_blocks,
+            x_start,
+            y_start,
+            scale,
+            row_top,
+            row_bottom,
+            first_col_right,
+        )
+        if not name:
+            name = f"sym_{counter:02d}"
+
+        results.append((symbol_image, name))
+        counter += 1
+
+    return results
+
+
 @dataclass
 class ExtractedSymbol:
     """Wynik ekstrakcji jednego symbolu z legendy."""
@@ -398,7 +608,7 @@ def _normalize_layer_name(name: str) -> str:
     text = str(name).strip()
 
     # When layer names pass through different shells / encodings we sometimes
-    # get mojibake like "UKĹAD" instead of "UKŁAD". Repair that first when
+    # get mojibake like "UKLAD" instead of "UKŁAD". Repair that first when
     # possible, then normalize everything to the same ASCII-ish form.
     try:
         repaired = text.encode("latin1").decode("utf-8")
@@ -495,9 +705,6 @@ def extract_legend(
     plan_image: np.ndarray,
     output_dir: str = "templates",
     dpi: int = 300,
-    legend_keyword: str = "LEGENDA",
-    legend_width_pt: float = 300,
-    legend_height_pt: float = 550,
     exclude_rects: list[tuple[int, int, int, int]] = None,
     legend_rect_px: tuple[int, int, int, int] | None = None,
     mask_mode: str = "auto",
@@ -506,15 +713,18 @@ def extract_legend(
     Wyciąga wzorce symboli z legendy planu elektrycznego.
 
     Args:
-        pdf_path:         Ścieżka do pliku PDF.
-        plan_image:       Obraz planu jako BGR np.ndarray (ten sam DPI co poniżej).
-        output_dir:       Folder docelowy na wzorce (tworzony automatycznie).
-        dpi:              DPI użyte przy konwersji PDF → PNG.
-        legend_keyword:   Słowo kluczowe do zlokalizowania legendy.
-        legend_width_pt:  Szacowana szerokość legendy w punktach PDF.
-        legend_height_pt: Szacowana wysokość legendy w punktach PDF.
-        exclude_rects:    Strefy do zignorowania.
+        pdf_path:        Ścieżka do pliku PDF.
+        plan_image:      Obraz planu jako BGR np.ndarray (ten sam DPI co poniżej).
+        output_dir:      Folder docelowy na wzorce (tworzony automatycznie).
+        dpi:             DPI użyte przy konwersji PDF → PNG.
+        exclude_rects:   Strefy do zignorowania.
+        legend_rect_px:  Obszar legendy w pikselach (x, y, w, h) — wymagane.
+        mask_mode:       Tryb maskowania: 'auto', 'color', 'gray'.
     """
+    if legend_rect_px is None:
+        raise ValueError(
+            "legend_rect_px jest wymagane. Zaznacz strefę legendy na planie przed ekstrakcją."
+        )
     doc = fitz.open(pdf_path)
     page = doc.load_page(0)
     text_blocks = page.get_text("blocks")
@@ -524,33 +734,12 @@ def extract_legend(
         for ex, ey, ew, eh in exclude_rects:
             cv2.rectangle(plan_image, (ex, ey), (ex + ew, ey + eh), (255, 255, 255), -1)
 
-    # 1. Lokalizacja legendy
-    if legend_rect_px is not None:
-        zone_scale = dpi / 72.0
-        found = [
-            fitz.Rect(
-                (legend_rect_px[0] / zone_scale) + 20,
-                0,
-                0,
-                legend_rect_px[1] / zone_scale,
-            )
-        ]
-    else:
-        found = page.search_for(legend_keyword)
-    if found is not None and not found:
-        raise ValueError(f"Nie znaleziono słowa '{legend_keyword}' w PDF.")
-
-    anchor = found[0]
+    # 1. Lokalizacja legendy — wyłącznie z ręcznie zaznaczonego obszaru
     scale = dpi / 72.0
-
-    # Wyliczamy piksele obszaru legendy z kotwicy
-    x_start = int((anchor.x0 - 20) * scale)
-    y_start = int(anchor.y1 * scale)
-    width = int(legend_width_pt * scale)
-    height = int(legend_height_pt * scale)
-    if legend_rect_px is not None:
-        width = int(round(legend_rect_px[2]))
-        height = int(round(legend_rect_px[3]))
+    x_start = int(legend_rect_px[0])
+    y_start = int(legend_rect_px[1])
+    width = int(legend_rect_px[2])
+    height = int(legend_rect_px[3])
 
     # Zabezpieczenie przed wyjściem poza obraz
     x_start = max(0, min(x_start, plan_image.shape[1] - 1))
@@ -560,6 +749,24 @@ def extract_legend(
     legend_area = plan_image[y_start:y_end, x_start:x_end]
     if legend_area.size == 0:
         raise ValueError("Zaznaczona strefa legendy jest pusta albo poza obrazem.")
+
+    legend_format = _detect_legend_format(legend_area)
+
+    if legend_format == "table":
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        raw_symbols = _extract_table_legend_raw(legend_area, text_blocks, x_start, y_start, scale)
+        results: list[ExtractedSymbol] = []
+        for counter, (symbol_image, name) in enumerate(raw_symbols, start=1):
+            filename = f"{counter:02d}_{name}.png"
+            ok, buf = cv2.imencode(".png", symbol_image)
+            if ok:
+                (output_path / filename).write_bytes(buf.tobytes())
+            px_count = int(np.sum(cv2.cvtColor(symbol_image, cv2.COLOR_BGR2GRAY) < 180))
+            results.append(
+                ExtractedSymbol(name=name, image=symbol_image, index=counter, pixel_count=px_count)
+            )
+        return results
 
     # 2. Maska kolorowa + morphological CLOSE (klejenie symboli)
     raw_symbol_mask, _mask_used = _legend_symbol_mask(legend_area, mask_mode=mask_mode)
@@ -699,18 +906,5 @@ def extract_legend(
 # ── CLI ────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    import sys
-
-    pdf = sys.argv[1] if len(sys.argv) > 1 else "plan.pdf"
-
-    print(f"Konwersja {pdf} → PNG (300 DPI)...")
-    plan = pdf_to_png(pdf, dpi=300)
-
-    print("Ekstrakcja legendy...")
-    symbols = extract_legend(pdf, plan, output_dir="templates")
-
-    print(f"\n{'NR':>3} | {'NAZWA':<50}")
-    print("-" * 58)
-    for s in symbols:
-        print(f"{s.index:>3} | {s.name:<50}")
-    print(f"\nZapisano {len(symbols)} wzorców do folderu 'templates/'.")
+    print("Ekstrakcja legendy wymaga ręcznego zaznaczenia strefy przez UI.")
+    print("Uruchom frontend i użyj trybu 'Legenda' do zaznaczenia obszaru.")

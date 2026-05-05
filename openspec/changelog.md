@@ -61,6 +61,57 @@ Ten plik służy do logowania ważnych zmian i decyzji projektowych. Nie zastęp
 
 <!-- Dodawaj nowe wpisy na górze listy, po tej linii -->
 
+## 2026-05-05 - Review legendy, reczny crop wzorcow i reset bazy na nowy PDF
+
+**Dotyczy:** `backend/main.py`, `backend/core/legend_extractor.py`,
+`frontend/src/App.tsx`, `frontend/src/components/CanvasView.tsx`,
+`frontend/src/components/Sidebar.tsx`,
+`frontend/src/components/LegendReviewPanel.tsx`, OpenSpec
+**Zmiana:** Dodano obowiazkowy przeglad wzorcow legendy po ekstrakcji. Wzorce
+maja statusy `pending`, `accepted`, `fixed`, `rejected`; analiza jest
+zablokowana, dopoki sa pozycje `pending`. Uzytkownik moze zaakceptowac wzorzec,
+odrzucic go, zmienic nazwe, poprawic crop rysujac prostokat na legendzie albo
+dodac brakujacy wzorzec. Backend dostal `POST /api/templates/{template_name}/crop`
+i `PATCH /api/templates/{template_name}`. Nowy upload PDF przez `/api/preview`
+czysci baze wzorcow, a frontend nie laduje juz starych template'ow przy starcie.
+**Dlaczego:** Stare wzorce z poprzedniego PDF-a mogly pozwolic na analize
+nowego planu bez analizy legendy. Zly crop legendy jest single point of failure
+dla calej detekcji, wiec uzytkownik musi potwierdzic albo poprawic kazdy znak.
+**Ryzyko:** Review metadata jest na razie trzymane glownie po stronie frontendu;
+reload strony w trakcie review moze wymagac ponownej ekstrakcji. Dodawanie
+brakujacego wzorca uzywa prostego promptu.
+**Testy:** `npm run build`, `npm run test` (`17` testow), `compileall`
+backendowych plikow. Backendowe unity nadal maja znany niezalezny fail:
+brak `DEBUG_CANDIDATES_LIMIT` w `detector_config`.
+
+## 2026-05-05 - Legenda tabelaryczna: poprawa cropow C1/D1
+
+**Dotyczy:** `backend/core/legend_extractor.py`
+**Zmiana:** Ekstrakcja symboli z legend tabelarycznych przypisuje ciemne
+komponenty w kolumnie symboli do najblizszego srodka wiersza, zamiast wycinac
+sztywno granice miedzy liniami tabeli. Poprawiono przypadki, gdzie `C1` bylo
+uciete od gory, a `D1` dostawalo fragment sasiadujacego napisu.
+**Dlaczego:** W legendach tabelarycznych etykieta i symbol moga wychodzic poza
+idealne granice komorki, a linie tabeli nie sa wystarczajaca prawda dla cropa.
+**Ryzyko:** Nietypowe tabele bez wyraznych komponentow moga wymagac recznej
+korekty w nowym panelu review.
+**Testy:** `compileall`, lokalne testy smoke helperow ekstraktora oraz review
+w UI.
+
+## 2026-05-05 - UI: polskie znaki i stabilna baza wzorcow
+
+**Dotyczy:** `frontend/src/components/CanvasView.tsx`,
+`frontend/src/components/ResultsPanel.tsx`, `frontend/src/components/Sidebar.tsx`,
+`frontend/src/index.css`
+**Zmiana:** Poprawiono teksty zapisane jako mojibake (`Brak podglÄ...du` itd.)
+na normalne UTF-8. Karta "Baza Wzorcow" ma teraz staly naglowek i przewijana
+liste wzorcow, zeby licznik i ikony nie ucinaly sie przy wielu template'ach.
+**Dlaczego:** UI bylo trudne do czytania, a panel bazy wzorcow rozjezdzal sie
+po ekstrakcji wielu symboli.
+**Ryzyko:** Brak znanego ryzyka poza zwyklym layoutem przy bardzo malych
+wysokosciach okna.
+**Testy:** `npm run build`, `npm run test`.
+
 ## 2026-05-01 - Golden dla pierwszego szarego PDF Viking
 
 **Dotyczy:** `backend/tests/golden/`, `openspec/`

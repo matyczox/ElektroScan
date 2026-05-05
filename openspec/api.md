@@ -7,9 +7,11 @@ Backend: FastAPI, port `8000`. Wszystkie odpowiedzi mają nagłówek `Cache-Cont
 ### Upload i Sesja
 
 ```
-POST /api/upload
+POST /api/preview
 ```
-Upload pliku PDF. Zwraca `session_id` i listę warstw.
+Upload pliku PDF. Renderuje podglad 300 DPI, tworzy `sessionId` i zwraca
+diagnostyke PDF. Ten endpoint czysci `backend/templates/`, wiec nowy plan
+zawsze startuje z pusta baza wzorcow.
 
 ```
 GET /api/layers?session_id=...
@@ -31,7 +33,12 @@ Czyści stan sesji (uploads, wyniki).
 ```
 POST /api/extract-legend?session_id=...
 ```
-Ekstrahuje wzorce z legendy PDF. Opcjonalnie przyjmuje `hidden_layers`.
+Ekstrahuje wzorce z recznie zaznaczonej strefy legendy PDF. Wymaga
+`legend_zone`; brak strefy zwraca blad. Opcjonalnie przyjmuje
+`hidden_layers`, `excluded_zones` i `detector_profile`.
+
+**Response:** lista `patterns` ma `id`, `name`, `imgBase64` oraz poczatkowy
+status `pending`. Frontend otwiera po tym review wzorcow.
 
 ```
 POST /api/analyze?session_id=...
@@ -78,7 +85,30 @@ Zwraca listę załadowanych wzorców z miniaturą base64, nazwą i ID.
 ```
 POST /api/templates/upload
 ```
-Dodaje nowy wzorzec (plik PNG/JPG) do `backend/templates/`.
+Dodaje nowy wzorzec PNG do `backend/templates/`.
+
+```
+POST /api/templates/{template_name}/crop
+```
+Zastepuje lub tworzy wzorzec na podstawie prostokata narysowanego przez
+uzytkownika na podgladzie aktualnego PDF-a. Body:
+
+```json
+{
+  "session_id": "...",
+  "x": 100,
+  "y": 200,
+  "width": 80,
+  "height": 60,
+  "name": "C1",
+  "hidden_layers": []
+}
+```
+
+```
+PATCH /api/templates/{template_name}
+```
+Zmienia nazwe wzorca. Zwraca zaktualizowany payload `pattern`.
 
 ```
 DELETE /api/templates
@@ -90,7 +120,9 @@ DELETE /api/templates/{template_name}
 ```
 Usuwa jeden wzorzec po nazwie pliku.
 
-**Uwaga:** edycja nazwy przez `PatternModal` w UI wykonuje sekwencję: `DELETE /api/templates/{id}` → `POST /api/templates/upload` z nową nazwą.
+**Uwaga:** aktualny review legendy uzywa `PATCH` do zmiany nazwy oraz
+`POST /crop` do recznej korekty wzorca. Starszy `PatternModal` jest tylko
+pomocniczym widokiem bazy.
 
 ## Debug Payload Boxa
 
@@ -124,6 +156,10 @@ Kliknięcie boxa w CanvasView kopiuje payload do schowka. Zawiera:
 
 ## Frontend HITL — Co Może Użytkownik
 
+- Po ekstrakcji legendy przejsc przez kazdy wzorzec w `LegendReviewPanel`.
+- Zaakceptowac, odrzucic, zmienic nazwe albo poprawic crop wzorca.
+- Dodac brakujacy wzorzec z obszaru legendy.
+- Uruchomic analize dopiero po zakonczeniu review wszystkich wzorcow.
 - Kliknąć box → skopiować debug payload.
 - Usunąć fałszywy finalny box.
 - Zmienić klasę finalnego boxa.
@@ -134,6 +170,8 @@ Kliknięcie boxa w CanvasView kopiuje payload do schowka. Zawiera:
 ## Zarządzanie Wzorcami (UI)
 
 - Sidebar wyświetla wzorce z miniaturą i nazwą.
+- Nowy PDF startuje z pusta baza wzorcow; stare wzorce nie sa ladowane
+  automatycznie przy starcie frontendu.
 - Przycisk edycji otwiera `PatternModal` (zmiana nazwy lub usunięcie).
 - Przycisk "Wyczyść całą bazę wiedzy" w Sidebar → `DELETE /api/templates`.
 

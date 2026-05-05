@@ -67,6 +67,22 @@ npm run build
 - Narzedziem diagnostycznym jest teraz Inspektor ROI.
 - Inspektor ROI pokazuje lokalnie, co silnik widzi w zaznaczonym boxie:
   raw mask, scan mask, dark scan mask, peaki per scale, PASS/odrzuty.
+- Aktualny flow legendy jest human-in-the-loop:
+  - nowy PDF startuje z pusta baza wzorcow; `POST /api/preview` czysci
+    `backend/templates/`, a frontend nie laduje starych wzorcow przy starcie,
+  - uzytkownik musi zaznaczyc strefe legendy i wyciagnac wzorce,
+  - po ekstrakcji otwiera sie `LegendReviewPanel`,
+  - analiza jest zablokowana, dopoki kazdy wzorzec nie ma statusu innego niz
+    `pending`,
+  - wzorzec mozna zaakceptowac, odrzucic, zmienic nazwe, poprawic crop na
+    canvasie albo dodac brakujacy wzorzec recznie.
+- Dla legend tabelarycznych poprawiono wycinanie znakow typu `C1`/`D1`: znaki
+  sa przypisywane do najblizszego srodka wiersza na podstawie ciemnych
+  komponentow w kolumnie symboli, zamiast prostego cropa miedzy liniami tabeli.
+  To chroni przed ucieciem etykiety z gory i dobraniem fragmentu kolejnego
+  wiersza z dolu.
+- Widoczne teksty UI po ostatnich zmianach powinny byc zapisane jako UTF-8.
+  Nie zostawiac mojibake typu `Brak podglÄ...du`.
 
 ## Szare PDF - Aktualny Kierunek
 
@@ -175,6 +191,11 @@ Aktualne heurystyki, ktore dzialaja dobrze na Viking gray:
 Szczegolowy plan tej zmiany jest w:
 
 - `openspec/gray-dark-ink-plan.md`
+
+Szczegolowy plan review legendy jest w:
+
+- `openspec/legend-review-plan.md`
+- `openspec/legend-manual-table-plan.md`
 
 ## Kolorowe PDF - Inwariant
 

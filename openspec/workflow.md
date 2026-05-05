@@ -20,6 +20,25 @@ npm run dev -- --host 127.0.0.1
 
 Frontend: `http://127.0.0.1:5173`
 
+## Aktualny Flow Legendy
+
+1. Wgraj PDF. Nowy upload czysci baze wzorcow, wiec analiza nie uzyje
+   template'ow z poprzedniego planu.
+2. Zaznacz strefe legendy na canvasie trybem `Legenda`.
+3. Kliknij `Wyciagnij legende z zaznaczenia`.
+4. Przejdz przez panel `Sprawdz wzorce legendy`.
+5. Dla kazdego wzorca wybierz jedna z akcji:
+   - zaakceptuj,
+   - popraw zaznaczenie na legendzie,
+   - zmien nazwe,
+   - odrzuc,
+   - dodaj brakujacy wzorzec.
+6. Analiza planu odblokuje sie dopiero wtedy, gdy nie ma juz wzorcow
+   `pending`.
+
+Wazne: reczny crop wzorca operuje na wspolrzednych podgladu PDF 300 DPI i
+zapisuje wynik w `backend/templates/` dla aktualnej sesji.
+
 ### Restart Backendu (Windows)
 
 Jeżeli wyniki wyglądają jak stary stan mimo zmian w kodzie — stary backend wisi na porcie 8000:

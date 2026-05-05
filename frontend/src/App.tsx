@@ -1,7 +1,8 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useRef } from 'react';
 import { Sidebar } from './components/Sidebar';
 import { CanvasView } from './components/CanvasView';
 import { ResultsPanel } from './components/ResultsPanel';
+import { LegendReviewPanel, type LegendReviewItem } from './components/LegendReviewPanel';
 import './index.css';
 
 const API_BASE = 'http://127.0.0.1:8000';
@@ -144,13 +145,35 @@ interface GrayDebugZones {
   templates: number;
 }
 
+interface Pattern {
+  id: string;
+  name: string;
+  imgBase64: string;
+  status?: string;
+  correctedBBoxPx?: [number, number, number, number];
+}
+
+interface ResultGroup {
+  name: string;
+  count: number;
+  color: string;
+}
+
+interface LegendCorrectionTarget {
+  id: string;
+  name: string;
+}
+
 function App() {
   const [file, setFile] = useState<File | null>(null);
   const [pdfPreview, setPdfPreview] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [progressText, setProgressText] = useState('');
-  const [patterns, setPatterns] = useState<any[]>([]);
-  const [results, setResults] = useState<any[]>([]);
+  const [patterns, setPatterns] = useState<Pattern[]>([]);
+  const [legendReviewItems, setLegendReviewItems] = useState<LegendReviewItem[]>([]);
+  const [isLegendReviewOpen, setIsLegendReviewOpen] = useState(false);
+  const [legendCorrectionTarget, setLegendCorrectionTarget] = useState<LegendCorrectionTarget | null>(null);
+  const [results, setResults] = useState<ResultGroup[]>([]);
   const [boxes, setBoxes] = useState<DetectionBox[]>([]);
   const [focusedBoxId, setFocusedBoxId] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -169,11 +192,25 @@ function App() {
   const detectRequestSeqRef = useRef(0);
   const detectAbortRef = useRef<AbortController | null>(null);
 
+  const legendReviewCompleted = legendReviewItems.filter(item => item.status !== 'pending').length;
+  const hasLegendReview = legendReviewItems.length > 0;
+  const isLegendReviewComplete = !hasLegendReview || legendReviewCompleted === legendReviewItems.length;
+
+  const replacePattern = (oldId: string, pattern: Pattern) => {
+    setPatterns(prev => {
+      const index = prev.findIndex(item => (item.id ?? item.name) === oldId);
+      if (index === -1) return [...prev, pattern];
+      const next = [...prev];
+      next[index] = pattern;
+      return next;
+    });
+  };
+
   const fetchTemplates = async () => {
     try {
       const response = await fetch(withNoCache('/api/templates'), { cache: 'no-store' });
       if (response.ok) {
-        const data = await response.json();
+        const data = await response.json() as { patterns?: Pattern[] };
         setPatterns(data.patterns || []);
       }
     } catch (e) {
@@ -181,17 +218,17 @@ function App() {
     }
   };
 
-  useEffect(() => {
-    fetchTemplates();
-  }, []);
-
   // ── Handlery ────────────────────────────────────────────
 
   const handleFileSelect = async (selectedFile: File) => {
     setFile(selectedFile);
     setPdfPreview(null);
+    setPatterns([]);
     setResults([]);
     setBoxes([]);
+    setLegendReviewItems([]);
+    setIsLegendReviewOpen(false);
+    setLegendCorrectionTarget(null);
     setSessionId(null);
     setExcludedZones([]);
     setLegendZone(null);
@@ -262,8 +299,12 @@ function App() {
 
   const handleExtractLegend = async () => {
     if (!sessionId) return;
+    if (!legendZone) {
+      alert('Zaznacz strefę legendy na planie przed ekstrakcją (tryb Legenda na canvasie).');
+      return;
+    }
     setIsProcessing(true);
-    setProgressText(legendZone ? 'Ekstrakcja zaznaczonej legendy (300 DPI)...' : 'Ekstrakcja legendy (300 DPI)...');
+    setProgressText('Ekstrakcja legendy (300 DPI)...');
     try {
       const response = await fetch(withNoCache(`/api/extract-legend?session_id=${sessionId}`), {
         method: 'POST',
@@ -288,8 +329,19 @@ function App() {
         })
       });
       if (!response.ok) throw new Error('Błąd serwera');
-      const data = await response.json();
-      setPatterns(data.patterns);
+      const data = await response.json() as { patterns?: Pattern[]; pdfDiagnostics?: PdfDiagnostics };
+      const nextPatterns = data.patterns || [];
+      setPatterns(nextPatterns);
+      setLegendReviewItems(
+        nextPatterns.map(pattern => ({
+          id: pattern.id ?? pattern.name,
+          name: pattern.name,
+          imgBase64: pattern.imgBase64,
+          status: 'pending',
+        }))
+      );
+      setIsLegendReviewOpen(nextPatterns.length > 0);
+      setLegendCorrectionTarget(null);
       setPdfDiagnostics(data.pdfDiagnostics || pdfDiagnostics);
     } catch (error) {
       console.error(error);
@@ -302,6 +354,11 @@ function App() {
 
   const handleDetect = async () => {
     if (!sessionId) return;
+    if (!isLegendReviewComplete) {
+      setIsLegendReviewOpen(true);
+      alert('Sprawdź wszystkie wzorce legendy przed analizą.');
+      return;
+    }
     const detectStartedAt = performance.now();
     detectRequestSeqRef.current += 1;
     const requestSeq = detectRequestSeqRef.current;
@@ -334,7 +391,7 @@ function App() {
             window.clearInterval(progressTimer);
             progressTimer = null;
           }
-        } catch (_error) {
+        } catch {
           // Progress polling is best-effort; the analysis request remains authoritative.
         }
       }, 700);
@@ -419,10 +476,13 @@ function App() {
   const handleClear = async () => {
     try {
       await fetch(withNoCache('/api/clear'), { method: 'POST', cache: 'no-store' });
-    } catch (_e) { /* ignore */ }
+    } catch { /* ignore */ }
     setFile(null);
     setPdfPreview(null);
     setPatterns([]);
+    setLegendReviewItems([]);
+    setIsLegendReviewOpen(false);
+    setLegendCorrectionTarget(null);
     setResults([]);
     setBoxes([]);
     setLayers([]);
@@ -510,6 +570,9 @@ function App() {
     try {
       await fetch(withNoCache('/api/templates'), { method: 'DELETE', cache: 'no-store' });
       setPatterns([]);
+      setLegendReviewItems([]);
+      setIsLegendReviewOpen(false);
+      setLegendCorrectionTarget(null);
     } catch (e) {
       console.error('Błąd podczas czyszczenia bazy wiedzy', e);
     }
@@ -537,9 +600,151 @@ function App() {
       }
 
       setPatterns(prev => prev.filter((_, currentIndex) => currentIndex !== index));
+      setLegendReviewItems(prev => prev.filter(item => item.id !== templateId));
+      if (legendCorrectionTarget?.id === templateId) setLegendCorrectionTarget(null);
     } catch (error) {
       console.error('Błąd podczas usuwania wzorca', error);
       alert('Nie udało się usunąć wzorca z bazy wiedzy.');
+    }
+  };
+
+  const handleAcceptLegendItem = (id: string) => {
+    setLegendReviewItems(prev =>
+      prev.map(item => item.id === id ? { ...item, status: 'accepted' } : item)
+    );
+  };
+
+  const handleRejectLegendItem = async (id: string) => {
+    const reviewItem = legendReviewItems.find(item => item.id === id);
+    if (reviewItem && !reviewItem.imgBase64) {
+      setLegendReviewItems(prev =>
+        prev.map(item => item.id === id ? { ...item, status: 'rejected' } : item)
+      );
+      if (legendCorrectionTarget?.id === id) setLegendCorrectionTarget(null);
+      return;
+    }
+
+    try {
+      const response = await fetch(withNoCache(`/api/templates/${encodeURIComponent(id)}`), {
+        method: 'DELETE',
+        cache: 'no-store',
+      });
+      if (!response.ok) throw new Error('Nie udało się odrzucić wzorca');
+
+      setPatterns(prev => prev.filter(pattern => (pattern.id ?? pattern.name) !== id));
+      setLegendReviewItems(prev =>
+        prev.map(item => item.id === id ? { ...item, status: 'rejected' } : item)
+      );
+      if (legendCorrectionTarget?.id === id) setLegendCorrectionTarget(null);
+    } catch (error) {
+      console.error('Błąd podczas odrzucania wzorca', error);
+      alert('Nie udało się odrzucić wzorca.');
+    }
+  };
+
+  const handleRenameLegendItem = async (id: string, name: string) => {
+    if (!name.trim()) {
+      alert('Nazwa wzorca nie może być pusta.');
+      return;
+    }
+
+    try {
+      const response = await fetch(withNoCache(`/api/templates/${encodeURIComponent(id)}`), {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
+        body: JSON.stringify({ name: name.trim() }),
+      });
+      if (!response.ok) throw new Error('Nie udało się zmienić nazwy wzorca');
+      const data = await response.json() as { pattern?: Pattern };
+      const pattern = data.pattern;
+      if (!pattern) throw new Error('Brak wzorca w odpowiedzi backendu');
+
+      replacePattern(id, pattern);
+      setLegendReviewItems(prev =>
+        prev.map(item =>
+          item.id === id
+            ? { ...item, id: pattern.id, name: pattern.name, imgBase64: pattern.imgBase64 }
+            : item
+        )
+      );
+      setLegendCorrectionTarget(current =>
+        current?.id === id ? { id: pattern.id, name: pattern.name } : current
+      );
+    } catch (error) {
+      console.error('Błąd podczas zmiany nazwy wzorca', error);
+      alert('Nie udało się zmienić nazwy wzorca.');
+    }
+  };
+
+  const handleStartLegendCrop = (item: LegendReviewItem) => {
+    setIsLegendReviewOpen(true);
+    setLegendCorrectionTarget({ id: item.id, name: item.name });
+  };
+
+  const handleAddMissingLegendItem = () => {
+    const name = window.prompt('Nazwa brakującego wzorca');
+    if (!name?.trim()) return;
+
+    const id = `manual_${Date.now()}`;
+    const item: LegendReviewItem = {
+      id,
+      name: name.trim(),
+      imgBase64: '',
+      status: 'pending',
+    };
+    setLegendReviewItems(prev => [...prev, item]);
+    setIsLegendReviewOpen(true);
+    setLegendCorrectionTarget({ id, name: item.name });
+  };
+
+  const handleLegendTemplateCrop = async (x: number, y: number, width: number, height: number) => {
+    if (!sessionId || !legendCorrectionTarget) return;
+
+    const target = legendCorrectionTarget;
+    setIsProcessing(true);
+    setProgressText(`Zapisywanie wzorca ${target.name}...`);
+    try {
+      const response = await fetch(withNoCache(`/api/templates/${encodeURIComponent(target.id)}/crop`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
+        body: JSON.stringify({
+          session_id: sessionId,
+          x: Math.round(x),
+          y: Math.round(y),
+          width: Math.round(width),
+          height: Math.round(height),
+          name: target.id.startsWith('manual_') ? target.name : undefined,
+          hidden_layers: layers.filter(l => !l.visible).map(l => l.name),
+        }),
+      });
+      if (!response.ok) throw new Error('Nie udało się zapisać ręcznego cropa');
+      const data = await response.json() as { pattern?: Pattern };
+      const pattern = data.pattern;
+      if (!pattern) throw new Error('Brak wzorca w odpowiedzi backendu');
+
+      replacePattern(target.id, pattern);
+      setLegendReviewItems(prev => {
+        const nextItem: LegendReviewItem = {
+          id: pattern.id,
+          name: pattern.name,
+          imgBase64: pattern.imgBase64,
+          status: 'fixed',
+          correctedBBoxPx: pattern.correctedBBoxPx,
+        };
+        const exists = prev.some(item => item.id === target.id);
+        if (!exists) return [...prev, nextItem];
+        return prev.map(item => item.id === target.id ? nextItem : item);
+      });
+      setLegendCorrectionTarget(null);
+      setIsLegendReviewOpen(true);
+    } catch (error) {
+      console.error('Błąd podczas zapisu ręcznego cropa', error);
+      alert('Nie udało się zapisać poprawionego wzorca.');
+    } finally {
+      setIsProcessing(false);
+      setProgressText('');
     }
   };
 
@@ -599,6 +804,10 @@ function App() {
         progressText={progressText}
         analysisProgress={analysisProgress}
         patterns={patterns}
+        legendReviewTotal={legendReviewItems.length}
+        legendReviewCompleted={legendReviewCompleted}
+        isLegendReviewComplete={isLegendReviewComplete}
+        onOpenLegendReview={() => setIsLegendReviewOpen(true)}
         onUpdatePattern={handleUpdatePattern}
         onDeletePattern={handleDeletePattern}
         layers={layers}
@@ -637,7 +846,25 @@ function App() {
         grayDebugInfo={grayDebugZones}
         onToggleGrayDebugZones={handleToggleGrayZones}
         isGrayDebugLoading={isLoadingGrayZones}
+        legendTemplateCropTarget={legendCorrectionTarget}
+        onLegendTemplateCrop={handleLegendTemplateCrop}
+        onCancelLegendTemplateCrop={() => setLegendCorrectionTarget(null)}
       />
+
+      {isLegendReviewOpen && (
+        <LegendReviewPanel
+          items={legendReviewItems}
+          activeCorrectionId={legendCorrectionTarget?.id ?? null}
+          isProcessing={isProcessing}
+          onAccept={handleAcceptLegendItem}
+          onReject={handleRejectLegendItem}
+          onStartCrop={handleStartLegendCrop}
+          onCancelCrop={() => setLegendCorrectionTarget(null)}
+          onRename={handleRenameLegendItem}
+          onAddMissing={handleAddMissingLegendItem}
+          onClose={() => setIsLegendReviewOpen(false)}
+        />
+      )}
 
       {roiInspection && (
         <div

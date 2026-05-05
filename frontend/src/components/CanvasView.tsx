@@ -97,6 +97,9 @@ interface CanvasViewProps {
   symbolNames?: string[];
   onAddManualBox?: (box: Omit<Box, 'id' | 'color'> & { symbolName: string }) => void;
   onRejectBox?: (id: string) => void;
+  legendTemplateCropTarget?: { id: string; name: string } | null;
+  onLegendTemplateCrop?: (x: number, y: number, w: number, h: number) => void;
+  onCancelLegendTemplateCrop?: () => void;
 }
 
 export const CanvasView: React.FC<CanvasViewProps> = ({
@@ -122,20 +125,26 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
   symbolNames = [],
   onAddManualBox,
   onRejectBox,
+  legendTemplateCropTarget = null,
+  onLegendTemplateCrop,
+  onCancelLegendTemplateCrop,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState(1);
   const [position, setPosition] = useState({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+  const [isSpaceDown, setIsSpaceDown] = useState(false);
 
   // Tryb rysowania strefy wykluczonej, legendy, planu albo inspektora.
-  const [drawMode, setDrawMode] = useState<'none' | 'exclude' | 'legend' | 'plan' | 'inspect'>('none');
+  type DrawMode = 'none' | 'exclude' | 'legend' | 'plan' | 'inspect' | 'legend-template';
+  const [drawMode, setDrawMode] = useState<DrawMode>('none');
+  const activeDrawMode: DrawMode = legendTemplateCropTarget ? 'legend-template' : drawMode;
   const [isDrawing, setIsDrawing] = useState(false);
   const [drawStart, setDrawStart] = useState({ x: 0, y: 0 });
   const [drawCurrent, setDrawCurrent] = useState({ x: 0, y: 0 });
 
-  // Tryb rÄ™cznego dodawania symbolu
+  // Tryb ręcznego dodawania symbolu
   const [isManualMode, setIsManualMode] = useState(false);
   const [manualPos, setManualPos] = useState<{ x: number, y: number } | null>(null);
   const [manualSymbol, setManualSymbol] = useState('');
@@ -144,6 +153,8 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
   // Pulsowanie wybranej ramki
   const [pulsingId, setPulsingId] = useState<string | null>(null);
   const [copiedBoxId, setCopiedBoxId] = useState<string | null>(null);
+  const [isZooming, setIsZooming] = useState(false);
+  const zoomTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (imageSrc) {
@@ -151,6 +162,34 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
       setPosition({ x: 50, y: 50 });
     }
   }, [imageSrc]);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => e.preventDefault();
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.code === 'Space') {
+        const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
+        if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+        e.preventDefault();
+        setIsSpaceDown(true);
+      }
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.code === 'Space') setIsSpaceDown(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+    };
+  }, []);
 
   useEffect(() => {
     setPulsingId(null);
@@ -177,7 +216,7 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [focusedBoxId, onRejectBox]);
 
-  // Kiedy focusedBoxId siÄ™ zmienia â†’ animuj pan do tej ramki
+  // Kiedy focusedBoxId się zmienia, animuj pan do tej ramki.
   useEffect(() => {
     if (!focusedBoxId || !containerRef.current) return;
     const box = boxes.find(b => b.id === focusedBoxId);
@@ -196,10 +235,32 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
   }, [focusedBoxId]); // eslint-disable-line
 
   const handleWheel = (e: React.WheelEvent) => {
-    if (!imageSrc) return;
+    if (!imageSrc || !containerRef.current) return;
     e.preventDefault();
-    const delta = -e.deltaY * 0.001;
-    setScale(s => Math.min(Math.max(0.1, s * (1 + delta)), 5));
+
+    if (zoomTimerRef.current) clearTimeout(zoomTimerRef.current);
+    setIsZooming(true);
+    zoomTimerRef.current = setTimeout(() => setIsZooming(false), 150);
+
+    const rect = containerRef.current.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+
+    if (e.shiftKey) {
+      setPosition(p => ({ x: p.x - e.deltaY * 0.8, y: p.y }));
+      return;
+    }
+
+    const step = e.ctrlKey ? 1.05 : 1.15;
+    const factor = e.deltaY < 0 ? step : 1 / step;
+    setScale(s => {
+      const newScale = Math.min(Math.max(0.1, s * factor), 5);
+      setPosition(p => ({
+        x: mouseX - (mouseX - p.x) * (newScale / s),
+        y: mouseY - (mouseY - p.y) * (newScale / s),
+      }));
+      return newScale;
+    });
   };
 
   const getCanvasCoordinates = (clientX: number, clientY: number) => {
@@ -213,14 +274,20 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
 
   const handleMouseDown = (e: React.MouseEvent) => {
     if (!imageSrc) return;
-    if (isManualMode) {
+    // Środkowy przycisk lub Space + LPM → pan
+    if (e.button === 1 || (e.button === 0 && isSpaceDown)) {
+      e.preventDefault();
+      setIsDragging(true);
+      setDragStart({ x: e.clientX - position.x, y: e.clientY - position.y });
+      return;
+    }
+    if (isManualMode && !legendTemplateCropTarget) {
       const coords = getCanvasCoordinates(e.clientX, e.clientY);
       setManualPos(coords);
       if (symbolNames.length > 0 && !manualSymbol) setManualSymbol(symbolNames[0]);
-      // Nie starujemy drag
       return;
     }
-    if (drawMode !== 'none') {
+    if (activeDrawMode !== 'none') {
       setIsDrawing(true);
       const coords = getCanvasCoordinates(e.clientX, e.clientY);
       setDrawStart(coords);
@@ -232,7 +299,7 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
   };
 
   const handleMouseMove = (e: React.MouseEvent) => {
-    if (drawMode !== 'none' && isDrawing) {
+    if (activeDrawMode !== 'none' && isDrawing) {
       setDrawCurrent(getCanvasCoordinates(e.clientX, e.clientY));
     } else if (isDragging) {
       setPosition({ x: e.clientX - dragStart.x, y: e.clientY - dragStart.y });
@@ -240,16 +307,17 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
   };
 
   const handleMouseUp = () => {
-    if (drawMode !== 'none' && isDrawing) {
+    if (activeDrawMode !== 'none' && isDrawing) {
       setIsDrawing(false);
       const x = Math.min(drawStart.x, drawCurrent.x);
       const y = Math.min(drawStart.y, drawCurrent.y);
       const w = Math.abs(drawCurrent.x - drawStart.x);
       const h = Math.abs(drawCurrent.y - drawStart.y);
       if (w > 5 && h > 5) {
-        if (drawMode === 'legend') onSetLegendZone?.(x, y, w, h);
-        else if (drawMode === 'plan') onSetPlanZone?.(x, y, w, h);
-        else if (drawMode === 'inspect') onInspectZone?.(x, y, w, h);
+        if (activeDrawMode === 'legend') onSetLegendZone?.(x, y, w, h);
+        else if (activeDrawMode === 'plan') onSetPlanZone?.(x, y, w, h);
+        else if (activeDrawMode === 'inspect') onInspectZone?.(x, y, w, h);
+        else if (activeDrawMode === 'legend-template') onLegendTemplateCrop?.(x, y, w, h);
         else onAddExcludedZone?.(x, y, w, h);
       }
       setDrawMode('none');
@@ -262,9 +330,9 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
       <div className="workspace" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
         <div style={{ textAlign: 'center', color: 'var(--text-muted)' }}>
           <Move size={48} style={{ opacity: 0.2, marginBottom: 16 }} />
-          <h2>Brak podglÄ…du</h2>
+          <h2>Brak podglądu</h2>
           <p className="text-sm text-muted" style={{ marginTop: 8 }}>
-            Wgraj plan PDF i uruchom ekstrakcjÄ™ legendy.
+            Wgraj plan PDF i uruchom ekstrakcję legendy.
           </p>
         </div>
       </div>
@@ -283,6 +351,55 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
 
   const formatDebugValue = (value?: number, digits = 3) =>
     typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : 'n/a';
+
+  const toggleDrawMode = (mode: Exclude<DrawMode, 'none' | 'legend-template'>) => {
+    if (legendTemplateCropTarget) onCancelLegendTemplateCrop?.();
+    setDrawMode(current => current === mode ? 'none' : mode);
+  };
+
+  const drawModeAccent =
+    activeDrawMode === 'legend'
+      ? '#38bdf8'
+      : activeDrawMode === 'plan'
+      ? '#22c55e'
+      : activeDrawMode === 'inspect'
+      ? '#a78bfa'
+      : activeDrawMode === 'legend-template'
+      ? 'var(--accent-gold)'
+      : 'var(--accent-orange)';
+
+  const drawModeBackground =
+    activeDrawMode === 'legend'
+      ? 'rgba(14,165,233,0.92)'
+      : activeDrawMode === 'plan'
+      ? 'rgba(34,197,94,0.92)'
+      : activeDrawMode === 'inspect'
+      ? 'rgba(124,58,237,0.92)'
+      : activeDrawMode === 'legend-template'
+      ? 'rgba(198,168,124,0.94)'
+      : 'rgba(249,115,22,0.92)';
+
+  const drawModeFill =
+    activeDrawMode === 'legend'
+      ? 'rgba(14,165,233,0.12)'
+      : activeDrawMode === 'plan'
+      ? 'rgba(34,197,94,0.10)'
+      : activeDrawMode === 'inspect'
+      ? 'rgba(124,58,237,0.12)'
+      : activeDrawMode === 'legend-template'
+      ? 'rgba(198,168,124,0.16)'
+      : 'rgba(249,115,22,0.12)';
+
+  const drawModeHint =
+    activeDrawMode === 'legend'
+      ? 'Zaznacz obszar legendy'
+      : activeDrawMode === 'plan'
+      ? 'Zaznacz glowny obszar planu'
+      : activeDrawMode === 'inspect'
+      ? 'Zaznacz symbol do inspekcji'
+      : activeDrawMode === 'legend-template'
+      ? `Zaznacz wzorzec: ${legendTemplateCropTarget?.name ?? ''}`
+      : 'Zaznacz strefe wykluczona';
 
   const buildDebugPayload = (box: Box) => {
     const nearbyBoxes = boxes
@@ -354,7 +471,7 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
         setCopiedBoxId(current => (current === box.id ? null : current));
       }, 1600);
     } catch (error) {
-      console.error('Nie udaĹ‚o siÄ™ skopiowaÄ‡ debug info boxa', error);
+      console.error('Nie udało się skopiować debug info boxa', error);
     }
   };
 
@@ -379,8 +496,8 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
       <div style={{ position: 'absolute', top: 16, right: 16, zIndex: 20, display: 'flex', gap: 6 }}>
         <button
           className="btn-secondary"
-          onClick={() => setDrawMode(mode => mode === 'exclude' ? 'none' : 'exclude')}
-          title="Dodaj strefÄ™ wykluczonÄ…"
+          onClick={() => toggleDrawMode('exclude')}
+          title="Dodaj strefę wykluczoną"
           style={{
             borderColor: drawMode === 'exclude' ? 'var(--accent-orange)' : undefined,
             color: drawMode === 'exclude' ? 'var(--accent-orange)' : undefined,
@@ -394,7 +511,7 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
         </button>
         <button
           className="btn-secondary"
-          onClick={() => setDrawMode(mode => mode === 'legend' ? 'none' : 'legend')}
+          onClick={() => toggleDrawMode('legend')}
           title="Zaznacz strefe legendy"
           style={{
             borderColor: drawMode === 'legend' ? '#38bdf8' : undefined,
@@ -409,7 +526,7 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
         </button>
         <button
           className="btn-secondary"
-          onClick={() => setDrawMode(mode => mode === 'plan' ? 'none' : 'plan')}
+          onClick={() => toggleDrawMode('plan')}
           title="Zaznacz glowny obszar planu do analizy"
           style={{
             borderColor: drawMode === 'plan' ? '#22c55e' : undefined,
@@ -424,7 +541,7 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
         </button>
         <button
           className="btn-secondary"
-          onClick={() => setDrawMode(mode => mode === 'inspect' ? 'none' : 'inspect')}
+          onClick={() => toggleDrawMode('inspect')}
           title="Sprawdz, co silnik widzi w zaznaczonym fragmencie"
           style={{
             borderColor: drawMode === 'inspect' ? '#a78bfa' : undefined,
@@ -455,7 +572,7 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
         <button
           className="btn-secondary"
           onClick={() => setIsManualMode(value => !value)}
-          title="Dodaj symbol rÄ™cznie"
+          title="Dodaj symbol ręcznie"
           style={{
             borderColor: isManualMode ? 'var(--accent-gold)' : undefined,
             color: isManualMode ? 'var(--accent-gold)' : undefined,
@@ -484,6 +601,24 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
             Usun box
           </button>
         )}
+        {legendTemplateCropTarget && (
+          <button
+            className="btn-secondary"
+            onClick={onCancelLegendTemplateCrop}
+            title="Anuluj korektę wzorca"
+            style={{
+              borderColor: 'var(--accent-gold)',
+              color: 'var(--accent-gold)',
+              padding: '6px 10px',
+              fontSize: 11,
+              fontWeight: 700,
+              maxWidth: 170,
+            }}
+          >
+            <X size={14} />
+            {legendTemplateCropTarget.name}
+          </button>
+        )}
         <div style={{ width: 1, background: 'var(--border-light)', margin: '0 2px', alignSelf: 'stretch' }} />
         <button className="btn-secondary" style={{ padding: '6px 10px' }}
           onClick={() => setScale(s => Math.min(s * 1.2, 5))}>
@@ -500,26 +635,14 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
       </div>
 
       {/* Hint rysowania */}
-      {drawMode !== 'none' && (
+      {activeDrawMode !== 'none' && (
         <div style={{
           position: 'absolute', top: 64, left: '50%', transform: 'translateX(-50%)',
-          background: drawMode === 'legend'
-            ? 'rgba(14,165,233,0.92)'
-            : drawMode === 'plan'
-            ? 'rgba(34,197,94,0.92)'
-            : drawMode === 'inspect'
-            ? 'rgba(124,58,237,0.92)'
-            : 'rgba(249,115,22,0.92)', color: '#fff',
+          background: drawModeBackground, color: '#fff',
           padding: '6px 18px', borderRadius: 6, fontSize: 12, fontWeight: 700,
           zIndex: 20, pointerEvents: 'none',
         }}>
-          {drawMode === 'legend'
-            ? 'Zaznacz obszar legendy'
-            : drawMode === 'plan'
-            ? 'Zaznacz glowny obszar planu'
-            : drawMode === 'inspect'
-            ? 'Zaznacz symbol do inspekcji'
-            : 'Zaznacz strefe wykluczona'}
+          {drawModeHint}
         </div>
       )}
 
@@ -530,13 +653,13 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseUp}
-        style={{ cursor: drawMode !== 'none' ? 'crosshair' : (isDragging ? 'grabbing' : 'grab') }}
+        style={{ cursor: activeDrawMode !== 'none' ? 'crosshair' : isDragging ? 'grabbing' : isSpaceDown ? 'grab' : 'default' }}
       >
         <div
           style={{
             transform: `translate(${position.x}px, ${position.y}px) scale(${scale})`,
             position: 'absolute',
-            transition: isDragging || isDrawing ? 'none' : 'transform 0.25s ease-out',
+            transition: isDragging || isDrawing || isZooming ? 'none' : 'transform 0.25s ease-out',
             transformOrigin: '0 0',
           }}
         >
@@ -600,7 +723,7 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
                       border: 'none', cursor: 'pointer',
                       color: '#fff', display: 'flex', padding: 2, borderRadius: 3,
                     }}
-                    title="UsuĹ„ strefÄ™"
+                    title="Usuń strefę"
                   >
                     <X size={12} />
                   </button>
@@ -744,7 +867,7 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
                   animation: isPulsing ? 'boxPulse 0.5s ease-in-out 4' : 'none',
                 }}
               >
-                {/* Etykieta symbolu widoczna po najechaniu lub ciÄ…gle */}
+                {/* Etykieta symbolu widoczna po najechaniu lub ciągle */}
                 <div style={{
                   position: 'absolute',
                   top: -16,
@@ -759,8 +882,8 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
                   pointerEvents: 'none',
                   opacity: 0.8,
                 }}>
-                  {/* Ucinamy za dĹ‚ugie nazwy (np. z '.png' lub dĹ‚ugie) */}
-                  {(box as any).symbolName ? (box as any).symbolName.split('_')[0].substring(0, 15) : 'Symbol'}
+                  {/* Ucinamy za długie nazwy (np. z '.png' lub długie) */}
+                  {box.symbolName ? box.symbolName.split('_')[0].substring(0, 15) : 'Symbol'}
                 </div>
                 {copiedBoxId === box.id && (
                   <div style={{
@@ -785,34 +908,20 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
           })}
 
           {/* Drawing preview */}
-          {drawMode !== 'none' && isDrawing && (
+          {activeDrawMode !== 'none' && isDrawing && (
             <div style={{
               position: 'absolute',
               left: Math.min(drawStart.x, drawCurrent.x),
               top: Math.min(drawStart.y, drawCurrent.y),
               width: Math.abs(drawCurrent.x - drawStart.x),
               height: Math.abs(drawCurrent.y - drawStart.y),
-              border: `2px dashed ${
-                drawMode === 'legend'
-                  ? '#38bdf8'
-                  : drawMode === 'plan'
-                  ? '#22c55e'
-                  : drawMode === 'inspect'
-                  ? '#a78bfa'
-                  : 'var(--accent-orange)'
-              }`,
-              backgroundColor: drawMode === 'legend'
-                ? 'rgba(14,165,233,0.12)'
-                : drawMode === 'plan'
-                ? 'rgba(34,197,94,0.10)'
-                : drawMode === 'inspect'
-                ? 'rgba(124,58,237,0.12)'
-                : 'rgba(249,115,22,0.12)',
+              border: `2px dashed ${drawModeAccent}`,
+              backgroundColor: drawModeFill,
               pointerEvents: 'none',
             }} />
           )}
 
-          {/* RÄ™czne dodawanie - Modal */}
+          {/* Ręczne dodawanie - Modal */}
           {manualPos && (
             <div
               style={{
@@ -869,7 +978,7 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
             </div>
           )}
 
-          {/* PodglÄ…d dodawanego boxa */}
+          {/* Podgląd dodawanego boxa */}
           {manualPos && (
              <div style={{
                 position: 'absolute',
