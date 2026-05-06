@@ -119,7 +119,6 @@ def _detect_symbols_pipeline(
             hidden_layers=hidden_layers,
         )
         exclude_rects.extend(gray_title_exclude_rects)
-        exclude_rects.extend(gray_text_exclude_rects)
 
     color_masks_cache: dict[str, np.ndarray] = {}
     ink_mask_cache: np.ndarray | None = None

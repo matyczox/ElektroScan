@@ -749,6 +749,26 @@ def _hit_area(hit: CandidateHit) -> int:
     return max(1, hit.bbox[2] * hit.bbox[3])
 
 
+def _hit_center(hit: CandidateHit) -> tuple[float, float]:
+    x, y, width, height = hit.bbox
+    return x + width / 2.0, y + height / 2.0
+
+
+def _center_inside_bbox(
+    center: tuple[float, float],
+    bbox: tuple[int, int, int, int],
+    *,
+    margin_ratio: float = 0.04,
+) -> bool:
+    x, y = center
+    bx, by, bw, bh = bbox
+    pad_x = bw * margin_ratio
+    pad_y = bh * margin_ratio
+    return (bx - pad_x) <= x <= (bx + bw + pad_x) and (by - pad_y) <= y <= (
+        by + bh + pad_y
+    )
+
+
 def _is_gray_symbol_hit(hit: CandidateHit) -> bool:
     return hit.dominant_hsv is None and not hit.is_text_label
 
@@ -873,6 +893,38 @@ def _merge_duplicate_gray_rect_frames(
     return output, merged_count
 
 
+def _is_gray_rescue_blocked_by_existing(
+    hit: CandidateHit,
+    existing: CandidateHit,
+) -> bool:
+    """Do not resurrect small interior ghosts already defeated by clustering."""
+
+    if hit.dominant_hsv is not None or existing.dominant_hsv is not None:
+        return False
+    if existing.template_id == hit.template_id:
+        return False
+
+    hit_area = _hit_area(hit)
+    existing_area = _hit_area(existing)
+    if existing_area < hit_area * 2.4:
+        return False
+
+    inter_area, _iou, iom, center_distance = _bbox_metrics(hit.bbox, existing.bbox)
+    if inter_area <= 0:
+        return False
+
+    center_nested = _center_inside_bbox(_hit_center(hit), existing.bbox)
+    if not (iom >= 0.72 or (center_nested and center_distance <= 0.62)):
+        return False
+
+    if existing.verification_score < 0.50 and existing.match_score < 0.60:
+        return False
+
+    # True rescues have their own surrounding ink. Interior ghosts usually
+    # borrow the parent/label geometry, so their local context is much weaker.
+    return hit.context_purity <= 0.35 or hit.purity <= 0.55 or existing.is_text_label
+
+
 def rescue_validated_gray_frame_hits(
     final_hits: list[CandidateHit],
     validated_hits: list[CandidateHit],
@@ -888,7 +940,11 @@ def rescue_validated_gray_frame_hits(
             existing.template_id == hit.template_id and _same_physical_hit(existing, hit)
             for existing in final_hits + rescued
         )
-        if not duplicate:
+        blocked = any(
+            _is_gray_rescue_blocked_by_existing(hit, existing)
+            for existing in final_hits + rescued
+        )
+        if not duplicate and not blocked:
             rescued.append(hit)
 
     if not rescued:
