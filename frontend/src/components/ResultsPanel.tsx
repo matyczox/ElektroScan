@@ -59,7 +59,6 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
 }) => {
   const [activeTab, setActiveTab] = useState<'correction' | 'cost'>('correction');
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
-  const [minConfidence, setMinConfidence] = useState(0);
   const [prices, setPrices] = useState<Record<string, number>>({});
   const uploadRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
@@ -87,7 +86,7 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
   const getDisplayConfidence = (box: Box) => box.verificationScore ?? box.confidence;
 
   // Group boxes by symbolName, applying confidence filter
-  const filteredBoxes = boxes.filter(b => getDisplayConfidence(b) * 100 >= minConfidence);
+  const filteredBoxes = boxes;
   const boxesBySymbol: Record<string, Box[]> = {};
   filteredBoxes.forEach(b => {
     if (!boxesBySymbol[b.symbolName]) boxesBySymbol[b.symbolName] = [];
@@ -179,31 +178,6 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
           {/* KOREKTA TAB */}
           {activeTab === 'correction' && (
             <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
-
-              {/* Confidence Slider */}
-              <div className="card" style={{ padding: '12px 16px' }}>
-                <div className="flex-row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
-                  <span className="text-xs text-muted" style={{ textTransform: 'uppercase', fontWeight: 600 }}>
-                    Min. Pewność
-                  </span>
-                  <span className="text-xs" style={{ color: 'var(--accent-gold)', fontWeight: 700 }}>
-                    {minConfidence}%
-                  </span>
-                </div>
-                <input
-                  type="range"
-                  min={0}
-                  max={90}
-                  step={5}
-                  value={minConfidence}
-                  onChange={e => setMinConfidence(Number(e.target.value))}
-                  style={{ width: '100%', accentColor: 'var(--accent-gold)' }}
-                />
-                <div className="flex-row" style={{ justifyContent: 'space-between', marginTop: 4 }}>
-                  <span className="text-xs text-muted">0%</span>
-                  <span className="text-xs text-muted">90%</span>
-                </div>
-              </div>
 
               {/* Upload ręcznego wzorca */}
               <div>
