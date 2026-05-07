@@ -76,6 +76,17 @@ def _sanitize_filename(text: str) -> str:
     return text[:MAX_FILENAME_LENGTH].strip("_")
 
 
+def _next_template_index(output_path: Path) -> int:
+    """Return next numeric template prefix so repeated legend crops append."""
+    max_index = 0
+    if output_path.exists():
+        for existing in output_path.glob("*.png"):
+            match = re.match(r"^(\d+)_", existing.stem)
+            if match:
+                max_index = max(max_index, int(match.group(1)))
+    return max_index + 1
+
+
 def _hsv_mask(image_bgr: np.ndarray) -> np.ndarray:
     """Tworzy binarną maskę kolorowych pikseli (HSV)."""
     hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
@@ -757,7 +768,8 @@ def extract_legend(
         output_path.mkdir(parents=True, exist_ok=True)
         raw_symbols = _extract_table_legend_raw(legend_area, text_blocks, x_start, y_start, scale)
         results: list[ExtractedSymbol] = []
-        for counter, (symbol_image, name) in enumerate(raw_symbols, start=1):
+        start_index = _next_template_index(output_path)
+        for counter, (symbol_image, name) in enumerate(raw_symbols, start=start_index):
             filename = f"{counter:02d}_{name}.png"
             ok, buf = cv2.imencode(".png", symbol_image)
             if ok:
@@ -795,7 +807,7 @@ def extract_legend(
     output_path.mkdir(parents=True, exist_ok=True)
 
     results: list[ExtractedSymbol] = []
-    counter = 1
+    counter = _next_template_index(output_path)
 
     for contour in contours:
         x, y, w, h = cv2.boundingRect(contour)

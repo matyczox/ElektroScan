@@ -576,21 +576,16 @@ async def api_extract_legend(session_id: str, body: ExtractRequest = None):
             mask_mode=mask_mode,
         )
 
-        # Generujemy podgląd jeszcze raz na wypadek gdyby UI go potrzebowało w pełnej rozdz.
-        # Ale zwracamy wzorce.
+        # Zwracamy cala baze wzorcow, nie tylko aktualny crop legendy.
+        # Dzieki temu kolejne zaznaczenie legendy dopisuje symbole zamiast ukrywac poprzednie.
+        extracted_ids = {f"{s.index:02d}_{s.name}" for s in symbols}
         patterns_list = []
-        for s in symbols:
-            _, buffer_s = cv2.imencode(".png", s.image)
-            img_b64 = base64.b64encode(buffer_s).decode("utf-8")
-            template_id = f"{s.index:02d}_{s.name}"
-            patterns_list.append(
-                {
-                    "id": template_id,
-                    "name": s.name,
-                    "imgBase64": f"data:image/png;base64,{img_b64}",
-                    "status": "pending",
-                }
-            )
+        for template_path in sorted(TEMPLATES_DIR.glob("*.png")):
+            payload = _template_payload_from_path(template_path)
+            if payload is None:
+                continue
+            payload["status"] = "pending" if payload["id"] in extracted_ids else "existing"
+            patterns_list.append(payload)
 
         return {
             "patterns": patterns_list,
