@@ -48,6 +48,43 @@ def _is_content_scan_eligible(variant: TemplateVariant) -> bool:
     return content_crop.shape != variant.transformed_mask.shape
 
 
+def _select_spatially_fair_peaks(
+    peaks: list[tuple[int, int, float]],
+    *,
+    limit: int,
+    template_width: int,
+    template_height: int,
+) -> list[tuple[int, int, float]]:
+    """Keep high-scoring peaks spread across a large gray ROI."""
+
+    if len(peaks) <= limit:
+        return peaks
+
+    min_dx = max(1.0, float(template_width) * 0.70)
+    min_dy = max(1.0, float(template_height) * 0.70)
+    selected: list[tuple[int, int, float]] = []
+    selected_keys: set[tuple[int, int]] = set()
+    for peak in peaks:
+        px, py, _score = peak
+        if all(abs(px - sx) >= min_dx or abs(py - sy) >= min_dy for sx, sy, _ in selected):
+            selected.append(peak)
+            selected_keys.add((px, py))
+            if len(selected) >= limit:
+                break
+
+    if len(selected) < limit:
+        for peak in peaks:
+            key = (peak[0], peak[1])
+            if key in selected_keys:
+                continue
+            selected.append(peak)
+            if len(selected) >= limit:
+                break
+
+    selected.sort(key=lambda item: item[2], reverse=True)
+    return selected
+
+
 def scan_template_candidates(
     *,
     templates: list[TemplateInfo],
@@ -114,7 +151,12 @@ def scan_template_candidates(
                     spatial_fair_peaks
                     and len(peaks) > gray_strategy.gray_spatial_fair_peaks_per_roi()
                 ):
-                    peaks = peaks[: gray_strategy.gray_spatial_fair_peaks_per_roi()]
+                    peaks = _select_spatially_fair_peaks(
+                        peaks,
+                        limit=gray_strategy.gray_spatial_fair_peaks_per_roi(),
+                        template_width=variant.width,
+                        template_height=variant.height,
+                    )
                 if peaks:
                     variant_peaks.extend((roi_x + px, roi_y + py, score) for px, py, score in peaks)
                 if not spatial_fair_peaks and len(variant_peaks) > MAX_PEAKS_PER_VARIANT:
