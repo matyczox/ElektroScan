@@ -448,7 +448,8 @@ class RenderRequest(BaseModel):
 
 @app.post("/api/preview")
 async def api_preview(file: UploadFile = File(...)):
-    if not file.filename.endswith(".pdf"):
+    filename = file.filename or ""
+    if not filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Tylko pliki PDF są obsługiwane.")
 
     session_id = str(uuid.uuid4())
@@ -458,7 +459,7 @@ async def api_preview(file: UploadFile = File(...)):
     # Zapis
     with file_path.open("wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
-    _write_session_meta(session_id, source_pdf=file.filename or file_path.name)
+    _write_session_meta(session_id, source_pdf=filename or file_path.name)
 
     try:
         # Render podglądu (300 DPI — identycznie jak detekcja)
@@ -470,7 +471,7 @@ async def api_preview(file: UploadFile = File(...)):
         return {
             "planPreview": f"data:image/jpeg;base64,{plan_base64}",
             "sessionId": session_id,
-            "sourcePdf": file.filename or file_path.name,
+            "sourcePdf": filename or file_path.name,
             "pdfDiagnostics": pdf_diagnostics,
         }
     except Exception as e:
