@@ -11,7 +11,7 @@ DEFAULT_FOCUS_PREFIXES = ("06", "07", "10", "11", "12")
 
 
 def _load_boxes(path: Path) -> list[dict[str, Any]]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload = json.loads(path.read_text(encoding="utf-8-sig"))
     boxes = payload.get("boxes", [])
     if not isinstance(boxes, list):
         raise ValueError(f"{path} does not contain a list at key 'boxes'")
