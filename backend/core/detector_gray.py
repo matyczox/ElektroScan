@@ -579,16 +579,21 @@ def build_gray_search_rois(
             return rects
 
         tile_size = max(96, min(128, int(GRAY_SEARCH_TILE_SIZE)))
-        best_by_cell: dict[tuple[int, int], tuple[float, int, tuple[int, int, int, int]]] = {}
+        per_cell_limit = 2
+        best_by_cell: dict[
+            tuple[int, int],
+            list[tuple[float, int, tuple[int, int, int, int]]],
+        ] = {}
         for item in rects:
             score, area, (x, y, w, h) = item
             cell = (int((x + w / 2) // tile_size), int((y + h / 2) // tile_size))
-            existing = best_by_cell.get(cell)
-            if existing is None or (score, -area) < (existing[0], -existing[1]):
-                best_by_cell[cell] = item
+            bucket = best_by_cell.setdefault(cell, [])
+            bucket.append(item)
+            bucket.sort(key=lambda candidate: (candidate[0], -candidate[1]))
+            del bucket[per_cell_limit:]
 
         selected: list[tuple[float, int, tuple[int, int, int, int]]] = sorted(
-            best_by_cell.values(),
+            (item for bucket in best_by_cell.values() for item in bucket),
             key=lambda item: (item[0], -item[1]),
         )[:limit]
         selected_rects = {item[2] for item in selected}

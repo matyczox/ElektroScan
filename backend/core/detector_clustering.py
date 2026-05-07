@@ -17,6 +17,11 @@ from core.detector_config import (
     GRAY_FULLER_SYMBOL_MIN_AREA_RATIO,
     GRAY_FULLER_SYMBOL_MIN_COVERAGE,
     GRAY_FULLER_SYMBOL_MIN_PURITY,
+    GRAY_TINY_GEOMETRY_MAX_TEMPLATE_PIXELS,
+    GRAY_TINY_GEOMETRY_MIN_CONTEXT,
+    GRAY_TINY_GEOMETRY_MIN_COVERAGE,
+    GRAY_TINY_GEOMETRY_MIN_PURITY,
+    GRAY_TINY_GEOMETRY_MIN_VERIFICATION,
     PREFILTER_NMS_IOU_THRESHOLD,
     PREFILTER_NMS_MIN_CANDIDATES,
     PROMOTED_PARENT_MIN_AREA_RATIO,
@@ -358,6 +363,24 @@ def _maybe_prefer_fuller_text_label(
     )
 
 
+def _is_strong_tiny_gray_candidate(hit: CandidateHit) -> bool:
+    """Identify small gray symbols that already validate on their own geometry."""
+
+    if hit.dominant_hsv is not None or hit.is_text_label:
+        return False
+    if hit.pixel_count > GRAY_TINY_GEOMETRY_MAX_TEMPLATE_PIXELS:
+        return False
+    if hit.verification_score < GRAY_TINY_GEOMETRY_MIN_VERIFICATION:
+        return False
+    if hit.coverage < GRAY_TINY_GEOMETRY_MIN_COVERAGE:
+        return False
+    if hit.purity < GRAY_TINY_GEOMETRY_MIN_PURITY:
+        return False
+    if hit.context_purity < GRAY_TINY_GEOMETRY_MIN_CONTEXT:
+        return False
+    return True
+
+
 def _maybe_prefer_fuller_gray_symbol(
     group_hits: list[CandidateHit],
     base_winner: CandidateHit,
@@ -368,9 +391,17 @@ def _maybe_prefer_fuller_gray_symbol(
         return base_winner
 
     base_area = max(1, base_winner.bbox[2] * base_winner.bbox[3])
+    base_is_strong_tiny_gray = _is_strong_tiny_gray_candidate(base_winner)
     contenders: list[CandidateHit] = []
     for hit in group_hits:
         if hit is base_winner or hit.dominant_hsv is not None or hit.is_text_label:
+            continue
+
+        if (
+            base_is_strong_tiny_gray
+            and hit.template_id != base_winner.template_id
+            and hit.verification_score <= base_winner.verification_score + 0.02
+        ):
             continue
 
         area = max(1, hit.bbox[2] * hit.bbox[3])
@@ -442,6 +473,56 @@ def _select_cluster_winner(
     return base_winner
 
 
+def _overlaps_as_same_object(left: CandidateHit, right: CandidateHit) -> bool:
+    """Use direct geometry, not transitive cluster links, for satellite pruning."""
+
+    inter_area, iou, iom, center_distance = _bbox_metrics(left.bbox, right.bbox)
+    if inter_area <= 0:
+        return False
+
+    if iou >= CLUSTER_IOU_THRESHOLD:
+        return True
+
+    left_center = _box_center(left.bbox)
+    right_center = _box_center(right.bbox)
+    centers_nested = _center_inside_box(left_center, right.bbox) or _center_inside_box(
+        right_center,
+        left.bbox,
+    )
+    return (
+        iom >= max(0.35, CLUSTER_IOM_THRESHOLD * 0.70)
+        and centers_nested
+        and center_distance <= (CLUSTER_CENTER_DISTANCE_RATIO * 1.20)
+    )
+
+
+def _is_gray_satellite_candidate(hit: CandidateHit) -> bool:
+    """Keep tiny validated gray marks from being swallowed by bridge clusters."""
+
+    return _is_strong_tiny_gray_candidate(hit)
+
+
+def _select_cluster_satellites(
+    group_hits: list[CandidateHit],
+    winner: CandidateHit,
+) -> list[CandidateHit]:
+    """Return strong small gray hits connected only through a bridge candidate."""
+
+    satellites: list[CandidateHit] = []
+    for hit in sorted(group_hits, key=_candidate_rank_key, reverse=True):
+        if hit is winner:
+            continue
+        if not _is_gray_satellite_candidate(hit):
+            continue
+        if _overlaps_as_same_object(hit, winner):
+            continue
+        if any(_overlaps_as_same_object(hit, selected) for selected in satellites):
+            continue
+        satellites.append(hit)
+
+    return satellites
+
+
 def _cluster_candidates(
     candidates: list[CandidateHit],
     parent_ids_by_child: dict[int, set[int]] | None = None,
@@ -482,7 +563,9 @@ def _cluster_candidates(
 
     winners: list[CandidateHit] = []
     for group_hits in groups.values():
-        winners.append(_select_cluster_winner(group_hits, parent_ids_by_child))
+        winner = _select_cluster_winner(group_hits, parent_ids_by_child)
+        winners.append(winner)
+        winners.extend(_select_cluster_satellites(group_hits, winner))
 
     winners.sort(key=lambda hit: (hit.bbox[1], hit.bbox[0], -hit.verification_score))
     return winners
