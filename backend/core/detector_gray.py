@@ -578,7 +578,7 @@ def build_gray_search_rois(
         if len(rects) <= limit:
             return rects
 
-        tile_size = max(96, min(128, int(GRAY_SEARCH_TILE_SIZE)))
+        tile_size = max(192, min(256, int(GRAY_SEARCH_TILE_SIZE)))
         per_cell_limit = 2
         best_by_cell: dict[
             tuple[int, int],
@@ -989,9 +989,16 @@ def _is_gray_symbol_hit(hit: CandidateHit) -> bool:
 
 
 def _is_weak_gray_text_fragment(hit: CandidateHit) -> bool:
+    strong_label_geometry = (
+        hit.match_score >= 0.68
+        and hit.verification_score >= 0.60
+        and hit.coverage >= 0.94
+        and hit.purity >= 0.54
+    )
     return (
         hit.dominant_hsv is None
         and hit.is_text_label
+        and not strong_label_geometry
         and hit.context_purity <= GRAY_WEAK_LABEL_MAX_CONTEXT
         and hit.purity <= GRAY_WEAK_LABEL_MAX_PURITY
     )
