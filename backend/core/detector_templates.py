@@ -11,6 +11,10 @@ import cv2
 import numpy as np
 
 from core.detector_config import (
+    GRAY_DIAGONAL_ROTATION_MAX_TEMPLATE_PIXELS,
+    GRAY_DIAGONAL_ROTATION_MIN_ASPECT,
+    GRAY_DIAGONAL_ROTATION_MIN_SCALE,
+    GRAY_DIAGONAL_ROTATIONS,
     MIN_TEMPLATE_PIXELS,
     MIRRORED_VARIANT_PREFIXES,
     PDF_TEXT_MAX_TOKEN_LENGTH,
@@ -69,6 +73,8 @@ def _prepare_variants(
     template_id: int,
     template: TemplateInfo,
     scales: list[float] | tuple[float, ...] | None = None,
+    *,
+    include_gray_diagonal_rotations: bool = False,
 ) -> list[TemplateVariant]:
     """Precompute all scale/rotation variants for one template."""
 
@@ -76,6 +82,52 @@ def _prepare_variants(
     base_mask = template.mask
     template_prefix = _template_numeric_prefix(Path(template.path).name)
     allow_mirror = template.is_text_label or template_prefix in MIRRORED_VARIANT_PREFIXES
+
+    def _mask_aspect(mask: np.ndarray) -> float:
+        bbox = _mask_bbox(mask)
+        if bbox is None:
+            return 1.0
+        _x, _y, width, height = bbox
+        return max(width / max(1, height), height / max(1, width))
+
+    use_diagonal_rotations = (
+        include_gray_diagonal_rotations
+        and template.dominant_hsv is None
+        and not template.is_text_label
+        and template.pixel_count <= GRAY_DIAGONAL_ROTATION_MAX_TEMPLATE_PIXELS
+        and _mask_aspect(base_mask) >= GRAY_DIAGONAL_ROTATION_MIN_ASPECT
+    )
+    base_rotation_specs = list(ROTATIONS)
+    diagonal_rotation_specs = base_rotation_specs + [
+        (angle, None) for angle in GRAY_DIAGONAL_ROTATIONS
+    ]
+
+    def _rotate_mask(mask: np.ndarray | None, rotation: int, rotate_code) -> np.ndarray | None:
+        if mask is None:
+            return None
+        if rotate_code is not None:
+            return cv2.rotate(mask, rotate_code)
+        if rotation == 0:
+            return mask
+
+        height, width = mask.shape[:2]
+        center = (width / 2.0, height / 2.0)
+        matrix = cv2.getRotationMatrix2D(center, -float(rotation), 1.0)
+        cos = abs(matrix[0, 0])
+        sin = abs(matrix[0, 1])
+        new_width = int(round((height * sin) + (width * cos)))
+        new_height = int(round((height * cos) + (width * sin)))
+        matrix[0, 2] += (new_width / 2.0) - center[0]
+        matrix[1, 2] += (new_height / 2.0) - center[1]
+        rotated = cv2.warpAffine(
+            mask,
+            matrix,
+            (max(1, new_width), max(1, new_height)),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+        return ((rotated > 0) * 255).astype(np.uint8)
 
     scale_list = list(scales) if scales is not None else list(SCALES)
     for scale in scale_list:
@@ -92,6 +144,11 @@ def _prepare_variants(
             scaled_mask = base_mask
             scaled_content_mask = template.content_mask
 
+        rotation_specs = (
+            diagonal_rotation_specs
+            if use_diagonal_rotations and scale >= GRAY_DIAGONAL_ROTATION_MIN_SCALE
+            else base_rotation_specs
+        )
         mask_sources = [(False, scaled_mask)]
         if allow_mirror:
             mask_sources.append((True, cv2.flip(scaled_mask, 1)))
@@ -101,15 +158,11 @@ def _prepare_variants(
             if mirrored and source_content_mask is not None:
                 source_content_mask = cv2.flip(source_content_mask, 1)
 
-            for rotation, rotate_code in ROTATIONS:
-                rot_mask = (
-                    cv2.rotate(source_mask, rotate_code) if rotate_code is not None else source_mask
-                )
-                rot_content_mask = (
-                    cv2.rotate(source_content_mask, rotate_code)
-                    if rotate_code is not None and source_content_mask is not None
-                    else source_content_mask
-                )
+            for rotation, rotate_code in rotation_specs:
+                rot_mask = _rotate_mask(source_mask, rotation, rotate_code)
+                rot_content_mask = _rotate_mask(source_content_mask, rotation, rotate_code)
+                if rot_mask is None:
+                    continue
                 pixel_count = int(cv2.countNonZero(rot_mask))
                 if pixel_count == 0:
                     continue

@@ -989,11 +989,14 @@ def _is_gray_symbol_hit(hit: CandidateHit) -> bool:
 
 
 def _is_weak_gray_text_fragment(hit: CandidateHit) -> bool:
+    # Narrow text-label symbols can be real even with modest purity: nearby
+    # lettering and frames add foreground to the ROI.  Keep them when the
+    # template itself is almost perfectly covered and verification is strong.
     strong_label_geometry = (
         hit.match_score >= 0.68
         and hit.verification_score >= 0.60
         and hit.coverage >= 0.94
-        and hit.purity >= 0.54
+        and hit.purity >= 0.48
     )
     return (
         hit.dominant_hsv is None

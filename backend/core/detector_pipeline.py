@@ -186,7 +186,15 @@ def _detect_symbols_pipeline(
     with ThreadPoolExecutor(max_workers=variant_workers) as pool:
         prepared_variant_items = list(
             pool.map(
-                lambda item: (item[0], _prepare_variants(item[0], item[1], scales=used_scales)),
+                lambda item: (
+                    item[0],
+                    _prepare_variants(
+                        item[0],
+                        item[1],
+                        scales=used_scales,
+                        include_gray_diagonal_rotations=detector_profile == "gray",
+                    ),
+                ),
                 enumerate(templates),
             )
         )

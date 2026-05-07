@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "kind": "legend-fixture",
+  "name": "viking_bronisze_e10_gray",
+  "enabled": true,
+  "sourcePdf": "VIKING-BRONISZE-ELE-Rzuty-E10.pdf",
+  "pdfPath": "test_pdfs/VIKING-BRONISZE-ELE-Rzuty-E10.pdf",
+  "expectedProfile": "gray",
+  "analyzeProfile": "auto",
+  "detectorProfile": "gray",
+  "templatesDir": "templates",
+  "golden": "backend/tests/golden/viking_bronisze_e10_gray_third_pdf_accepted_90_95.json",
+  "templateCount": 11,
+  "focus": "01,02,03,04,05,06,07,08,09,10,11",
+  "centerTolerance": 28,
+  "sizeTolerance": 0.55,
+  "notes": [
+    "Templates copied from the accepted E10 legend extraction in the running backend container.",
+    "This fixture exists so regression tests do not depend on mutable backend/templates state.",
+    "E10 is an accepted 90-95 percent baseline; use forbidden/plan zones for title-block text noise instead of overfitting detector thresholds."
+  ]
+}

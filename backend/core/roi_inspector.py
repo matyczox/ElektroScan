@@ -185,7 +185,12 @@ def inspect_roi(
         if detector_profile == "gray":
             threshold = gray_strategy.gray_scan_threshold(template, threshold)
 
-        for variant in _prepare_variants(template_id, template, scales=used_scales):
+        for variant in _prepare_variants(
+            template_id,
+            template,
+            scales=used_scales,
+            include_gray_diagonal_rotations=detector_profile == "gray",
+        ):
             variant_count += 1
             if variant.width > w or variant.height > h:
                 continue

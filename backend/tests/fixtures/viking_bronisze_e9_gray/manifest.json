@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "kind": "legend-fixture",
+  "name": "viking_bronisze_e9_gray",
+  "enabled": true,
+  "sourcePdf": "VIKING-BRONISZE-ELE-Rzuty-E9.pdf",
+  "pdfPath": "test_pdfs/VIKING-BRONISZE-ELE-Rzuty-E9.pdf",
+  "expectedProfile": "gray",
+  "analyzeProfile": "auto",
+  "templatesDir": "templates",
+  "golden": "backend/tests/golden/viking_bronisze_e9_gray_second_pdf_idealny.json",
+  "templateCount": 17,
+  "focus": "01,02,03,04,07,08,11,12,13,14,15,16,17",
+  "centerTolerance": 24,
+  "sizeTolerance": 0.50,
+  "excludedZones": [
+    {
+      "x": 622,
+      "y": 261,
+      "width": 3127,
+      "height": 2810
+    },
+    {
+      "x": 8884,
+      "y": 4398,
+      "width": 1209,
+      "height": 3156
+    },
+    {
+      "x": 517,
+      "y": 584,
+      "width": 852,
+      "height": 2089
+    }
+  ],
+  "notes": [
+    "E9 uses forbidden zones for text/title areas that create irrelevant OCR-like false detections.",
+    "Latest accepted zone run matched the committed E9 golden 219/219.",
+    "Do not tune detector thresholds to remove those text areas; keep them as layout exclusions."
+  ]
+}

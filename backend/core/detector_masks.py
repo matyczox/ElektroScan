@@ -15,6 +15,20 @@ from core.detector_config import (
     GRAY_COMPLEX_GEOMETRY_MIN_CONTEXT,
     GRAY_COMPLEX_GEOMETRY_MIN_COVERAGE,
     GRAY_COMPLEX_GEOMETRY_MIN_PURITY,
+    GRAY_ANGLED_INK_MIN_CONTEXT,
+    GRAY_ANGLED_INK_MIN_COVERAGE,
+    GRAY_ANGLED_INK_MIN_MATCH,
+    GRAY_ANGLED_INK_MIN_PURITY,
+    GRAY_ANGLED_INK_MIN_SCALE,
+    GRAY_ANGLED_INK_STRONG_MIN_CONTEXT,
+    GRAY_ANGLED_INK_STRONG_MIN_MATCH,
+    GRAY_COHERENT_INK_MIN_CONTEXT,
+    GRAY_COHERENT_INK_MIN_COVERAGE,
+    GRAY_COHERENT_INK_ELONGATED_ASPECT,
+    GRAY_COHERENT_INK_ELONGATED_MIN_COVERAGE,
+    GRAY_COHERENT_INK_MIN_MATCH,
+    GRAY_COHERENT_INK_MIN_PURITY,
+    GRAY_COHERENT_INK_MIN_SCALE,
     GRAY_DARK_EVIDENCE_MIN_COVERAGE,
     GRAY_DARK_EVIDENCE_MIN_PIXELS,
     GRAY_LARGE_SCALE_PARTIAL_MAX_COVERAGE,
@@ -946,6 +960,35 @@ def _validate_template_hit(
         _record("centroid_offset")
         return False
 
+    hit_aspect = max(hit.bbox[2] / max(1, hit.bbox[3]), hit.bbox[3] / max(1, hit.bbox[2]))
+    coherent_ink_geometry = (
+        hit.dominant_hsv is None
+        and hit.scale >= GRAY_COHERENT_INK_MIN_SCALE
+        and hit.match_score >= GRAY_COHERENT_INK_MIN_MATCH
+        and coverage >= GRAY_COHERENT_INK_MIN_COVERAGE
+        and purity >= GRAY_COHERENT_INK_MIN_PURITY
+        and context_purity >= GRAY_COHERENT_INK_MIN_CONTEXT
+        and (
+            hit_aspect < GRAY_COHERENT_INK_ELONGATED_ASPECT
+            or coverage >= GRAY_COHERENT_INK_ELONGATED_MIN_COVERAGE
+        )
+    )
+    angled_ink_geometry = (
+        hit.dominant_hsv is None
+        and not hit.is_text_label
+        and hit.rotation % 90 != 0
+        and hit.scale >= GRAY_ANGLED_INK_MIN_SCALE
+        and hit.match_score >= GRAY_ANGLED_INK_MIN_MATCH
+        and coverage >= GRAY_ANGLED_INK_MIN_COVERAGE
+        and purity >= GRAY_ANGLED_INK_MIN_PURITY
+        and (
+            context_purity >= GRAY_ANGLED_INK_MIN_CONTEXT
+            or (
+                hit.match_score >= GRAY_ANGLED_INK_STRONG_MIN_MATCH
+                and context_purity >= GRAY_ANGLED_INK_STRONG_MIN_CONTEXT
+            )
+        )
+    )
     strong_gray_geometry = (
         hit.dominant_hsv is None
         and hit.match_score >= GRAY_STRONG_GEOMETRY_MIN_MATCH
@@ -968,7 +1011,7 @@ def _validate_template_hit(
         and coverage >= GRAY_MID_GEOMETRY_MIN_COVERAGE
         and purity >= GRAY_MID_GEOMETRY_MIN_PURITY
         and context_purity >= GRAY_MID_GEOMETRY_MIN_CONTEXT
-    )
+    ) or coherent_ink_geometry or angled_ink_geometry
     if gray_evidence_failed and not strong_gray_geometry:
         _record("gray_dark_evidence")
         return False

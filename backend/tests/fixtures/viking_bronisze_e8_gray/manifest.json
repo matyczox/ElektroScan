@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "kind": "legend-fixture",
+  "name": "viking_bronisze_e8_gray",
+  "enabled": true,
+  "sourcePdf": "VIKING-BRONISZE-ELE-Rzuty-E8.pdf",
+  "pdfPath": "test_pdfs/VIKING-BRONISZE-ELE-Rzuty-E8.pdf",
+  "expectedProfile": "gray",
+  "analyzeProfile": "auto",
+  "templatesDir": "templates",
+  "golden": "backend/tests/golden/viking_bronisze_e8_gray_first_pdf_100pct.json",
+  "templateCount": 7,
+  "focus": "01,02,03,04,05,06,07",
+  "centerTolerance": 20,
+  "sizeTolerance": 0.45,
+  "notes": [
+    "First accepted gray Viking baseline.",
+    "Templates copied from the accepted E8 backend/templates state."
+  ]
+}
