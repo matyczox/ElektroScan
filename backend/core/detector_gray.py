@@ -78,6 +78,15 @@ from core.detector_config import (
     GRAY_STRONG_TRACE_MAX_ITEMS,
     GRAY_SUPPRESS_HORIZONTAL_KERNEL_PX,
     GRAY_SUPPRESS_VERTICAL_KERNEL_PX,
+    GRAY_TINY_GEOMETRY_MAX_SCALE,
+    GRAY_TINY_GEOMETRY_MAX_TEMPLATE_PIXELS,
+    GRAY_TINY_GEOMETRY_MIN_CONTEXT,
+    GRAY_TINY_GEOMETRY_MIN_COVERAGE,
+    GRAY_TINY_GEOMETRY_MIN_MATCH,
+    GRAY_TINY_GEOMETRY_MIN_PURITY,
+    GRAY_TINY_GEOMETRY_MIN_VERIFICATION,
+    GRAY_WEAK_LABEL_MAX_CONTEXT,
+    GRAY_WEAK_LABEL_MAX_PURITY,
 )
 from core.detector_masks import _context_purity, _ink_mask, _suppress_long_strokes
 from core.detector_models import CandidateHit, TemplateInfo
@@ -886,6 +895,22 @@ def _is_mid_gray_geometry_hit(hit: CandidateHit) -> bool:
     )
 
 
+def _is_tiny_gray_geometry_hit(hit: CandidateHit) -> bool:
+    """Rescue compact gray symbols that are real but score just below 0.60."""
+
+    return (
+        hit.dominant_hsv is None
+        and not hit.is_text_label
+        and hit.pixel_count <= GRAY_TINY_GEOMETRY_MAX_TEMPLATE_PIXELS
+        and hit.scale <= GRAY_TINY_GEOMETRY_MAX_SCALE
+        and hit.match_score >= GRAY_TINY_GEOMETRY_MIN_MATCH
+        and hit.verification_score >= GRAY_TINY_GEOMETRY_MIN_VERIFICATION
+        and hit.coverage >= GRAY_TINY_GEOMETRY_MIN_COVERAGE
+        and hit.purity >= GRAY_TINY_GEOMETRY_MIN_PURITY
+        and hit.context_purity >= GRAY_TINY_GEOMETRY_MIN_CONTEXT
+    )
+
+
 def _is_strong_gray_label_geometry_hit(hit: CandidateHit) -> bool:
     """Rescue large text/label templates only when they are very clean."""
 
@@ -910,6 +935,7 @@ def _is_gray_frame_validated_rescue_hit(
     if (
         _is_complex_gray_geometry_hit(hit)
         or _is_mid_gray_geometry_hit(hit)
+        or _is_tiny_gray_geometry_hit(hit)
         or _is_strong_gray_label_geometry_hit(hit)
     ):
         return True
@@ -955,6 +981,15 @@ def _center_inside_bbox(
 
 def _is_gray_symbol_hit(hit: CandidateHit) -> bool:
     return hit.dominant_hsv is None and not hit.is_text_label
+
+
+def _is_weak_gray_text_fragment(hit: CandidateHit) -> bool:
+    return (
+        hit.dominant_hsv is None
+        and hit.is_text_label
+        and hit.context_purity <= GRAY_WEAK_LABEL_MAX_CONTEXT
+        and hit.purity <= GRAY_WEAK_LABEL_MAX_PURITY
+    )
 
 
 def _is_gray_rect_frame_hit(hit: CandidateHit, templates: list[TemplateInfo]) -> bool:
@@ -1198,6 +1233,12 @@ def _dedupe_gray_overlapping_alternatives(hits: list[CandidateHit]) -> list[Cand
     return [hit for index, hit in enumerate(hits) if index in keep]
 
 
+def _filter_weak_gray_text_fragments(hits: list[CandidateHit]) -> list[CandidateHit]:
+    """Drop label fragments that only explain a thin slice of a larger symbol."""
+
+    return [hit for hit in hits if not _is_weak_gray_text_fragment(hit)]
+
+
 def _merge_duplicate_gray_rect_frames(
     hits: list[CandidateHit],
     templates: list[TemplateInfo],
@@ -1290,6 +1331,10 @@ def _is_gray_rescue_blocked_by_existing(
 
     if _compact_gray_hit_beats_large_partial(hit, existing):
         return False
+    if _is_weak_gray_text_fragment(existing) and (
+        _is_tiny_gray_geometry_hit(hit) or _is_mid_gray_geometry_hit(hit)
+    ):
+        return False
 
     hit_area = _hit_area(hit)
     existing_area = _hit_area(existing)
@@ -1335,12 +1380,14 @@ def rescue_validated_gray_frame_hits(
             rescued.append(hit)
 
     if not rescued:
-        suppressed = _suppress_nested_gray_core_hits(final_hits)
+        suppressed = _filter_weak_gray_text_fragments(final_hits)
+        suppressed = _suppress_nested_gray_core_hits(suppressed)
         suppressed = _dedupe_gray_overlapping_alternatives(suppressed)
         merged, _merged_count = _merge_duplicate_gray_rect_frames(suppressed, templates)
         return merged, 0
 
     combined = final_hits + rescued
+    combined = _filter_weak_gray_text_fragments(combined)
     combined = _suppress_nested_gray_core_hits(combined)
     combined = _dedupe_gray_overlapping_alternatives(combined)
     combined, _merged_count = _merge_duplicate_gray_rect_frames(combined, templates)
