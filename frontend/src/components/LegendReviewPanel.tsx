@@ -16,6 +16,7 @@ interface LegendReviewPanelProps {
   activeCorrectionId?: string | null;
   isProcessing?: boolean;
   onAccept: (id: string) => void;
+  onAcceptAll: () => void;
   onReject: (id: string) => void;
   onStartCrop: (item: LegendReviewItem) => void;
   onCancelCrop: () => void;
@@ -77,6 +78,7 @@ export const LegendReviewPanel: React.FC<LegendReviewPanelProps> = ({
   activeCorrectionId = null,
   isProcessing = false,
   onAccept,
+  onAcceptAll,
   onReject,
   onStartCrop,
   onCancelCrop,
@@ -86,7 +88,13 @@ export const LegendReviewPanel: React.FC<LegendReviewPanelProps> = ({
 }) => {
   const progress = useMemo(() => {
     const completed = items.filter(item => item.status !== 'pending').length;
-    return { completed, total: items.length };
+    const acceptable = items.filter(
+      item => item.status !== 'rejected' && Boolean(item.imgBase64)
+    ).length;
+    const accepted = items.filter(
+      item => item.status === 'accepted' || item.status === 'fixed'
+    ).length;
+    return { acceptable, accepted, completed, total: items.length };
   }, [items]);
 
   const activeItem = activeCorrectionId
@@ -121,10 +129,20 @@ export const LegendReviewPanel: React.FC<LegendReviewPanelProps> = ({
         </div>
       )}
 
-      <button className="btn-secondary" onClick={onAddMissing} disabled={isProcessing}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 8 }}>
+        <button
+          className="btn-secondary"
+          onClick={onAcceptAll}
+          disabled={isProcessing || progress.accepted >= progress.acceptable}
+        >
+          <Check size={16} />
+          Akceptuj wszystkie
+        </button>
+        <button className="btn-secondary" onClick={onAddMissing} disabled={isProcessing}>
         <Plus size={16} />
         Dodaj brakujący wzorzec
-      </button>
+        </button>
+      </div>
 
       <div className="legend-review-list">
         {items.map(item => {

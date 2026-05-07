@@ -23,6 +23,7 @@ const renderPanel = (items = baseItems, overrides = {}) => {
     activeCorrectionId: null,
     isProcessing: false,
     onAccept: vi.fn(),
+    onAcceptAll: vi.fn(),
     onReject: vi.fn(),
     onStartCrop: vi.fn(),
     onCancelCrop: vi.fn(),

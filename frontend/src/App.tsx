@@ -614,6 +614,17 @@ function App() {
     );
   };
 
+  const handleAcceptAllLegendItems = () => {
+    setLegendReviewItems(prev =>
+      prev.map(item =>
+        item.status !== 'rejected' && item.imgBase64
+          ? { ...item, status: 'accepted' }
+          : item
+      )
+    );
+    setLegendCorrectionTarget(null);
+  };
+
   const handleRejectLegendItem = async (id: string) => {
     const reviewItem = legendReviewItems.find(item => item.id === id);
     if (reviewItem && !reviewItem.imgBase64) {
@@ -857,6 +868,7 @@ function App() {
           activeCorrectionId={legendCorrectionTarget?.id ?? null}
           isProcessing={isProcessing}
           onAccept={handleAcceptLegendItem}
+          onAcceptAll={handleAcceptAllLegendItems}
           onReject={handleRejectLegendItem}
           onStartCrop={handleStartLegendCrop}
           onCancelCrop={() => setLegendCorrectionTarget(null)}

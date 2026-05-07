@@ -12,12 +12,22 @@ from core.detector_config import (
     COLOR_VAL_TOLERANCE,
     CONTEXT_MARGIN_RATIO,
     DILATE_KERNEL,
+    GRAY_COMPLEX_GEOMETRY_MIN_CONTEXT,
+    GRAY_COMPLEX_GEOMETRY_MIN_COVERAGE,
+    GRAY_COMPLEX_GEOMETRY_MIN_PURITY,
     GRAY_DARK_EVIDENCE_MIN_COVERAGE,
     GRAY_DARK_EVIDENCE_MIN_PIXELS,
     GRAY_LARGE_SCALE_PARTIAL_MAX_COVERAGE,
     GRAY_LARGE_SCALE_PARTIAL_MIN_CONTEXT,
     GRAY_LARGE_SCALE_PARTIAL_MIN_PURITY,
     GRAY_LARGE_SCALE_PARTIAL_MIN_SCALE,
+    GRAY_MID_GEOMETRY_MIN_CONTEXT,
+    GRAY_MID_GEOMETRY_MIN_COVERAGE,
+    GRAY_MID_GEOMETRY_MIN_MATCH,
+    GRAY_MID_GEOMETRY_MIN_PURITY,
+    GRAY_MID_GEOMETRY_MIN_TEMPLATE_PIXELS,
+    GRAY_RAW_SCAN_MIN_TEMPLATE_PIXELS,
+    GRAY_RAW_SCAN_THRESHOLD,
     GRAY_RECT_FRAME_MAX_CENTER_DENSITY,
     GRAY_RECT_FRAME_MAX_DENSITY,
     GRAY_RECT_FRAME_MIN_ASPECT,
@@ -944,6 +954,20 @@ def _validate_template_hit(
     ) or (
         strong_gray_elongated_geometry
         and hit.match_score >= GRAY_STRONG_GEOMETRY_MIN_MATCH
+    ) or (
+        hit.dominant_hsv is None
+        and hit.pixel_count >= GRAY_RAW_SCAN_MIN_TEMPLATE_PIXELS
+        and hit.match_score >= GRAY_RAW_SCAN_THRESHOLD
+        and coverage >= GRAY_COMPLEX_GEOMETRY_MIN_COVERAGE
+        and purity >= GRAY_COMPLEX_GEOMETRY_MIN_PURITY
+        and context_purity >= GRAY_COMPLEX_GEOMETRY_MIN_CONTEXT
+    ) or (
+        hit.dominant_hsv is None
+        and hit.pixel_count >= GRAY_MID_GEOMETRY_MIN_TEMPLATE_PIXELS
+        and hit.match_score >= GRAY_MID_GEOMETRY_MIN_MATCH
+        and coverage >= GRAY_MID_GEOMETRY_MIN_COVERAGE
+        and purity >= GRAY_MID_GEOMETRY_MIN_PURITY
+        and context_purity >= GRAY_MID_GEOMETRY_MIN_CONTEXT
     )
     if gray_evidence_failed and not strong_gray_geometry:
         _record("gray_dark_evidence")
