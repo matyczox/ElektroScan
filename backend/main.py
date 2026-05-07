@@ -563,7 +563,9 @@ async def api_extract_legend(session_id: str, body: ExtractRequest = None):
             )
 
         _log("Ekstrakcja legendy...")
-        _clear_directory_contents(TEMPLATES_DIR)
+        # Nie czyscimy automatycznie katalogu wzorcow przy ponownej ekstrakcji.
+        # Uzytkownik moze miec juz zaakceptowane symbole z poprzedniego cropa legendy;
+        # nowe wykrycia nadpisza swoje pliki po id, a brakujace stare wzorce zostaja.
 
         symbols = extract_legend(
             str(file_path),

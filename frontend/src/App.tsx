@@ -7,6 +7,7 @@ import './index.css';
 
 const API_BASE = 'http://127.0.0.1:8000';
 const withNoCache = (path: string) => `${API_BASE}${path}${path.includes('?') ? '&' : '?'}_ts=${Date.now()}`;
+const getPatternKey = (pattern: Pick<Pattern, 'id' | 'name'>) => pattern.id ?? pattern.name;
 
 type DetectorProfile = 'auto' | 'color' | 'gray';
 
@@ -331,16 +332,32 @@ function App() {
       if (!response.ok) throw new Error('Błąd serwera');
       const data = await response.json() as { patterns?: Pattern[]; pdfDiagnostics?: PdfDiagnostics };
       const nextPatterns = data.patterns || [];
-      setPatterns(nextPatterns);
-      setLegendReviewItems(
-        nextPatterns.map(pattern => ({
-          id: pattern.id ?? pattern.name,
-          name: pattern.name,
-          imgBase64: pattern.imgBase64,
-          status: 'pending',
-        }))
-      );
-      setIsLegendReviewOpen(nextPatterns.length > 0);
+      setPatterns(prev => {
+        const merged = new Map<string, Pattern>();
+        for (const pattern of prev) merged.set(getPatternKey(pattern), pattern);
+        for (const pattern of nextPatterns) merged.set(getPatternKey(pattern), pattern);
+        return Array.from(merged.values());
+      });
+      setLegendReviewItems(prev => {
+        const previousById = new Map(prev.map(item => [item.id, item]));
+        const merged = new Map<string, LegendReviewItem>();
+
+        for (const item of prev) merged.set(item.id, item);
+        for (const pattern of nextPatterns) {
+          const id = getPatternKey(pattern);
+          const previous = previousById.get(id);
+          merged.set(id, {
+            id,
+            name: pattern.name,
+            imgBase64: pattern.imgBase64,
+            status: previous?.status ?? 'pending',
+            correctedBBoxPx: pattern.correctedBBoxPx ?? previous?.correctedBBoxPx,
+          });
+        }
+
+        return Array.from(merged.values());
+      });
+      setIsLegendReviewOpen(prev => prev || nextPatterns.length > 0 || legendReviewItems.length > 0);
       setLegendCorrectionTarget(null);
       setPdfDiagnostics(data.pdfDiagnostics || pdfDiagnostics);
     } catch (error) {
