@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+from dataclasses import dataclass
+
 import cv2
 import numpy as np
 
@@ -106,6 +109,102 @@ from core.detector_config import (
     ROI_PADDING_RATIO,
 )
 from core.detector_models import CandidateHit
+
+
+@dataclass(slots=True)
+class ValidationMaskCache:
+    """Per-validation-run cache for template-mask derived metrics."""
+
+    normalized_masks: dict[int, np.ndarray]
+    normalized_pixels: dict[int, int]
+    centroids: dict[int, tuple[float, float] | None]
+    content_bboxes: dict[int, tuple[int, int, int, int] | None]
+    foreground_integrals: dict[int, np.ndarray]
+
+    @classmethod
+    def build(
+        cls,
+        hits: list[CandidateHit],
+        plan_masks: Iterable[np.ndarray] = (),
+    ) -> "ValidationMaskCache":
+        transformed_masks: dict[int, np.ndarray] = {}
+        content_masks: dict[int, np.ndarray] = {}
+        for hit in hits:
+            if hit.transformed_mask is not None:
+                transformed_masks[id(hit.transformed_mask)] = hit.transformed_mask
+            if hit.content_mask is not None:
+                content_masks[id(hit.content_mask)] = hit.content_mask
+
+        foreground_integrals: dict[int, np.ndarray] = {}
+        for mask in plan_masks:
+            if not isinstance(mask, np.ndarray):
+                continue
+            mask_id = id(mask)
+            if mask_id in foreground_integrals:
+                continue
+            foreground_integrals[mask_id] = cv2.integral(
+                (mask > 0).astype(np.uint8, copy=False),
+                sdepth=cv2.CV_32S,
+            )
+
+        normalized_masks: dict[int, np.ndarray] = {}
+        normalized_pixels: dict[int, int] = {}
+        centroids: dict[int, tuple[float, float] | None] = {}
+        for mask_id, mask in transformed_masks.items():
+            normalized = _thickness_normalized_mask(mask)
+            normalized_masks[mask_id] = normalized
+            normalized_pixels[mask_id] = max(1, int(cv2.countNonZero(normalized)))
+            centroids[mask_id] = _mask_centroid(mask)
+
+        return cls(
+            normalized_masks=normalized_masks,
+            normalized_pixels=normalized_pixels,
+            centroids=centroids,
+            content_bboxes={
+                mask_id: _mask_bbox(mask)
+                for mask_id, mask in content_masks.items()
+            },
+            foreground_integrals=foreground_integrals,
+        )
+
+    def normalized_mask(self, mask: np.ndarray) -> np.ndarray:
+        cached = self.normalized_masks.get(id(mask))
+        if cached is not None:
+            return cached
+        return _thickness_normalized_mask(mask)
+
+    def normalized_pixel_count(self, mask: np.ndarray) -> int:
+        cached = self.normalized_pixels.get(id(mask))
+        if cached is not None:
+            return cached
+        return max(1, int(cv2.countNonZero(self.normalized_mask(mask))))
+
+    def centroid(self, mask: np.ndarray) -> tuple[float, float] | None:
+        cached = self.centroids.get(id(mask))
+        if id(mask) in self.centroids:
+            return cached
+        return _mask_centroid(mask)
+
+    def content_bbox(self, mask: np.ndarray) -> tuple[int, int, int, int] | None:
+        cached = self.content_bboxes.get(id(mask))
+        if id(mask) in self.content_bboxes:
+            return cached
+        return _mask_bbox(mask)
+
+    def foreground_count(
+        self,
+        mask: np.ndarray,
+        bbox: tuple[int, int, int, int],
+    ) -> int:
+        integral = self.foreground_integrals.get(id(mask))
+        if integral is None:
+            roi = _roi_mask(mask, bbox)
+            return 0 if roi is None else int(cv2.countNonZero(roi))
+
+        x, y, w, h = bbox
+        x2 = x + w
+        y2 = y + h
+        return int(integral[y2, x2] - integral[y, x2] - integral[y2, x] + integral[y, x])
 
 
 def _clamp_bbox(
@@ -452,6 +551,7 @@ def _label_content_score(
     roi: np.ndarray,
     template_content_mask: np.ndarray | None,
     template_content_pixels: int,
+    validation_cache: ValidationMaskCache | None = None,
 ) -> float:
     """Score how well the ROI matches the template glyph mask, ignoring frame strokes."""
 
@@ -460,7 +560,11 @@ def _label_content_score(
     if roi.shape != template_content_mask.shape:
         return 0.0
 
-    content_bbox = _mask_bbox(template_content_mask)
+    content_bbox = (
+        validation_cache.content_bbox(template_content_mask)
+        if validation_cache is not None
+        else _mask_bbox(template_content_mask)
+    )
     if content_bbox is None:
         return 0.0
 
@@ -767,6 +871,9 @@ def _context_purity(
     plan_mask: np.ndarray,
     bbox: tuple[int, int, int, int],
     intersection_mask: np.ndarray,
+    *,
+    explained_pixels: int | None = None,
+    validation_cache: ValidationMaskCache | None = None,
 ) -> float:
     """Measure how much local foreground around the hit is explained by the template."""
 
@@ -778,15 +885,20 @@ def _context_purity(
     x1 = min(plan_mask.shape[1], x + w + margin)
     y1 = min(plan_mask.shape[0], y + h + margin)
 
-    context_mask = plan_mask[y0:y1, x0:x1]
-    if context_mask.size == 0:
+    context_bbox = (x0, y0, x1 - x0, y1 - y0)
+    if context_bbox[2] <= 0 or context_bbox[3] <= 0:
         return 0.0
 
-    context_foreground = int(cv2.countNonZero(context_mask))
+    context_foreground = (
+        validation_cache.foreground_count(plan_mask, context_bbox)
+        if validation_cache is not None
+        else int(cv2.countNonZero(plan_mask[y0:y1, x0:x1]))
+    )
     if context_foreground == 0:
         return 0.0
 
-    explained_pixels = int(cv2.countNonZero(intersection_mask))
+    if explained_pixels is None:
+        explained_pixels = int(cv2.countNonZero(intersection_mask))
     return explained_pixels / context_foreground
 
 
@@ -798,6 +910,7 @@ def _validate_template_hit(
     plan_hsv: np.ndarray | None = None,
     evidence_mask: np.ndarray | None = None,
     relaxed_evidence_mask: np.ndarray | None = None,
+    validation_cache: ValidationMaskCache | None = None,
 ) -> bool:
     """Validate a candidate by foreground overlap, purity and hue consistency.
 
@@ -817,7 +930,11 @@ def _validate_template_hit(
         _record("roi_shape")
         return False
 
-    roi_foreground = int(cv2.countNonZero(roi))
+    roi_foreground = (
+        validation_cache.foreground_count(plan_mask, hit.bbox)
+        if validation_cache is not None
+        else int(cv2.countNonZero(roi))
+    )
     if roi_foreground == 0 or hit.pixel_count <= 0:
         _record("empty_roi")
         return False
@@ -834,7 +951,15 @@ def _validate_template_hit(
         _record("purity")
         return False
 
-    if (context_purity := _context_purity(plan_mask, hit.bbox, intersection_mask)) <= 0.0:
+    if (
+        context_purity := _context_purity(
+            plan_mask,
+            hit.bbox,
+            intersection_mask,
+            explained_pixels=intersection,
+            validation_cache=validation_cache,
+        )
+    ) <= 0.0:
         _record("context_purity")
         return False
 
@@ -881,11 +1006,19 @@ def _validate_template_hit(
         template_area = max(1, hit.bbox[2] * hit.bbox[3])
         template_density = hit.pixel_count / template_area
         normalized_roi = _thickness_normalized_mask(roi)
-        normalized_template = _thickness_normalized_mask(hit.transformed_mask)
+        normalized_template = (
+            validation_cache.normalized_mask(hit.transformed_mask)
+            if validation_cache is not None
+            else _thickness_normalized_mask(hit.transformed_mask)
+        )
         normalized_intersection = int(
             cv2.countNonZero(cv2.bitwise_and(normalized_roi, normalized_template))
         )
-        normalized_template_pixels = max(1, int(cv2.countNonZero(normalized_template)))
+        normalized_template_pixels = (
+            validation_cache.normalized_pixel_count(hit.transformed_mask)
+            if validation_cache is not None
+            else max(1, int(cv2.countNonZero(normalized_template)))
+        )
         normalized_roi_pixels = max(1, int(cv2.countNonZero(normalized_roi)))
         normalized_coverage = normalized_intersection / normalized_template_pixels
         normalized_purity = normalized_intersection / normalized_roi_pixels
@@ -994,7 +1127,11 @@ def _validate_template_hit(
         _record("gray_large_scale_partial")
         return False
 
-    template_centroid = _mask_centroid(hit.transformed_mask)
+    template_centroid = (
+        validation_cache.centroid(hit.transformed_mask)
+        if validation_cache is not None
+        else _mask_centroid(hit.transformed_mask)
+    )
     intersection_centroid = _mask_centroid(intersection_mask)
     if template_centroid is None or intersection_centroid is None:
         _record("centroid")
@@ -1092,7 +1229,12 @@ def _validate_template_hit(
 
     content_score = 0.0
     if hit.is_text_label:
-        content_score = _label_content_score(roi, hit.content_mask, hit.content_pixel_count)
+        content_score = _label_content_score(
+            roi,
+            hit.content_mask,
+            hit.content_pixel_count,
+            validation_cache=validation_cache,
+        )
         content_threshold = LABEL_CONTENT_MIN_SCORE
         if hit.content_bbox is not None:
             content_width_ratio = hit.content_bbox[2] / max(1, hit.bbox[2])

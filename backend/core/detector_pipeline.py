@@ -276,15 +276,24 @@ def _detect_symbols_pipeline(
 
     color_masks_cache: dict[str, np.ndarray] = {}
     ink_mask_cache: np.ndarray | None = None
+    dilated_ink_mask_cache: np.ndarray | None = None
     empty_plan_mask_cache: np.ndarray | None = None
 
     def _get_ink_plan_mask(*, dilate: bool) -> np.ndarray:
-        nonlocal ink_mask_cache
+        nonlocal ink_mask_cache, dilated_ink_mask_cache
         if ink_mask_cache is None:
             ink_mask_cache = _ink_mask(plan_image, dilate=False)
             for ex, ey, ew, eh in exclude_rects:
                 cv2.rectangle(ink_mask_cache, (ex, ey), (ex + ew, ey + eh), 0, -1)
-        return cv2.dilate(ink_mask_cache, np.ones((3, 3), np.uint8), iterations=1) if dilate else ink_mask_cache
+        if not dilate:
+            return ink_mask_cache
+        if dilated_ink_mask_cache is None:
+            dilated_ink_mask_cache = cv2.dilate(
+                ink_mask_cache,
+                np.ones((3, 3), np.uint8),
+                iterations=1,
+            )
+        return dilated_ink_mask_cache
 
     def _get_empty_plan_mask() -> np.ndarray:
         nonlocal empty_plan_mask_cache

@@ -9,7 +9,7 @@ import time
 
 import numpy as np
 
-from core.detector_masks import _validate_template_hit
+from core.detector_masks import ValidationMaskCache, _validate_template_hit
 from core.detector_models import CandidateHit, TargetedPromotionRule, TemplateInfo, TemplateVariant
 from core.detector_promotions import _maybe_promote_socket_06_to_07
 
@@ -42,6 +42,12 @@ def validate_template_candidates(
     """Validate raw template hits and apply cheap targeted promotions."""
 
     phase_start = time.perf_counter()
+    validation_plan_masks = plan_masks_by_template.values() if plan_hsv is None else ()
+    validation_cache = (
+        ValidationMaskCache.build(raw_template_hits, plan_masks=validation_plan_masks)
+        if raw_template_hits
+        else None
+    )
 
     def _validate_and_promote_hit(
         hit: CandidateHit,
@@ -58,6 +64,7 @@ def validate_template_candidates(
             relaxed_evidence_mask=(
                 gray_relaxed_evidence_mask if hit.dominant_hsv is None else None
             ),
+            validation_cache=validation_cache,
         ):
             promoted_hit = _maybe_promote_socket_06_to_07(
                 hit,
