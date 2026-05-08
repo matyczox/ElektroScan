@@ -478,6 +478,9 @@ def _detect_symbols_pipeline(
                 plan_image.shape,
                 max_width,
                 max_height,
+                is_large_text_template=gray_strategy.use_large_text_tile_rois(
+                    templates[template_id]
+                ),
             )
         else:
             rois, uses_full_scan, roi_area, foreground_pixels = _build_search_rois(

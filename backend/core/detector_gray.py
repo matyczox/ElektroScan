@@ -63,6 +63,9 @@ from core.detector_config import (
     GRAY_RECT_FRAME_WEAK_EDGE_COVERAGE,
     GRAY_SEARCH_COMPONENT_PADDING_RATIO,
     GRAY_SEARCH_COMPONENT_DILATE_ITERATIONS,
+    GRAY_SEARCH_LARGE_TEXT_MAX_TILE_ROIS,
+    GRAY_SEARCH_LARGE_TEXT_MIN_TEMPLATE_AREA,
+    GRAY_SEARCH_LARGE_TEXT_TILE_SIZE,
     GRAY_SEARCH_MAX_ROIS,
     GRAY_SEARCH_MAX_TILE_ROIS,
     GRAY_SEARCH_ROI_CONTAINMENT_THRESHOLD,
@@ -158,6 +161,15 @@ def gray_template_area(template: TemplateInfo) -> int:
 
 def gray_template_pixels(template: TemplateInfo) -> int:
     return int(getattr(template, "pixel_count", 0) or cv2.countNonZero(template.mask))
+
+
+def use_large_text_tile_rois(template: TemplateInfo) -> bool:
+    """Use smaller coarse tiles for large gray text labels while preserving coverage."""
+
+    return (
+        template.is_text_label
+        and gray_template_area(template) >= GRAY_SEARCH_LARGE_TEXT_MIN_TEMPLATE_AREA
+    )
 
 
 def _edge_band_densities(mask: np.ndarray) -> tuple[float, float, float, float, float]:
@@ -501,13 +513,24 @@ def _append_gray_tile_rois(
     rois: list[tuple[int, int, int, int]],
     plan_mask: np.ndarray,
     image_shape: tuple[int, int, int] | tuple[int, int],
+    *,
+    tile_size_override: int | None = None,
+    max_tile_rois_override: int | None = None,
 ) -> list[tuple[int, int, int, int]]:
     """Add coarse gray tiles so symbols connected to walls still get scanned."""
 
-    if GRAY_SEARCH_MAX_TILE_ROIS <= 0:
+    max_tile_rois = (
+        int(max_tile_rois_override)
+        if max_tile_rois_override is not None
+        else int(GRAY_SEARCH_MAX_TILE_ROIS)
+    )
+    if max_tile_rois <= 0:
         return rois
 
-    tile_size = max(64, int(GRAY_SEARCH_TILE_SIZE))
+    tile_size = max(
+        64,
+        int(tile_size_override) if tile_size_override is not None else int(GRAY_SEARCH_TILE_SIZE),
+    )
     padding = max(0, int(GRAY_SEARCH_TILE_PADDING))
     min_foreground = max(1, int(GRAY_SEARCH_TILE_MIN_FOREGROUND))
     image_h, image_w = int(image_shape[0]), int(image_shape[1])
@@ -540,7 +563,7 @@ def _append_gray_tile_rois(
 
     tile_candidates.sort(key=lambda item: item[0], reverse=True)
     existing = set(rois)
-    for _foreground, rect in tile_candidates[:GRAY_SEARCH_MAX_TILE_ROIS]:
+    for _foreground, rect in tile_candidates[:max_tile_rois]:
         if rect in existing:
             continue
         rois.append(rect)
@@ -554,6 +577,8 @@ def build_gray_search_rois(
     image_shape: tuple[int, int, int] | tuple[int, int],
     max_template_width: int,
     max_template_height: int,
+    *,
+    is_large_text_template: bool = False,
 ) -> tuple[list[tuple[int, int, int, int]], bool, int, int]:
     """Build bounded ROIs for gray/ink plans."""
 
@@ -693,7 +718,17 @@ def build_gray_search_rois(
         GRAY_SEARCH_MAX_ROIS,
     )
     rois = [rect for _score, _area, rect in component_rects]
-    rois = _append_gray_tile_rois(rois, plan_mask, image_shape)
+    rois = _append_gray_tile_rois(
+        rois,
+        plan_mask,
+        image_shape,
+        tile_size_override=(
+            int(GRAY_SEARCH_LARGE_TEXT_TILE_SIZE) if is_large_text_template else None
+        ),
+        max_tile_rois_override=(
+            int(GRAY_SEARCH_LARGE_TEXT_MAX_TILE_ROIS) if is_large_text_template else None
+        ),
+    )
     rois = _coalesce_gray_rois(rois, image_shape)
     roi_area = min(
         sum(_rect_area(roi) for roi in rois),

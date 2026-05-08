@@ -141,11 +141,13 @@ def scan_template_candidates(
             return "<10k"
         if area < 50_000:
             return "10k-50k"
+        if area < 100_000:
+            return "50k-100k"
         if area < 200_000:
-            return "50k-200k"
+            return "100k-200k"
         return ">=200k"
 
-    def _record_roi_scan(stats: dict, roi_w: int, roi_h: int, output_pixels: int) -> None:
+    def _record_roi_scan(stats: dict, roi_w: int, roi_h: int, output_pixels: int) -> str:
         pixels = int(roi_w) * int(roi_h)
         stats["calls"] += 1
         stats["pixels"] += pixels
@@ -153,11 +155,12 @@ def scan_template_candidates(
         bucket = _roi_bucket(roi_w, roi_h)
         bucket_stats = stats["roiBuckets"].setdefault(
             bucket,
-            {"calls": 0, "pixels": 0, "outputPixels": 0},
+            {"calls": 0, "pixels": 0, "outputPixels": 0, "rawPeaks": 0},
         )
         bucket_stats["calls"] += 1
         bucket_stats["pixels"] += pixels
         bucket_stats["outputPixels"] += int(output_pixels)
+        return bucket
 
     def _aggregate_scan_profile(records: list[dict]) -> dict:
         def _empty_group() -> dict[str, int]:
@@ -202,6 +205,7 @@ def scan_template_candidates(
                 group["calls"] += int(bucket_stats.get("calls", 0))
                 group["pixels"] += int(bucket_stats.get("pixels", 0))
                 group["outputPixels"] += int(bucket_stats.get("outputPixels", 0))
+                group["rawPeaks"] += int(bucket_stats.get("rawPeaks", 0))
 
         def _sorted_groups(groups: dict[str, dict]) -> list[dict]:
             return [
@@ -220,6 +224,13 @@ def scan_template_candidates(
             records,
             key=lambda item: (-int(item.get("rawPeaks", 0)), -int(item.get("emittedHits", 0))),
         )[:10]
+        top_by_large_roi_pixels = sorted(
+            records,
+            key=lambda item: (
+                -int(item.get("roiBuckets", {}).get(">=200k", {}).get("pixels", 0)),
+                -int(item.get("roiBuckets", {}).get(">=200k", {}).get("calls", 0)),
+            ),
+        )[:10]
         return {
             "total": totals,
             "byTemplate": _sorted_groups(by_template),
@@ -230,6 +241,7 @@ def scan_template_candidates(
             "byRoiBucket": _sorted_groups(by_roi_bucket),
             "topVariantsByPixels": top_by_pixels,
             "topVariantsByRawPeaks": top_by_peaks,
+            "topVariantsByLargeRoiPixels": top_by_large_roi_pixels,
         }
 
     def _scan_variant(
@@ -296,8 +308,9 @@ def scan_template_candidates(
                 variant.transformed_mask,
                 cv2.TM_CCOEFF_NORMED,
             )
+            roi_bucket = ""
             if stats is not None:
-                _record_roi_scan(stats, roi_w, roi_h, int(match_result.size))
+                roi_bucket = _record_roi_scan(stats, roi_w, roi_h, int(match_result.size))
             peaks = _find_local_maxima(
                 match_result,
                 threshold=threshold,
@@ -317,6 +330,7 @@ def scan_template_candidates(
             if peaks:
                 if stats is not None:
                     stats["rawPeaks"] += len(peaks)
+                    stats["roiBuckets"][roi_bucket]["rawPeaks"] += len(peaks)
                 variant_peaks.extend((roi_x + px, roi_y + py, score) for px, py, score in peaks)
             if not spatial_fair_peaks and len(variant_peaks) > MAX_PEAKS_PER_VARIANT:
                 too_many_peaks = True
@@ -376,8 +390,9 @@ def scan_template_candidates(
                 content_crop,
                 cv2.TM_CCOEFF_NORMED,
             )
+            roi_bucket = ""
             if stats is not None:
-                _record_roi_scan(stats, roi_w, roi_h, int(match_result.size))
+                roi_bucket = _record_roi_scan(stats, roi_w, roi_h, int(match_result.size))
                 stats["contentCalls"] += 1
             peaks = _find_local_maxima(
                 match_result,
@@ -389,6 +404,7 @@ def scan_template_candidates(
                 if stats is not None:
                     stats["rawPeaks"] += len(peaks)
                     stats["contentRawPeaks"] += len(peaks)
+                    stats["roiBuckets"][roi_bucket]["rawPeaks"] += len(peaks)
                 content_peaks.extend((roi_x + px, roi_y + py, score) for px, py, score in peaks)
             if len(content_peaks) > MAX_TEXT_CONTENT_PEAKS_PER_VARIANT:
                 too_many_content_peaks = True
