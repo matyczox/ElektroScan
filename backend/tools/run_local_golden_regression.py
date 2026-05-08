@@ -230,8 +230,8 @@ def main() -> None:
     parser.add_argument("--perf-json", type=Path, help="Write per-fixture performance JSON.")
     parser.add_argument(
         "--ablation",
-        choices=["no-text-mirror"],
-        help="Run a diagnostic ablation variant. Expected to fail if it changes golden output.",
+        choices=["no-text-mirror", "text-mirror", "with-text-mirror"],
+        help="Run a diagnostic variant. Expected to fail if it changes golden output.",
     )
     args = parser.parse_args()
 

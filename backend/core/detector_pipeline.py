@@ -107,6 +107,16 @@ def _detect_symbols_pipeline(
         "true",
         "yes",
     }
+    gray_text_mirror_override = os.getenv("ELEKTROSCAN_GRAY_TEXT_MIRROR", "").strip().lower()
+    gray_force_text_mirror = ablation_value in {
+        "text-mirror",
+        "text_mirror",
+        "with-text-mirror",
+        "with_text_mirror",
+    } or gray_text_mirror_override in {"1", "true", "yes", "on"}
+    disable_text_mirror = ablation_no_text_mirror or (
+        detector_profile == "gray" and not gray_force_text_mirror
+    )
 
     trace_input = initial_debug_profile.get("candidateTrace") or initial_debug_profile.get("trace") or {}
     if not isinstance(trace_input, dict):
@@ -330,7 +340,7 @@ def _detect_symbols_pipeline(
                         item[1],
                         scales=used_scales,
                         include_gray_diagonal_rotations=detector_profile == "gray",
-                        disable_text_mirror=ablation_no_text_mirror,
+                        disable_text_mirror=disable_text_mirror,
                     ),
                 ),
                 enumerate(templates),
@@ -512,6 +522,7 @@ def _detect_symbols_pipeline(
         "raw_prefilter_hits": 0,
         "raw_prefilter_removed": 0,
         "prepared_variants": sum(len(variants) for variants in variants_by_template.values()),
+        "gray_text_mirror_enabled": int(detector_profile == "gray" and not disable_text_mirror),
         "color_no_hsv_templates": sum(
             1
             for template in templates
@@ -550,6 +561,8 @@ def _detect_symbols_pipeline(
     raw_template_hits = scan_result.raw_template_hits
     scan_workers = scan_result.scan_workers
     diagnostics["skipped_empty_color_masks"] = scan_result.skipped_empty_color_masks
+    diagnostics["scan_tasks"] = scan_result.scan_tasks
+    diagnostics["scan_task_rois"] = scan_result.scan_task_rois
     timings["scan"] = scan_result.timing_seconds
     diagnostics["raw_peaks"] = len(raw_template_hits)
     _record_candidate_trace("raw_scan", raw_template_hits)
@@ -717,7 +730,9 @@ def _detect_symbols_pipeline(
                 "threading": {
                     "scanStrategy": scan_result.scan_strategy,
                     "scanWorkers": int(scan_workers),
-                    "configuredScanWorkers": int(DETECTOR_SCAN_MAX_WORKERS),
+                    "scanTasks": int(scan_result.scan_tasks),
+                    "scanTaskRois": int(scan_result.scan_task_rois),
+                    "configuredScanWorkers": int(scan_result.configured_scan_workers),
                     "validationWorkers": int(validation_workers if raw_template_hits else 0),
                     "parentSearchWorkers": int(
                         parent_search_workers if pre_parent_candidates else 0
@@ -737,6 +752,12 @@ def _detect_symbols_pipeline(
                 "grayRawBudget": gray_budget_profile,
                 "candidateTrace": candidate_trace if candidate_trace_enabled else {},
                 "ablation": {"noTextMirror": bool(ablation_no_text_mirror)},
+                "grayVariantStrategy": {
+                    "textMirrorEnabled": bool(
+                        detector_profile == "gray" and not disable_text_mirror
+                    ),
+                    "textMirrorOverride": bool(gray_force_text_mirror),
+                },
                 "grayStrokeSuppression": {
                     "removedPixels": int(diagnostics["gray_suppressed_pixels"]),
                     "rawPixels": int(gray_raw_ink_pixels),
@@ -820,13 +841,14 @@ def _detect_symbols_pipeline(
         f" pre_parent_clusters={diagnostics['pre_parent_clusters']},"
         f" final_clusters={diagnostics['final_hits']},"
         f" rois={diagnostics['search_rois']} full_scan_templates={diagnostics['full_scan_templates']},"  # noqa: E501
+        f" scan_tasks={diagnostics['scan_tasks']} task_rois={diagnostics['scan_task_rois']},"
         f" gray_suppress={diagnostics['gray_suppressed_pixels']}px({diagnostics['gray_suppressed_ratio']:.0%}),"
         f" gray_dark<{diagnostics['gray_dark_threshold']}={diagnostics['gray_dark_ink_pixels']}px,"
         f" gray_zone<{diagnostics['gray_dark_zone_threshold']}={diagnostics['gray_dark_zone_pixels']}px,"
         f" gray_evidence<{diagnostics['gray_dark_evidence_threshold']}={diagnostics['gray_dark_evidence_pixels']}px,"
         f" gray_zone_suppress={diagnostics['gray_dark_zone_suppressed_pixels']}px({diagnostics['gray_dark_zone_suppressed_ratio']:.0%}),"
         f" gray_dark_suppress={diagnostics['gray_dark_suppressed_pixels']}px({diagnostics['gray_dark_suppressed_ratio']:.0%}),"
-        f" threads={scan_result.scan_strategy}:scan:{scan_workers}/{DETECTOR_SCAN_MAX_WORKERS}|post:{postprocess_workers}/{DETECTOR_POSTPROCESS_MAX_WORKERS}|opencv:{scan_result.opencv_threads},"  # noqa: E501
+        f" threads={scan_result.scan_strategy}:scan:{scan_workers}/{scan_result.configured_scan_workers}|post:{postprocess_workers}/{DETECTOR_POSTPROCESS_MAX_WORKERS}|opencv:{scan_result.opencv_threads},"  # noqa: E501
         f" timings_ms="
         f"pdf_text:{timings_ms['pdf_text']:.0f}|"
         f"prepare:{timings_ms['prepare']:.0f}|"

@@ -13,6 +13,7 @@ import numpy as np
 from core import detector_gray as gray_strategy
 from core.detector_config import (
     DETECTOR_SCAN_MAX_WORKERS,
+    GRAY_SCAN_MAX_WORKERS,
     LABEL_CONTENT_SCAN_MIN_PIXELS,
     MAX_PEAKS_PER_VARIANT,
     MAX_TEXT_CONTENT_PEAKS_PER_VARIANT,
@@ -37,6 +38,9 @@ class ScanResult:
     raw_hits_by_mask_kind: dict[str, int]
     scan_strategy: str
     opencv_threads: int
+    configured_scan_workers: int
+    scan_tasks: int
+    scan_task_rois: int
 
 
 def _is_content_scan_eligible(variant: TemplateVariant) -> bool:
@@ -379,20 +383,25 @@ def scan_template_candidates(
     raw_hits_by_mask_kind: dict[str, int] = {}
     phase_start = time.perf_counter()
     use_template_tasks = False
+    max_scan_workers = (
+        GRAY_SCAN_MAX_WORKERS if detector_profile == "gray" else DETECTOR_SCAN_MAX_WORKERS
+    )
     if use_template_tasks:
         scan_items = template_ids_to_scan
-        scan_workers = max(1, min(len(scan_items), _safe_cpu_count()))
+        scan_workers = max(1, min(len(scan_items), _safe_cpu_count(), max_scan_workers))
         scan_label = "template"
         scan_fn = _scan_template
         scan_strategy = "template"
         active_opencv_threads = 1
+        scan_task_rois = sum(len(search_rois_by_template.get(template_id, [])) for template_id in scan_items)
     else:
         scan_items = variant_scan_tasks
-        scan_workers = max(1, min(len(scan_items), DETECTOR_SCAN_MAX_WORKERS))
+        scan_workers = max(1, min(len(scan_items), max_scan_workers))
         scan_label = "wariantow"
         scan_fn = lambda args: _scan_variant(*args)
         scan_strategy = "variant"
         active_opencv_threads = OPENCV_NUM_THREADS
+        scan_task_rois = sum(len(task[6]) for task in variant_scan_tasks)
 
     if scan_items:
         completed_scans = 0
@@ -437,4 +446,7 @@ def scan_template_candidates(
         raw_hits_by_mask_kind=raw_hits_by_mask_kind,
         scan_strategy=scan_strategy,
         opencv_threads=active_opencv_threads,
+        configured_scan_workers=max_scan_workers,
+        scan_tasks=len(scan_items),
+        scan_task_rois=scan_task_rois,
     )

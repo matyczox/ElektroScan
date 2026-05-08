@@ -52,6 +52,10 @@ DETECTOR_SCAN_MAX_WORKERS = _env_int(
     "ELEKTROSCAN_DETECTOR_SCAN_WORKERS",
     _default_detector_workers(),
 )
+GRAY_SCAN_MAX_WORKERS = _env_int(
+    "ELEKTROSCAN_GRAY_SCAN_WORKERS",
+    min(_safe_cpu_count(), 12),
+)
 DETECTOR_POSTPROCESS_MAX_WORKERS = _env_int(
     "ELEKTROSCAN_DETECTOR_POSTPROCESS_WORKERS",
     _default_detector_workers(),
