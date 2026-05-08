@@ -497,6 +497,14 @@ def _detect_symbols_pipeline(
             roi_strategy, tile_size, max_tile_rois = gray_strategy.gray_tile_roi_strategy(
                 templates[template_id]
             )
+            roi_strategy, tile_size, max_tile_rois = (
+                gray_strategy.adapt_gray_tile_roi_strategy_for_plan(
+                    roi_strategy,
+                    tile_size,
+                    max_tile_rois,
+                    gray_search_component_index,
+                )
+            )
             rois, uses_full_scan, roi_area, foreground_pixels = gray_strategy.build_gray_search_rois(
                 roi_seed_mask,
                 plan_image.shape,
@@ -575,12 +583,12 @@ def _detect_symbols_pipeline(
         "gray_roi_fast_templates": sum(
             1
             for strategy in search_roi_strategy_by_template.values()
-            if strategy in {"large_text_fast", "fast_compact"}
+            if strategy in {"large_text_fast", "fast_compact", "fast_compact_connected"}
         ),
         "gray_roi_fast_rois": sum(
             len(search_rois_by_template[template_id])
             for template_id, strategy in search_roi_strategy_by_template.items()
-            if strategy in {"large_text_fast", "fast_compact"}
+            if strategy in {"large_text_fast", "fast_compact", "fast_compact_connected"}
         ),
         "gray_roi_safe_templates": sum(
             1 for strategy in search_roi_strategy_by_template.values() if strategy == "safe_elongated"

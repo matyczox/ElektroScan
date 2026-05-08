@@ -63,6 +63,8 @@ from core.detector_config import (
     GRAY_RECT_FRAME_WEAK_EDGE_COVERAGE,
     GRAY_SEARCH_COMPONENT_PADDING_RATIO,
     GRAY_SEARCH_COMPONENT_DILATE_ITERATIONS,
+    GRAY_SEARCH_CONNECTED_FAST_COMPONENTS_MAX,
+    GRAY_SEARCH_CONNECTED_FAST_MAX_TILE_ROIS,
     GRAY_SEARCH_FAST_MAX_TILE_ROIS,
     GRAY_SEARCH_FAST_TILE_SIZE,
     GRAY_SEARCH_LARGE_TEXT_MAX_TILE_ROIS,
@@ -217,6 +219,34 @@ def gray_tile_roi_strategy(template: TemplateInfo) -> tuple[str, int, int]:
         int(GRAY_SEARCH_FAST_TILE_SIZE),
         int(GRAY_SEARCH_FAST_MAX_TILE_ROIS),
     )
+
+
+def adapt_gray_tile_roi_strategy_for_plan(
+    strategy: str,
+    tile_size: int,
+    max_tile_rois: int,
+    component_index: GraySearchComponentIndex | None,
+) -> tuple[str, int, int]:
+    """Tighten compact-tile coverage only on highly connected gray plans.
+
+    A low component count with substantial foreground usually means symbols are
+    attached to large connected linework.  In that topology, the broad compact
+    tile budget creates very large merged ROIs; a smaller spatial budget cuts
+    matchTemplate pixels while component ROIs still provide local coverage.
+    Plans with many isolated components keep the wider safe budget.
+    """
+
+    if (
+        strategy == "fast_compact"
+        and component_index is not None
+        and component_index.components <= GRAY_SEARCH_CONNECTED_FAST_COMPONENTS_MAX
+    ):
+        return (
+            "fast_compact_connected",
+            int(tile_size),
+            min(int(max_tile_rois), int(GRAY_SEARCH_CONNECTED_FAST_MAX_TILE_ROIS)),
+        )
+    return strategy, tile_size, max_tile_rois
 
 
 def _edge_band_densities(mask: np.ndarray) -> tuple[float, float, float, float, float]:
