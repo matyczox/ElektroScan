@@ -132,6 +132,14 @@ class GrayScanMasks:
 
 
 @dataclass(slots=True)
+class GraySearchComponentIndex:
+    foreground_pixels: int
+    components: int
+    stats: np.ndarray
+    foreground_integral: np.ndarray
+
+
+@dataclass(slots=True)
 class GrayLegendThresholds:
     dark: int
     zone: int
@@ -444,6 +452,37 @@ def _rect_union(
     return _clamp_roi((x1, y1, x2 - x1, y2 - y1), image_shape)
 
 
+def _integral_rect_sum(integral: np.ndarray, rect: tuple[int, int, int, int]) -> int:
+    x, y, w, h = rect
+    return int(
+        integral[y + h, x + w]
+        - integral[y, x + w]
+        - integral[y + h, x]
+        + integral[y, x]
+    )
+
+
+def build_gray_search_component_index(plan_mask: np.ndarray) -> GraySearchComponentIndex:
+    foreground_pixels = int(cv2.countNonZero(plan_mask))
+    dilate_iterations = max(0, int(GRAY_SEARCH_COMPONENT_DILATE_ITERATIONS))
+    seed_mask = (
+        cv2.dilate(plan_mask, np.ones((3, 3), np.uint8), iterations=dilate_iterations)
+        if dilate_iterations > 0
+        else plan_mask
+    )
+    components, _labels, stats, _centroids = cv2.connectedComponentsWithStats(
+        seed_mask,
+        connectivity=8,
+    )
+    foreground_integral = cv2.integral((plan_mask > 0).astype(np.uint8, copy=False), sdepth=cv2.CV_32S)
+    return GraySearchComponentIndex(
+        foreground_pixels=foreground_pixels,
+        components=int(components),
+        stats=stats,
+        foreground_integral=foreground_integral,
+    )
+
+
 def _coalesce_gray_rois(
     rois: list[tuple[int, int, int, int]],
     image_shape: tuple[int, int, int] | tuple[int, int],
@@ -513,6 +552,7 @@ def _append_gray_tile_rois(
     rois: list[tuple[int, int, int, int]],
     plan_mask: np.ndarray,
     image_shape: tuple[int, int, int] | tuple[int, int],
+    foreground_integral: np.ndarray | None = None,
     *,
     tile_size_override: int | None = None,
     max_tile_rois_override: int | None = None,
@@ -545,7 +585,11 @@ def _append_gray_tile_rois(
             if tile_w <= 0:
                 continue
 
-            foreground = int(cv2.countNonZero(plan_mask[y : y + tile_h, x : x + tile_w]))
+            foreground = (
+                _integral_rect_sum(foreground_integral, (x, y, tile_w, tile_h))
+                if foreground_integral is not None
+                else int(cv2.countNonZero(plan_mask[y : y + tile_h, x : x + tile_w]))
+            )
             if foreground < min_foreground:
                 continue
 
@@ -579,24 +623,24 @@ def build_gray_search_rois(
     max_template_height: int,
     *,
     is_large_text_template: bool = False,
+    component_index: GraySearchComponentIndex | None = None,
 ) -> tuple[list[tuple[int, int, int, int]], bool, int, int]:
     """Build bounded ROIs for gray/ink plans."""
 
-    foreground_pixels = int(cv2.countNonZero(plan_mask))
+    foreground_pixels = (
+        component_index.foreground_pixels
+        if component_index is not None
+        else int(cv2.countNonZero(plan_mask))
+    )
     if foreground_pixels <= 0:
         return [], False, 0, foreground_pixels
 
     image_h, image_w = image_shape[:2]
-    dilate_iterations = max(0, int(GRAY_SEARCH_COMPONENT_DILATE_ITERATIONS))
-    seed_mask = (
-        cv2.dilate(plan_mask, np.ones((3, 3), np.uint8), iterations=dilate_iterations)
-        if dilate_iterations > 0
-        else plan_mask
-    )
-    components, _labels, stats, _centroids = cv2.connectedComponentsWithStats(
-        seed_mask,
-        connectivity=8,
-    )
+    if component_index is None:
+        component_index = build_gray_search_component_index(plan_mask)
+    components = component_index.components
+    stats = component_index.stats
+    foreground_integral = component_index.foreground_integral
     if components <= 1:
         return [], False, 0, foreground_pixels
 
@@ -680,7 +724,7 @@ def build_gray_search_rois(
                 clamped = _clamp_roi((tile_x, tile_y, tile_w, tile_h), image_shape)
                 if clamped is not None:
                     rx, ry, rw, rh = clamped
-                    foreground = int(cv2.countNonZero(plan_mask[ry : ry + rh, rx : rx + rw]))
+                    foreground = _integral_rect_sum(foreground_integral, (rx, ry, rw, rh))
                     if foreground >= GRAY_SEARCH_TILE_MIN_FOREGROUND:
                         component_rects.append(
                             (
@@ -722,6 +766,7 @@ def build_gray_search_rois(
         rois,
         plan_mask,
         image_shape,
+        foreground_integral,
         tile_size_override=(
             int(GRAY_SEARCH_LARGE_TEXT_TILE_SIZE) if is_large_text_template else None
         ),

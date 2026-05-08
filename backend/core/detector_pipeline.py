@@ -327,7 +327,7 @@ def _detect_symbols_pipeline(
 
     phase_start = time.perf_counter()
     _progress("prepare", 18, "Przygotowanie masek i wariantow")
-    plan_hsv = cv2.cvtColor(plan_image, cv2.COLOR_BGR2HSV)
+    plan_hsv = cv2.cvtColor(plan_image, cv2.COLOR_BGR2HSV) if detector_profile == "color" else None
 
     variant_workers = max(1, min(len(templates), DETECTOR_POSTPROCESS_MAX_WORKERS))
     used_scales = list(GRAY_SCALES) if detector_profile == "gray" else list(SCALES)
@@ -465,6 +465,11 @@ def _detect_symbols_pipeline(
 
     search_rois_by_template: dict[int, list[tuple[int, int, int, int]]] = {}
     search_roi_stats_by_template: dict[int, tuple[bool, int, int]] = {}
+    gray_search_component_index = (
+        gray_strategy.build_gray_search_component_index(gray_zone_mask)
+        if detector_profile == "gray" and gray_zone_mask is not None
+        else None
+    )
 
     def _prepare_search_roi(
         item: tuple[int, np.ndarray]
@@ -481,6 +486,7 @@ def _detect_symbols_pipeline(
                 is_large_text_template=gray_strategy.use_large_text_tile_rois(
                     templates[template_id]
                 ),
+                component_index=gray_search_component_index,
             )
         else:
             rois, uses_full_scan, roi_area, foreground_pixels = _build_search_rois(
