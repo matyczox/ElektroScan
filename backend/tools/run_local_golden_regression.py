@@ -196,6 +196,19 @@ def _run_fixture(
             f"calls={scan_total.get('calls')} pixels={scan_total.get('pixels')} "
             f"outputPixels={scan_total.get('outputPixels')} rawPeaks={scan_total.get('rawPeaks')}"
         )
+    roi_strategy_profile = debug_profile.get("roiStrategyProfile", {})
+    roi_strategy_rows = (
+        roi_strategy_profile.get("byStrategy", [])
+        if isinstance(roi_strategy_profile, dict)
+        else []
+    )
+    if roi_strategy_rows:
+        summary = ", ".join(
+            f"{row.get('strategy')}:templates={row.get('templates')} rois={row.get('rois')} "
+            f"validated={row.get('validated')} final={row.get('final')}"
+            for row in roi_strategy_rows
+        )
+        print(f"ROI strategies: {summary}")
     trace = debug_profile.get("candidateTrace", {})
     if trace:
         print("Trace:")
@@ -235,11 +248,14 @@ def _run_fixture(
         "boxes": len(boxes),
         "candidatePath": str(output_path),
         "goldenPath": str(golden_path),
+        "profileFlags": debug_profile.get("profileFlags", {}),
         "timingsMs": detector_timings,
         "counters": counters,
+        "candidateStageCounts": debug_profile.get("candidateStageCounts", {}),
         "threading": debug_profile.get("threading", {}),
         "scanProfile": debug_profile.get("scanProfile", {}),
         "hitFlowProfile": debug_profile.get("hitFlowProfile", {}),
+        "roiStrategyProfile": debug_profile.get("roiStrategyProfile", {}),
         "candidateTrace": debug_profile.get("candidateTrace", {}),
         "grayVariantStrategy": debug_profile.get("grayVariantStrategy", {}),
         "slowestPhase": debug_profile.get("slowestPhase"),

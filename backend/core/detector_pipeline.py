@@ -18,7 +18,6 @@ import numpy as np
 from core import detector_color as color_strategy
 from core import detector_gray as gray_strategy
 from core.detector_clustering import (
-    _bbox_metrics,
     _cluster_candidates,
     _prefilter_candidates,
     _prefilter_raw_template_hits,
@@ -38,6 +37,11 @@ from core.detector_config import (
     OPENCV_NUM_THREADS,
     SCALES,
     _safe_cpu_count,
+)
+from core.detector_diagnostics import (
+    build_candidate_stage_counts,
+    build_hit_flow_profile,
+    build_roi_strategy_profile,
 )
 from core.detector_masks import (
     _build_search_rois,
@@ -762,91 +766,53 @@ def _detect_symbols_pipeline(
     timings["clustering"] = time.perf_counter() - phase_start
     _record_candidate_trace("final", final_hits)
 
-    def _template_profile_name(template_id: int) -> str:
-        if 0 <= template_id < len(templates):
-            return os.path.basename(str(templates[template_id].path))
-        return str(template_id)
-
-    def _count_by_template(hits: list[CandidateHit]) -> dict[int, int]:
-        counts: dict[int, int] = {}
-        for hit in hits:
-            counts[hit.template_id] = counts.get(hit.template_id, 0) + 1
-        return counts
-
-    def _top_variants(hits: list[CandidateHit], *, limit: int = 10) -> list[dict]:
-        counts: dict[tuple[int, float, int, bool, str], int] = {}
-        for hit in hits:
-            key = (
-                int(hit.template_id),
-                round(float(hit.scale), 3),
-                int(hit.rotation),
-                bool(hit.mirrored),
-                str(hit.source),
-            )
-            counts[key] = counts.get(key, 0) + 1
-        rows: list[dict] = []
-        for (template_id, scale, rotation, mirrored, source), count in sorted(
-            counts.items(),
-            key=lambda item: (-item[1], item[0]),
-        )[:limit]:
-            rows.append(
-                {
-                    "templateId": template_id,
-                    "templateName": _template_profile_name(template_id),
-                    "scale": scale,
-                    "rotation": rotation,
-                    "mirrored": mirrored,
-                    "source": source,
-                    "hits": int(count),
-                }
-            )
-        return rows
-
-    raw_scan_counts = _count_by_template(raw_scan_hits)
-    raw_budget_counts = _count_by_template(raw_budget_hits)
-    raw_prefilter_counts = _count_by_template(raw_prefilter_hits)
-    validated_counts = _count_by_template(validated_hits)
-    pre_cluster_counts = _count_by_template(pre_parent_candidates)
-    final_counts = _count_by_template(final_hits)
-    template_ids_in_flow = sorted(
-        set(raw_scan_counts)
-        | set(raw_budget_counts)
-        | set(raw_prefilter_counts)
-        | set(validated_counts)
-        | set(pre_cluster_counts)
-        | set(final_counts)
-    )
-    hit_flow_profile = {
-        "byTemplate": [
-            {
-                "templateId": template_id,
-                "templateName": _template_profile_name(template_id),
-                "rawScan": int(raw_scan_counts.get(template_id, 0)),
-                "rawBudget": int(raw_budget_counts.get(template_id, 0)),
-                "rawPrefilter": int(raw_prefilter_counts.get(template_id, 0)),
-                "validated": int(validated_counts.get(template_id, 0)),
-                "preCluster": int(pre_cluster_counts.get(template_id, 0)),
-                "final": int(final_counts.get(template_id, 0)),
-                "finalYield": round(
-                    final_counts.get(template_id, 0) / max(1, validated_counts.get(template_id, 0)),
-                    4,
-                ),
-                "validatedPerFinal": round(
-                    validated_counts.get(template_id, 0) / max(1, final_counts.get(template_id, 0)),
-                    2,
-                ),
-            }
-            for template_id in template_ids_in_flow
-        ],
-        "topValidatedVariants": _top_variants(validated_hits),
-        "topFinalVariants": _top_variants(final_hits),
-    }
-
     timings_ms = {name: round(seconds * 1000.0, 3) for name, seconds in timings.items()}
     if debug_profile is not None:
+        candidate_stage_counts = build_candidate_stage_counts(
+            pdf_candidates=pdf_candidates,
+            raw_scan_hits=raw_scan_hits,
+            raw_budget_hits=raw_budget_hits,
+            raw_prefilter_hits=raw_prefilter_hits,
+            validation_rejected_hits=validation_result.rejected_hits,
+            validated_hits=validated_hits,
+            prefiltered_hits=prefiltered_candidates,
+            pre_parent_hits=pre_parent_candidates,
+            parent_search_hits=parent_search_candidates,
+            final_hits=final_hits,
+            rescued_gray_frames=rescued_gray_frames,
+        )
+        hit_flow_profile = {}
+        roi_strategy_profile = {}
+        if collect_performance_profile:
+            hit_flow_profile = build_hit_flow_profile(
+                templates=templates,
+                raw_scan_hits=raw_scan_hits,
+                raw_budget_hits=raw_budget_hits,
+                raw_prefilter_hits=raw_prefilter_hits,
+                validated_hits=validated_hits,
+                pre_cluster_hits=pre_parent_candidates,
+                final_hits=final_hits,
+            )
+            roi_strategy_profile = build_roi_strategy_profile(
+                templates=templates,
+                variants_by_template=variants_by_template,
+                search_rois_by_template=search_rois_by_template,
+                search_roi_stats_by_template=search_roi_stats_by_template,
+                search_roi_strategy_by_template=search_roi_strategy_by_template,
+                raw_scan_hits=raw_scan_hits,
+                raw_budget_hits=raw_budget_hits,
+                raw_prefilter_hits=raw_prefilter_hits,
+                validated_hits=validated_hits,
+                final_hits=final_hits,
+            )
         debug_profile.clear()
         debug_profile.update(
             {
+                "profileFlags": {
+                    "debugProfile": True,
+                    "performanceProfile": bool(collect_performance_profile),
+                    "candidateTrace": bool(candidate_trace_enabled),
+                },
                 "timingsMs": timings_ms,
                 "counters": {key: int(value) for key, value in diagnostics.items()},
                 "profile": detector_profile,
@@ -874,8 +840,10 @@ def _detect_symbols_pipeline(
                 },
                 "grayRawBudget": gray_budget_profile,
                 "candidateTrace": candidate_trace if candidate_trace_enabled else {},
+                "candidateStageCounts": candidate_stage_counts,
                 "scanProfile": scan_result.scan_profile,
                 "hitFlowProfile": hit_flow_profile,
+                "roiStrategyProfile": roi_strategy_profile,
                 "ablation": {"noTextMirror": bool(ablation_no_text_mirror)},
                 "grayVariantStrategy": {
                     "textMirrorEnabled": bool(
