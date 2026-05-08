@@ -89,6 +89,7 @@ def _run_fixture(
     trace_points: list[str],
     trace_radius: float,
     ablation: str | None,
+    collect_performance_profile: bool,
 ) -> tuple[bool, dict[str, Any]]:
     name = str(manifest.get("name") or manifest_path.parent.name)
     if not manifest.get("enabled", True):
@@ -121,7 +122,9 @@ def _run_fixture(
         (int(zone["x"]), int(zone["y"]), int(zone["width"]), int(zone["height"]))
         for zone in manifest.get("excludedZones", [])
     ]
-    debug_profile: dict[str, Any] = {}
+    debug_profile: dict[str, Any] = {
+        "performanceProfile": collect_performance_profile,
+    }
     if trace_symbols or trace_points:
         debug_profile["trace"] = {
             "symbols": trace_symbols,
@@ -178,6 +181,14 @@ def _run_fixture(
         f"rois={counters.get('search_rois')} raw={counters.get('raw_peaks')} "
         f"validated={counters.get('validated_template_hits')}"
     )
+    scan_profile = debug_profile.get("scanProfile", {})
+    scan_total = scan_profile.get("total", {}) if isinstance(scan_profile, dict) else {}
+    if scan_total:
+        print(
+            "Scan profile: "
+            f"calls={scan_total.get('calls')} pixels={scan_total.get('pixels')} "
+            f"outputPixels={scan_total.get('outputPixels')} rawPeaks={scan_total.get('rawPeaks')}"
+        )
     trace = debug_profile.get("candidateTrace", {})
     if trace:
         print("Trace:")
@@ -214,6 +225,9 @@ def _run_fixture(
         "timingsMs": detector_timings,
         "counters": counters,
         "threading": debug_profile.get("threading", {}),
+        "scanProfile": debug_profile.get("scanProfile", {}),
+        "hitFlowProfile": debug_profile.get("hitFlowProfile", {}),
+        "grayVariantStrategy": debug_profile.get("grayVariantStrategy", {}),
         "slowestPhase": debug_profile.get("slowestPhase"),
     }
     return not failed, perf_record
@@ -252,6 +266,7 @@ def main() -> None:
             trace_points=args.trace_point,
             trace_radius=args.trace_radius,
             ablation=args.ablation,
+            collect_performance_profile=bool(args.perf_json),
         )
         perf_records.append(perf_record)
         all_ok = fixture_ok and all_ok

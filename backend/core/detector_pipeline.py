@@ -95,6 +95,7 @@ def _detect_symbols_pipeline(
 
     detector_profile = detector_profile if detector_profile in {"color", "gray"} else "color"
     initial_debug_profile = dict(debug_profile or {})
+    collect_performance_profile = bool(initial_debug_profile.get("performanceProfile"))
     ablation_value = str(
         initial_debug_profile.get("ablation") or os.getenv("ELEKTROSCAN_ABLATION", "")
     ).strip().lower()
@@ -557,6 +558,7 @@ def _detect_symbols_pipeline(
         plan_mask_foregrounds=plan_mask_foregrounds,
         detector_profile=detector_profile,
         progress_callback=_progress,
+        collect_profile=collect_performance_profile,
     )
     raw_template_hits = scan_result.raw_template_hits
     scan_workers = scan_result.scan_workers
@@ -565,6 +567,7 @@ def _detect_symbols_pipeline(
     diagnostics["scan_task_rois"] = scan_result.scan_task_rois
     timings["scan"] = scan_result.timing_seconds
     diagnostics["raw_peaks"] = len(raw_template_hits)
+    raw_scan_hits = raw_template_hits
     _record_candidate_trace("raw_scan", raw_template_hits)
 
     # Per-scale histograms for diagnostics: count raw_peaks at each scale
@@ -585,6 +588,7 @@ def _detect_symbols_pipeline(
         diagnostics["raw_budget_removed"] = int(gray_budget_profile.get("removed", 0))
     else:
         diagnostics["raw_budget_hits"] = len(raw_template_hits)
+    raw_budget_hits = raw_template_hits
     _record_candidate_trace("raw_budget", raw_template_hits)
 
     phase_start = time.perf_counter()
@@ -610,6 +614,7 @@ def _detect_symbols_pipeline(
     diagnostics["raw_prefilter_removed"] = raw_before_prefilter - len(raw_template_hits)
     diagnostics["gray_frame_raw_rescue_hits"] = len(gray_frame_raw_rescue_hits)
     diagnostics["gray_frame_raw_rescue_restored"] = len(restored)
+    raw_prefilter_hits = raw_template_hits
     timings["raw_prefilter"] = time.perf_counter() - phase_start
     _record_candidate_trace("raw_prefilter", raw_template_hits)
 
@@ -718,6 +723,85 @@ def _detect_symbols_pipeline(
     timings["clustering"] = time.perf_counter() - phase_start
     _record_candidate_trace("final", final_hits)
 
+    def _template_profile_name(template_id: int) -> str:
+        if 0 <= template_id < len(templates):
+            return os.path.basename(str(templates[template_id].path))
+        return str(template_id)
+
+    def _count_by_template(hits: list[CandidateHit]) -> dict[int, int]:
+        counts: dict[int, int] = {}
+        for hit in hits:
+            counts[hit.template_id] = counts.get(hit.template_id, 0) + 1
+        return counts
+
+    def _top_variants(hits: list[CandidateHit], *, limit: int = 10) -> list[dict]:
+        counts: dict[tuple[int, float, int, bool, str], int] = {}
+        for hit in hits:
+            key = (
+                int(hit.template_id),
+                round(float(hit.scale), 3),
+                int(hit.rotation),
+                bool(hit.mirrored),
+                str(hit.source),
+            )
+            counts[key] = counts.get(key, 0) + 1
+        rows: list[dict] = []
+        for (template_id, scale, rotation, mirrored, source), count in sorted(
+            counts.items(),
+            key=lambda item: (-item[1], item[0]),
+        )[:limit]:
+            rows.append(
+                {
+                    "templateId": template_id,
+                    "templateName": _template_profile_name(template_id),
+                    "scale": scale,
+                    "rotation": rotation,
+                    "mirrored": mirrored,
+                    "source": source,
+                    "hits": int(count),
+                }
+            )
+        return rows
+
+    raw_scan_counts = _count_by_template(raw_scan_hits)
+    raw_budget_counts = _count_by_template(raw_budget_hits)
+    raw_prefilter_counts = _count_by_template(raw_prefilter_hits)
+    validated_counts = _count_by_template(validated_hits)
+    pre_cluster_counts = _count_by_template(pre_parent_candidates)
+    final_counts = _count_by_template(final_hits)
+    template_ids_in_flow = sorted(
+        set(raw_scan_counts)
+        | set(raw_budget_counts)
+        | set(raw_prefilter_counts)
+        | set(validated_counts)
+        | set(pre_cluster_counts)
+        | set(final_counts)
+    )
+    hit_flow_profile = {
+        "byTemplate": [
+            {
+                "templateId": template_id,
+                "templateName": _template_profile_name(template_id),
+                "rawScan": int(raw_scan_counts.get(template_id, 0)),
+                "rawBudget": int(raw_budget_counts.get(template_id, 0)),
+                "rawPrefilter": int(raw_prefilter_counts.get(template_id, 0)),
+                "validated": int(validated_counts.get(template_id, 0)),
+                "preCluster": int(pre_cluster_counts.get(template_id, 0)),
+                "final": int(final_counts.get(template_id, 0)),
+                "finalYield": round(
+                    final_counts.get(template_id, 0) / max(1, validated_counts.get(template_id, 0)),
+                    4,
+                ),
+                "validatedPerFinal": round(
+                    validated_counts.get(template_id, 0) / max(1, final_counts.get(template_id, 0)),
+                    2,
+                ),
+            }
+            for template_id in template_ids_in_flow
+        ],
+        "topValidatedVariants": _top_variants(validated_hits),
+        "topFinalVariants": _top_variants(final_hits),
+    }
 
     timings_ms = {name: round(seconds * 1000.0, 3) for name, seconds in timings.items()}
     if debug_profile is not None:
@@ -751,6 +835,8 @@ def _detect_symbols_pipeline(
                 },
                 "grayRawBudget": gray_budget_profile,
                 "candidateTrace": candidate_trace if candidate_trace_enabled else {},
+                "scanProfile": scan_result.scan_profile,
+                "hitFlowProfile": hit_flow_profile,
                 "ablation": {"noTextMirror": bool(ablation_no_text_mirror)},
                 "grayVariantStrategy": {
                     "textMirrorEnabled": bool(

@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from pathlib import Path
+from threading import Lock
 import time
 
 import cv2
@@ -41,6 +43,7 @@ class ScanResult:
     configured_scan_workers: int
     scan_tasks: int
     scan_task_rois: int
+    scan_profile: dict
 
 
 def _is_content_scan_eligible(variant: TemplateVariant) -> bool:
@@ -125,8 +128,109 @@ def scan_template_candidates(
     plan_mask_foregrounds: dict[int, int],
     detector_profile: str,
     progress_callback: Callable[[str, float, str], None],
+    collect_profile: bool = False,
 ) -> ScanResult:
     """Run matchTemplate over prepared scan masks and ROIs."""
+
+    scan_profile_records: list[dict] = []
+    scan_profile_lock = Lock()
+
+    def _roi_bucket(width: int, height: int) -> str:
+        area = int(width) * int(height)
+        if area < 10_000:
+            return "<10k"
+        if area < 50_000:
+            return "10k-50k"
+        if area < 200_000:
+            return "50k-200k"
+        return ">=200k"
+
+    def _record_roi_scan(stats: dict, roi_w: int, roi_h: int, output_pixels: int) -> None:
+        pixels = int(roi_w) * int(roi_h)
+        stats["calls"] += 1
+        stats["pixels"] += pixels
+        stats["outputPixels"] += int(output_pixels)
+        bucket = _roi_bucket(roi_w, roi_h)
+        bucket_stats = stats["roiBuckets"].setdefault(
+            bucket,
+            {"calls": 0, "pixels": 0, "outputPixels": 0},
+        )
+        bucket_stats["calls"] += 1
+        bucket_stats["pixels"] += pixels
+        bucket_stats["outputPixels"] += int(output_pixels)
+
+    def _aggregate_scan_profile(records: list[dict]) -> dict:
+        def _empty_group() -> dict[str, int]:
+            return {
+                "calls": 0,
+                "pixels": 0,
+                "outputPixels": 0,
+                "rawPeaks": 0,
+                "emittedHits": 0,
+                "contentCalls": 0,
+            }
+
+        def _add(group: dict, stats: dict) -> None:
+            group["calls"] += int(stats.get("calls", 0))
+            group["pixels"] += int(stats.get("pixels", 0))
+            group["outputPixels"] += int(stats.get("outputPixels", 0))
+            group["rawPeaks"] += int(stats.get("rawPeaks", 0))
+            group["emittedHits"] += int(stats.get("emittedHits", 0))
+            group["contentCalls"] += int(stats.get("contentCalls", 0))
+
+        totals = _empty_group()
+        by_template: dict[str, dict] = {}
+        by_scale: dict[str, dict] = {}
+        by_rotation: dict[str, dict] = {}
+        by_mirror: dict[str, dict] = {}
+        by_mask_kind: dict[str, dict] = {}
+        by_roi_bucket: dict[str, dict] = {}
+        for stats in records:
+            _add(totals, stats)
+            template_key = f"{stats['templateId']}:{stats['templateName']}"
+            for groups, key in (
+                (by_template, template_key),
+                (by_scale, f"{float(stats['scale']):.2f}"),
+                (by_rotation, str(stats["rotation"])),
+                (by_mirror, "mirrored" if stats["mirrored"] else "normal"),
+                (by_mask_kind, str(stats["maskKind"])),
+            ):
+                group = groups.setdefault(key, _empty_group())
+                _add(group, stats)
+            for bucket, bucket_stats in stats.get("roiBuckets", {}).items():
+                group = by_roi_bucket.setdefault(bucket, _empty_group())
+                group["calls"] += int(bucket_stats.get("calls", 0))
+                group["pixels"] += int(bucket_stats.get("pixels", 0))
+                group["outputPixels"] += int(bucket_stats.get("outputPixels", 0))
+
+        def _sorted_groups(groups: dict[str, dict]) -> list[dict]:
+            return [
+                {"key": key, **value}
+                for key, value in sorted(
+                    groups.items(),
+                    key=lambda item: (-int(item[1].get("pixels", 0)), item[0]),
+                )
+            ]
+
+        top_by_pixels = sorted(
+            records,
+            key=lambda item: (-int(item.get("pixels", 0)), -int(item.get("calls", 0))),
+        )[:10]
+        top_by_peaks = sorted(
+            records,
+            key=lambda item: (-int(item.get("rawPeaks", 0)), -int(item.get("emittedHits", 0))),
+        )[:10]
+        return {
+            "total": totals,
+            "byTemplate": _sorted_groups(by_template),
+            "byScale": _sorted_groups(by_scale),
+            "byRotation": _sorted_groups(by_rotation),
+            "byMirror": _sorted_groups(by_mirror),
+            "byMaskKind": _sorted_groups(by_mask_kind),
+            "byRoiBucket": _sorted_groups(by_roi_bucket),
+            "topVariantsByPixels": top_by_pixels,
+            "topVariantsByRawPeaks": top_by_peaks,
+        }
 
     def _scan_variant(
         template_id: int,
@@ -145,6 +249,33 @@ def scan_template_candidates(
         """
 
         template_hits: list[CandidateHit] = []
+        stats = (
+            {
+                "templateId": int(template_id),
+                "templateName": Path(str(template.path)).name,
+                "scale": round(float(variant.scale), 3),
+                "rotation": int(variant.rotation),
+                "mirrored": bool(variant.mirrored),
+                "maskKind": scan_mask_kind,
+                "calls": 0,
+                "pixels": 0,
+                "outputPixels": 0,
+                "rawPeaks": 0,
+                "contentCalls": 0,
+                "contentRawPeaks": 0,
+                "emittedHits": 0,
+                "roiBuckets": {},
+            }
+            if collect_profile
+            else None
+        )
+
+        def _finish() -> list[CandidateHit]:
+            if stats is not None:
+                stats["emittedHits"] = len(template_hits)
+                with scan_profile_lock:
+                    scan_profile_records.append(stats)
+            return template_hits
 
         variant_peaks: list[tuple[int, int, float]] = []
         too_many_peaks = False
@@ -165,6 +296,8 @@ def scan_template_candidates(
                 variant.transformed_mask,
                 cv2.TM_CCOEFF_NORMED,
             )
+            if stats is not None:
+                _record_roi_scan(stats, roi_w, roi_h, int(match_result.size))
             peaks = _find_local_maxima(
                 match_result,
                 threshold=threshold,
@@ -182,6 +315,8 @@ def scan_template_candidates(
                     template_height=variant.height,
                 )
             if peaks:
+                if stats is not None:
+                    stats["rawPeaks"] += len(peaks)
                 variant_peaks.extend((roi_x + px, roi_y + py, score) for px, py, score in peaks)
             if not spatial_fair_peaks and len(variant_peaks) > MAX_PEAKS_PER_VARIANT:
                 too_many_peaks = True
@@ -215,11 +350,11 @@ def scan_template_candidates(
             not _needs_directional_text_content_scan(template)
             or not _is_content_scan_eligible(variant)
         ):
-            return template_hits
+            return _finish()
 
         content_crop = _tight_mask_crop(variant.content_mask)
         if content_crop is None or variant.content_bbox is None:
-            return template_hits
+            return _finish()
 
         content_x, content_y, content_w, content_h = variant.content_bbox
         content_peaks: list[tuple[int, int, float]] = []
@@ -241,6 +376,9 @@ def scan_template_candidates(
                 content_crop,
                 cv2.TM_CCOEFF_NORMED,
             )
+            if stats is not None:
+                _record_roi_scan(stats, roi_w, roi_h, int(match_result.size))
+                stats["contentCalls"] += 1
             peaks = _find_local_maxima(
                 match_result,
                 threshold=TEXT_CONTENT_THRESHOLD,
@@ -248,6 +386,9 @@ def scan_template_candidates(
                 template_height=content_h,
             )
             if peaks:
+                if stats is not None:
+                    stats["rawPeaks"] += len(peaks)
+                    stats["contentRawPeaks"] += len(peaks)
                 content_peaks.extend((roi_x + px, roi_y + py, score) for px, py, score in peaks)
             if len(content_peaks) > MAX_TEXT_CONTENT_PEAKS_PER_VARIANT:
                 too_many_content_peaks = True
@@ -277,7 +418,7 @@ def scan_template_candidates(
                 )
             )
 
-        return template_hits
+        return _finish()
 
     def _scan_template_variants(template_id: int) -> list[
         tuple[
@@ -449,4 +590,5 @@ def scan_template_candidates(
         configured_scan_workers=max_scan_workers,
         scan_tasks=len(scan_items),
         scan_task_rois=scan_task_rois,
+        scan_profile=_aggregate_scan_profile(scan_profile_records) if collect_profile else {},
     )
