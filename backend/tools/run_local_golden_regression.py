@@ -75,6 +75,7 @@ def _detections_to_boxes(results: list[Any]) -> list[dict[str, Any]]:
                     "scale": detection.scale,
                     "mirrored": detection.mirrored,
                     "source": detection.source,
+                    "roiStrategy": getattr(detection, "roi_strategy", ""),
                 }
             )
     return boxes
@@ -239,6 +240,7 @@ def _run_fixture(
         "threading": debug_profile.get("threading", {}),
         "scanProfile": debug_profile.get("scanProfile", {}),
         "hitFlowProfile": debug_profile.get("hitFlowProfile", {}),
+        "candidateTrace": debug_profile.get("candidateTrace", {}),
         "grayVariantStrategy": debug_profile.get("grayVariantStrategy", {}),
         "slowestPhase": debug_profile.get("slowestPhase"),
     }

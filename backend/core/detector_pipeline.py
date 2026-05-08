@@ -230,6 +230,7 @@ def _detect_symbols_pipeline(
                 "mirrored": bool(hit.mirrored),
                 "source": str(hit.source),
                 "isTextLabel": bool(hit.is_text_label),
+                "roiStrategy": str(hit.roi_strategy),
                 "distance": round(float(distance), 3),
             }
             reason = reason_by_id.get(id(hit))
@@ -590,6 +591,7 @@ def _detect_symbols_pipeline(
         scan_masks_by_template=scan_masks_by_template,
         scan_mask_kinds_by_template=scan_mask_kinds_by_template,
         search_rois_by_template=search_rois_by_template,
+        roi_strategies_by_template=search_roi_strategy_by_template,
         plan_mask_foregrounds=plan_mask_foregrounds,
         detector_profile=detector_profile,
         progress_callback=_progress,
@@ -1018,6 +1020,7 @@ def _detect_symbols_pipeline(
                 else None
             ),
             content_source=hit.source if hit.is_text_label else "",
+            roi_strategy=hit.roi_strategy,
         )
         per_template.setdefault(hit.template_id, []).append(detection)
 

@@ -124,6 +124,7 @@ def scan_template_candidates(
     variants_by_template: dict[int, list[TemplateVariant]],
     scan_masks_by_template: dict[int, np.ndarray],
     scan_mask_kinds_by_template: dict[int, str] | None = None,
+    roi_strategies_by_template: dict[int, str] | None = None,
     search_rois_by_template: dict[int, list[tuple[int, int, int, int]]],
     plan_mask_foregrounds: dict[int, int],
     detector_profile: str,
@@ -251,6 +252,7 @@ def scan_template_candidates(
         threshold: float,
         scan_mask: np.ndarray,
         scan_mask_kind: str,
+        roi_strategy: str,
         search_rois: list[tuple[int, int, int, int, int]],
         spatial_fair_peaks: bool,
     ) -> list[CandidateHit]:
@@ -357,6 +359,7 @@ def scan_template_candidates(
                     dominant_hsv=None if detector_profile == "gray" else template.dominant_hsv,
                     source="template",
                     is_text_label=template.is_text_label,
+                    roi_strategy=roi_strategy,
                 )
             )
 
@@ -431,6 +434,7 @@ def scan_template_candidates(
                     dominant_hsv=None if detector_profile == "gray" else template.dominant_hsv,
                     source="template_content",
                     is_text_label=True,
+                    roi_strategy=roi_strategy,
                 )
             )
 
@@ -443,6 +447,7 @@ def scan_template_candidates(
             TemplateVariant,
             float,
             np.ndarray,
+            str,
             str,
             list[tuple[int, int, int, int, int]],
             bool,
@@ -458,6 +463,11 @@ def scan_template_candidates(
             scan_mask_kinds_by_template.get(template_id, "unknown")
             if scan_mask_kinds_by_template is not None
             else "unknown"
+        )
+        roi_strategy = (
+            roi_strategies_by_template.get(template_id, "")
+            if roi_strategies_by_template is not None
+            else ""
         )
         search_rois = search_rois_by_template.get(template_id, [])
         if plan_mask_foregrounds.get(template_id, 0) < MIN_TEMPLATE_PIXELS or not search_rois:
@@ -487,6 +497,7 @@ def scan_template_candidates(
                 float,
                 np.ndarray,
                 str,
+                str,
                 list[tuple[int, int, int, int, int]],
                 bool,
             ]
@@ -508,6 +519,7 @@ def scan_template_candidates(
                     threshold,
                     scan_mask,
                     scan_mask_kind,
+                    roi_strategy,
                     search_rois_with_foreground,
                     spatial_fair_peaks,
                 )
@@ -558,7 +570,7 @@ def scan_template_candidates(
         scan_fn = lambda args: _scan_variant(*args)
         scan_strategy = "variant"
         active_opencv_threads = OPENCV_NUM_THREADS
-        scan_task_rois = sum(len(task[6]) for task in variant_scan_tasks)
+        scan_task_rois = sum(len(task[7]) for task in variant_scan_tasks)
 
     if scan_items:
         completed_scans = 0
