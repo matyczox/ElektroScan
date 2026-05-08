@@ -14,8 +14,14 @@ def _safe_cpu_count() -> int:
     return max(1, int(os.cpu_count() or 1))
 
 
+def _default_opencv_threads() -> int:
+    """Keep OpenCV single-threaded while Python spreads variant scan tasks."""
+
+    return 1
+
+
 def _default_detector_workers() -> int:
-    """Use available logical cores while keeping OpenCV internal threading low."""
+    """Use available logical cores with single-threaded OpenCV calls."""
 
     return _safe_cpu_count()
 
@@ -50,7 +56,7 @@ DETECTOR_POSTPROCESS_MAX_WORKERS = _env_int(
     "ELEKTROSCAN_DETECTOR_POSTPROCESS_WORKERS",
     _default_detector_workers(),
 )
-OPENCV_NUM_THREADS = _env_int("ELEKTROSCAN_OPENCV_THREADS", 1)
+OPENCV_NUM_THREADS = _env_int("ELEKTROSCAN_OPENCV_THREADS", _default_opencv_threads())
 
 try:
     cv2.setNumThreads(OPENCV_NUM_THREADS)
@@ -123,9 +129,13 @@ GRAY_SEARCH_ROI_OVERLAP_THRESHOLD = _env_float(
     "ELEKTROSCAN_GRAY_SEARCH_ROI_OVERLAP_THRESHOLD", 0.82
 )
 GRAY_SPATIAL_FAIR_PEAKS_PER_ROI = _env_int("ELEKTROSCAN_GRAY_SPATIAL_FAIR_PEAKS_PER_ROI", 6)
+GRAY_SCAN_MIN_ROI_FOREGROUND_RATIO = _env_float(
+    "ELEKTROSCAN_GRAY_SCAN_MIN_ROI_FOREGROUND_RATIO", 0.50
+)
 GRAY_RAW_MAX_HITS_PER_VARIANT = _env_int("ELEKTROSCAN_GRAY_RAW_MAX_HITS_PER_VARIANT", 180)
 GRAY_RAW_MAX_HITS_PER_TEMPLATE = _env_int("ELEKTROSCAN_GRAY_RAW_MAX_HITS_PER_TEMPLATE", 1200)
 GRAY_RAW_MAX_TOTAL_HITS = _env_int("ELEKTROSCAN_GRAY_RAW_MAX_TOTAL_HITS", 9000)
+GRAY_RAW_MIN_HITS_PER_TEMPLATE = _env_int("ELEKTROSCAN_GRAY_RAW_MIN_HITS_PER_TEMPLATE", 80)
 
 # Large/complex gray templates (for example framed labels) lose too much signal
 # when long-stroke suppression removes their frame. Use raw ink for scanning

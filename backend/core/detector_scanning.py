@@ -17,9 +17,12 @@ from core.detector_config import (
     MAX_PEAKS_PER_VARIANT,
     MAX_TEXT_CONTENT_PEAKS_PER_VARIANT,
     MIN_TEMPLATE_PIXELS,
+    OPENCV_NUM_THREADS,
+    GRAY_SCAN_MIN_ROI_FOREGROUND_RATIO,
     TEXT_CONTENT_THRESHOLD,
     THRESHOLD_DILATED,
     THRESHOLD_PRECISE,
+    _safe_cpu_count,
 )
 from core.detector_masks import _find_local_maxima, _tight_mask_crop
 from core.detector_models import CandidateHit, TemplateInfo, TemplateVariant
@@ -32,6 +35,8 @@ class ScanResult:
     skipped_empty_color_masks: int
     timing_seconds: float
     raw_hits_by_mask_kind: dict[str, int]
+    scan_strategy: str
+    opencv_threads: int
 
 
 def _is_content_scan_eligible(variant: TemplateVariant) -> bool:
@@ -46,6 +51,27 @@ def _is_content_scan_eligible(variant: TemplateVariant) -> bool:
     if content_crop is None:
         return False
     return content_crop.shape != variant.transformed_mask.shape
+
+
+def _needs_directional_text_content_scan(template: TemplateInfo) -> bool:
+    """Return true for label templates whose marker can move around text.
+
+    Large framed/text-like symbols in the gray Viking fixtures validate through
+    the full template. Running an extra content-only scan for every rotation and
+    scale creates tens of thousands of matchTemplate calls and many duplicates.
+    F-like labels, however, need content-only rescue because their direction
+    marker can appear above/below the text on the plan.
+    """
+
+    if not template.is_text_label or template.content_bbox is None:
+        return False
+    height, width = template.mask.shape[:2]
+    _x, y, content_width, content_height = template.content_bbox
+    return (
+        y >= height * 0.25
+        and content_width >= width * 0.55
+        and content_height >= height * 0.45
+    )
 
 
 def _select_spatially_fair_peaks(
@@ -98,7 +124,169 @@ def scan_template_candidates(
 ) -> ScanResult:
     """Run matchTemplate over prepared scan masks and ROIs."""
 
-    def _scan_template(template_id: int) -> list[CandidateHit]:
+    def _scan_variant(
+        template_id: int,
+        template: TemplateInfo,
+        variant: TemplateVariant,
+        threshold: float,
+        scan_mask: np.ndarray,
+        scan_mask_kind: str,
+        search_rois: list[tuple[int, int, int, int, int]],
+        spatial_fair_peaks: bool,
+    ) -> list[CandidateHit]:
+        """Scan one prepared variant across all ROIs.
+
+        Variant-level jobs keep all CPU cores busy even when a PDF has only a
+        handful of templates, while preserving the same candidate logic.
+        """
+
+        template_hits: list[CandidateHit] = []
+
+        variant_peaks: list[tuple[int, int, float]] = []
+        too_many_peaks = False
+        min_roi_foreground = (
+            variant.pixel_count * float(GRAY_SCAN_MIN_ROI_FOREGROUND_RATIO)
+            if detector_profile == "gray"
+            else 0.0
+        )
+        for roi_x, roi_y, roi_w, roi_h, roi_foreground in search_rois:
+            if variant.height > roi_h or variant.width > roi_w:
+                continue
+            if roi_foreground < min_roi_foreground:
+                continue
+
+            roi_plan_mask = scan_mask[roi_y : roi_y + roi_h, roi_x : roi_x + roi_w]
+            match_result = cv2.matchTemplate(
+                roi_plan_mask,
+                variant.transformed_mask,
+                cv2.TM_CCOEFF_NORMED,
+            )
+            peaks = _find_local_maxima(
+                match_result,
+                threshold=threshold,
+                template_width=variant.width,
+                template_height=variant.height,
+            )
+            if (
+                spatial_fair_peaks
+                and len(peaks) > gray_strategy.gray_spatial_fair_peaks_per_roi()
+            ):
+                peaks = _select_spatially_fair_peaks(
+                    peaks,
+                    limit=gray_strategy.gray_spatial_fair_peaks_per_roi(),
+                    template_width=variant.width,
+                    template_height=variant.height,
+                )
+            if peaks:
+                variant_peaks.extend((roi_x + px, roi_y + py, score) for px, py, score in peaks)
+            if not spatial_fair_peaks and len(variant_peaks) > MAX_PEAKS_PER_VARIANT:
+                too_many_peaks = True
+                break
+
+        if too_many_peaks:
+            variant_peaks.sort(key=lambda item: item[2], reverse=True)
+            variant_peaks = variant_peaks[:MAX_PEAKS_PER_VARIANT]
+
+        for px, py, score in variant_peaks:
+            template_hits.append(
+                CandidateHit(
+                    template_id=template_id,
+                    scale=variant.scale,
+                    rotation=variant.rotation,
+                    mirrored=variant.mirrored,
+                    transformed_mask=variant.transformed_mask,
+                    content_mask=variant.content_mask,
+                    pixel_count=variant.pixel_count,
+                    content_pixel_count=variant.content_pixel_count,
+                    content_bbox=variant.content_bbox,
+                    bbox=(px, py, variant.width, variant.height),
+                    match_score=score,
+                    dominant_hsv=None if detector_profile == "gray" else template.dominant_hsv,
+                    source="template",
+                    is_text_label=template.is_text_label,
+                )
+            )
+
+        if (
+            not _needs_directional_text_content_scan(template)
+            or not _is_content_scan_eligible(variant)
+        ):
+            return template_hits
+
+        content_crop = _tight_mask_crop(variant.content_mask)
+        if content_crop is None or variant.content_bbox is None:
+            return template_hits
+
+        content_x, content_y, content_w, content_h = variant.content_bbox
+        content_peaks: list[tuple[int, int, float]] = []
+        too_many_content_peaks = False
+        min_content_roi_foreground = (
+            variant.content_pixel_count * float(GRAY_SCAN_MIN_ROI_FOREGROUND_RATIO)
+            if detector_profile == "gray"
+            else 0.0
+        )
+        for roi_x, roi_y, roi_w, roi_h, roi_foreground in search_rois:
+            if content_h > roi_h or content_w > roi_w:
+                continue
+            if roi_foreground < min_content_roi_foreground:
+                continue
+
+            roi_plan_mask = scan_mask[roi_y : roi_y + roi_h, roi_x : roi_x + roi_w]
+            match_result = cv2.matchTemplate(
+                roi_plan_mask,
+                content_crop,
+                cv2.TM_CCOEFF_NORMED,
+            )
+            peaks = _find_local_maxima(
+                match_result,
+                threshold=TEXT_CONTENT_THRESHOLD,
+                template_width=content_w,
+                template_height=content_h,
+            )
+            if peaks:
+                content_peaks.extend((roi_x + px, roi_y + py, score) for px, py, score in peaks)
+            if len(content_peaks) > MAX_TEXT_CONTENT_PEAKS_PER_VARIANT:
+                too_many_content_peaks = True
+                break
+
+        if too_many_content_peaks:
+            content_peaks.sort(key=lambda item: item[2], reverse=True)
+            content_peaks = content_peaks[:MAX_TEXT_CONTENT_PEAKS_PER_VARIANT]
+
+        for px, py, score in content_peaks:
+            template_hits.append(
+                CandidateHit(
+                    template_id=template_id,
+                    scale=variant.scale,
+                    rotation=variant.rotation,
+                    mirrored=variant.mirrored,
+                    transformed_mask=variant.content_mask,
+                    content_mask=variant.content_mask,
+                    pixel_count=variant.content_pixel_count,
+                    content_pixel_count=variant.content_pixel_count,
+                    content_bbox=variant.content_bbox,
+                    bbox=(px - content_x, py - content_y, variant.width, variant.height),
+                    match_score=score,
+                    dominant_hsv=None if detector_profile == "gray" else template.dominant_hsv,
+                    source="template_content",
+                    is_text_label=True,
+                )
+            )
+
+        return template_hits
+
+    def _scan_template_variants(template_id: int) -> list[
+        tuple[
+            int,
+            TemplateInfo,
+            TemplateVariant,
+            float,
+            np.ndarray,
+            str,
+            list[tuple[int, int, int, int, int]],
+            bool,
+        ]
+    ]:
         template = templates[template_id]
         threshold = THRESHOLD_PRECISE if template.requires_precision else THRESHOLD_DILATED
         if detector_profile == "gray":
@@ -114,11 +302,34 @@ def scan_template_candidates(
         if plan_mask_foregrounds.get(template_id, 0) < MIN_TEMPLATE_PIXELS or not search_rois:
             return []
 
+        foreground_mask = (scan_mask > 0).astype(np.uint8, copy=False)
+        foreground_integral = cv2.integral(foreground_mask, sdepth=cv2.CV_32S)
+        search_rois_with_foreground = []
+        for roi_x, roi_y, roi_w, roi_h in search_rois:
+            roi_foreground = int(
+                foreground_integral[roi_y + roi_h, roi_x + roi_w]
+                - foreground_integral[roi_y, roi_x + roi_w]
+                - foreground_integral[roi_y + roi_h, roi_x]
+                + foreground_integral[roi_y, roi_x]
+            )
+            search_rois_with_foreground.append((roi_x, roi_y, roi_w, roi_h, roi_foreground))
+
         spatial_fair_peaks = (
             detector_profile == "gray" and gray_strategy.use_gray_spatial_fair_peaks(template)
         )
 
-        template_hits: list[CandidateHit] = []
+        tasks: list[
+            tuple[
+                int,
+                TemplateInfo,
+                TemplateVariant,
+                float,
+                np.ndarray,
+                str,
+                list[tuple[int, int, int, int, int]],
+                bool,
+            ]
+        ] = []
         for variant in variants_by_template.get(template_id, []):
             if detector_profile == "gray" and not gray_strategy.should_scan_gray_variant(
                 template,
@@ -128,125 +339,27 @@ def scan_template_candidates(
                 continue
             if variant.height > scan_mask.shape[0] or variant.width > scan_mask.shape[1]:
                 continue
-
-            variant_peaks: list[tuple[int, int, float]] = []
-            too_many_peaks = False
-            for roi_x, roi_y, roi_w, roi_h in search_rois:
-                if variant.height > roi_h or variant.width > roi_w:
-                    continue
-
-                roi_plan_mask = scan_mask[roi_y : roi_y + roi_h, roi_x : roi_x + roi_w]
-                match_result = cv2.matchTemplate(
-                    roi_plan_mask,
-                    variant.transformed_mask,
-                    cv2.TM_CCOEFF_NORMED,
+            tasks.append(
+                (
+                    template_id,
+                    template,
+                    variant,
+                    threshold,
+                    scan_mask,
+                    scan_mask_kind,
+                    search_rois_with_foreground,
+                    spatial_fair_peaks,
                 )
-                peaks = _find_local_maxima(
-                    match_result,
-                    threshold=threshold,
-                    template_width=variant.width,
-                    template_height=variant.height,
-                )
-                if (
-                    spatial_fair_peaks
-                    and len(peaks) > gray_strategy.gray_spatial_fair_peaks_per_roi()
-                ):
-                    peaks = _select_spatially_fair_peaks(
-                        peaks,
-                        limit=gray_strategy.gray_spatial_fair_peaks_per_roi(),
-                        template_width=variant.width,
-                        template_height=variant.height,
-                    )
-                if peaks:
-                    variant_peaks.extend((roi_x + px, roi_y + py, score) for px, py, score in peaks)
-                if not spatial_fair_peaks and len(variant_peaks) > MAX_PEAKS_PER_VARIANT:
-                    too_many_peaks = True
-                    break
+            )
 
-            if too_many_peaks:
-                variant_peaks.sort(key=lambda item: item[2], reverse=True)
-                variant_peaks = variant_peaks[:MAX_PEAKS_PER_VARIANT]
+        return tasks
 
-            for px, py, score in variant_peaks:
-                template_hits.append(
-                    CandidateHit(
-                        template_id=template_id,
-                        scale=variant.scale,
-                        rotation=variant.rotation,
-                        mirrored=variant.mirrored,
-                        transformed_mask=variant.transformed_mask,
-                        content_mask=variant.content_mask,
-                        pixel_count=variant.pixel_count,
-                        content_pixel_count=variant.content_pixel_count,
-                        content_bbox=variant.content_bbox,
-                        bbox=(px, py, variant.width, variant.height),
-                        match_score=score,
-                        dominant_hsv=None if detector_profile == "gray" else template.dominant_hsv,
-                        source="template",
-                        is_text_label=template.is_text_label,
-                    )
-                )
+    def _scan_template(template_id: int) -> list[CandidateHit]:
+        """Scan all variants for one template in the current worker."""
 
-            if (
-                detector_profile == "gray"
-                or not template.is_text_label
-                or not _is_content_scan_eligible(variant)
-            ):
-                continue
-
-            content_crop = _tight_mask_crop(variant.content_mask)
-            if content_crop is None or variant.content_bbox is None:
-                continue
-
-            content_x, content_y, content_w, content_h = variant.content_bbox
-            content_peaks: list[tuple[int, int, float]] = []
-            too_many_content_peaks = False
-            for roi_x, roi_y, roi_w, roi_h in search_rois:
-                if content_h > roi_h or content_w > roi_w:
-                    continue
-
-                roi_plan_mask = scan_mask[roi_y : roi_y + roi_h, roi_x : roi_x + roi_w]
-                match_result = cv2.matchTemplate(
-                    roi_plan_mask,
-                    content_crop,
-                    cv2.TM_CCOEFF_NORMED,
-                )
-                peaks = _find_local_maxima(
-                    match_result,
-                    threshold=TEXT_CONTENT_THRESHOLD,
-                    template_width=content_w,
-                    template_height=content_h,
-                )
-                if peaks:
-                    content_peaks.extend((roi_x + px, roi_y + py, score) for px, py, score in peaks)
-                if len(content_peaks) > MAX_TEXT_CONTENT_PEAKS_PER_VARIANT:
-                    too_many_content_peaks = True
-                    break
-
-            if too_many_content_peaks:
-                content_peaks.sort(key=lambda item: item[2], reverse=True)
-                content_peaks = content_peaks[:MAX_TEXT_CONTENT_PEAKS_PER_VARIANT]
-
-            for px, py, score in content_peaks:
-                template_hits.append(
-                    CandidateHit(
-                        template_id=template_id,
-                        scale=variant.scale,
-                        rotation=variant.rotation,
-                        mirrored=variant.mirrored,
-                        transformed_mask=variant.content_mask,
-                        content_mask=variant.content_mask,
-                        pixel_count=variant.content_pixel_count,
-                        content_pixel_count=variant.content_pixel_count,
-                        content_bbox=variant.content_bbox,
-                        bbox=(px - content_x, py - content_y, variant.width, variant.height),
-                        match_score=score,
-                        dominant_hsv=template.dominant_hsv,
-                        source="template_content",
-                        is_text_label=True,
-                    )
-                )
-
+        template_hits: list[CandidateHit] = []
+        for task in _scan_template_variants(template_id):
+            template_hits.extend(_scan_variant(*task))
         return template_hits
 
     template_ids_to_scan = [
@@ -256,36 +369,65 @@ def scan_template_candidates(
     ]
     skipped_empty_color_masks = len(variants_by_template) - len(template_ids_to_scan)
 
+    variant_scan_tasks = [
+        task
+        for template_id in template_ids_to_scan
+        for task in _scan_template_variants(template_id)
+    ]
+
     raw_template_hits: list[CandidateHit] = []
     raw_hits_by_mask_kind: dict[str, int] = {}
     phase_start = time.perf_counter()
-    scan_workers = max(1, min(len(template_ids_to_scan), DETECTOR_SCAN_MAX_WORKERS))
-    if template_ids_to_scan:
+    use_template_tasks = False
+    if use_template_tasks:
+        scan_items = template_ids_to_scan
+        scan_workers = max(1, min(len(scan_items), _safe_cpu_count()))
+        scan_label = "template"
+        scan_fn = _scan_template
+        scan_strategy = "template"
+        active_opencv_threads = 1
+    else:
+        scan_items = variant_scan_tasks
+        scan_workers = max(1, min(len(scan_items), DETECTOR_SCAN_MAX_WORKERS))
+        scan_label = "wariantow"
+        scan_fn = lambda args: _scan_variant(*args)
+        scan_strategy = "variant"
+        active_opencv_threads = OPENCV_NUM_THREADS
+
+    if scan_items:
         completed_scans = 0
-        total_scans = max(1, len(template_ids_to_scan))
-        with ThreadPoolExecutor(max_workers=scan_workers) as pool:
-            for hits in pool.map(_scan_template, template_ids_to_scan):
-                raw_template_hits.extend(hits)
-                for hit in hits:
-                    mask_kind = (
-                        scan_mask_kinds_by_template.get(hit.template_id, "raw")
-                        if scan_mask_kinds_by_template is not None
-                        else "raw"
-                    )
-                    raw_hits_by_mask_kind[mask_kind] = raw_hits_by_mask_kind.get(mask_kind, 0) + 1
-                completed_scans += 1
-                if (
-                    completed_scans == 1
-                    or completed_scans % 2 == 0
-                    or completed_scans == total_scans
-                ):
-                    progress_callback(
-                        "scan",
-                        25 + 35 * completed_scans / total_scans,
-                        f"Skan template {completed_scans}/{total_scans}",
-                    )
+        total_scans = max(1, len(scan_items))
+        progress_step = max(1, total_scans // 20)
+        previous_opencv_threads = cv2.getNumThreads()
+        try:
+            cv2.setNumThreads(active_opencv_threads)
+            with ThreadPoolExecutor(max_workers=scan_workers) as pool:
+                for hits in pool.map(scan_fn, scan_items):
+                    raw_template_hits.extend(hits)
+                    for hit in hits:
+                        mask_kind = (
+                            scan_mask_kinds_by_template.get(hit.template_id, "raw")
+                            if scan_mask_kinds_by_template is not None
+                            else "raw"
+                        )
+                        raw_hits_by_mask_kind[mask_kind] = raw_hits_by_mask_kind.get(mask_kind, 0) + 1
+                    completed_scans += 1
+                    if (
+                        completed_scans == 1
+                        or completed_scans % progress_step == 0
+                        or completed_scans == total_scans
+                    ):
+                        progress_callback(
+                            "scan",
+                            25 + 35 * completed_scans / total_scans,
+                            f"Skan {scan_label} {completed_scans}/{total_scans}",
+                        )
+        finally:
+            cv2.setNumThreads(previous_opencv_threads)
     else:
         scan_workers = 0
+        scan_strategy = "none"
+        active_opencv_threads = OPENCV_NUM_THREADS
 
     return ScanResult(
         raw_template_hits=raw_template_hits,
@@ -293,4 +435,6 @@ def scan_template_candidates(
         skipped_empty_color_masks=skipped_empty_color_masks,
         timing_seconds=time.perf_counter() - phase_start,
         raw_hits_by_mask_kind=raw_hits_by_mask_kind,
+        scan_strategy=scan_strategy,
+        opencv_threads=active_opencv_threads,
     )

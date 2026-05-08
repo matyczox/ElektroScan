@@ -10,6 +10,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+import os
 
 import cv2
 import numpy as np
@@ -93,6 +94,142 @@ def _detect_symbols_pipeline(
             pass
 
     detector_profile = detector_profile if detector_profile in {"color", "gray"} else "color"
+    initial_debug_profile = dict(debug_profile or {})
+    ablation_value = str(
+        initial_debug_profile.get("ablation") or os.getenv("ELEKTROSCAN_ABLATION", "")
+    ).strip().lower()
+    ablation_no_text_mirror = ablation_value in {
+        "no-text-mirror",
+        "no_text_mirror",
+        "notextmirror",
+    } or os.getenv("ELEKTROSCAN_ABLATION_NO_TEXT_MIRROR", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+    trace_input = initial_debug_profile.get("candidateTrace") or initial_debug_profile.get("trace") or {}
+    if not isinstance(trace_input, dict):
+        trace_input = {}
+
+    def _trace_values(value: object) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [part.strip() for part in value.replace(";", ",").split(",") if part.strip()]
+        if isinstance(value, (list, tuple, set)):
+            return [str(part).strip() for part in value if str(part).strip()]
+        return [str(value).strip()] if str(value).strip() else []
+
+    def _trace_points(value: object) -> list[tuple[float, float]]:
+        raw_values: list[object]
+        if value is None:
+            raw_values = []
+        elif isinstance(value, str):
+            raw_values = [part.strip() for part in value.split(";") if part.strip()]
+        elif isinstance(value, (list, tuple, set)):
+            raw_values = list(value)
+        else:
+            raw_values = [value]
+
+        points: list[tuple[float, float]] = []
+        for item in raw_values:
+            if isinstance(item, (list, tuple)) and len(item) >= 2:
+                points.append((float(item[0]), float(item[1])))
+                continue
+            parts = str(item).replace(":", ",").split(",")
+            if len(parts) >= 2:
+                points.append((float(parts[0].strip()), float(parts[1].strip())))
+        return points
+
+    trace_symbols = set(_trace_values(trace_input.get("symbols") or trace_input.get("symbol")))
+    trace_symbols.update(_trace_values(os.getenv("ELEKTROSCAN_TRACE_SYMBOLS")))
+    trace_points = _trace_points(trace_input.get("points") or trace_input.get("point"))
+    trace_points.extend(_trace_points(os.getenv("ELEKTROSCAN_TRACE_POINTS")))
+    trace_radius = float(trace_input.get("radius") or os.getenv("ELEKTROSCAN_TRACE_RADIUS", 80))
+    trace_max_items = int(trace_input.get("maxItems") or os.getenv("ELEKTROSCAN_TRACE_MAX_ITEMS", 40))
+    candidate_trace_enabled = bool(trace_symbols or trace_points)
+    candidate_trace: dict[str, dict] = {}
+
+    def _trace_symbol_matches(symbol_name: str) -> bool:
+        if not trace_symbols:
+            return True
+        return any(
+            symbol_name == requested
+            or symbol_name.startswith(f"{requested}_")
+            or symbol_name.startswith(requested)
+            for requested in trace_symbols
+        )
+
+    def _trace_box_distance(bbox: tuple[int, int, int, int]) -> float:
+        if not trace_points:
+            return 0.0
+        x, y, w, h = bbox
+        best = float("inf")
+        for px, py in trace_points:
+            dx = max(float(x) - px, 0.0, px - float(x + w))
+            dy = max(float(y) - py, 0.0, py - float(y + h))
+            best = min(best, float(np.hypot(dx, dy)))
+        return best
+
+    def _record_candidate_trace(
+        stage: str,
+        hits: list[CandidateHit],
+        reason_by_id: dict[int, str] | None = None,
+    ) -> None:
+        if not candidate_trace_enabled:
+            return
+
+        matched: list[tuple[float, CandidateHit]] = []
+        for hit in hits:
+            if not (0 <= hit.template_id < len(templates)):
+                continue
+            symbol_name = templates[hit.template_id].name
+            if not _trace_symbol_matches(symbol_name):
+                continue
+            distance = _trace_box_distance(hit.bbox)
+            if trace_points and distance > trace_radius:
+                continue
+            matched.append((distance, hit))
+
+        matched.sort(
+            key=lambda item: (
+                item[0],
+                -float(item[1].verification_score),
+                -float(item[1].match_score),
+            )
+        )
+        items = []
+        reason_by_id = reason_by_id or {}
+        for distance, hit in matched[:trace_max_items]:
+            x, y, w, h = hit.bbox
+            item = {
+                "symbolName": templates[hit.template_id].name,
+                "templateId": int(hit.template_id),
+                "bbox": [int(x), int(y), int(w), int(h)],
+                "match": round(float(hit.match_score), 3),
+                "verification": round(float(hit.verification_score), 3),
+                "coverage": round(float(hit.coverage), 3),
+                "purity": round(float(hit.purity), 3),
+                "context": round(float(hit.context_purity), 3),
+                "contentScore": round(float(hit.content_score), 3),
+                "pixelCount": int(hit.pixel_count),
+                "scale": round(float(hit.scale), 3),
+                "rotation": int(hit.rotation),
+                "mirrored": bool(hit.mirrored),
+                "source": str(hit.source),
+                "isTextLabel": bool(hit.is_text_label),
+                "distance": round(float(distance), 3),
+            }
+            reason = reason_by_id.get(id(hit))
+            if reason:
+                item["reason"] = reason
+            items.append(item)
+        candidate_trace[stage] = {
+            "totalCandidates": int(len(hits)),
+            "matchedCandidates": int(len(matched)),
+            "items": items,
+        }
 
     legend_rect = _estimate_legend_exclude_rect(
         pdf_path=pdf_path or "",
@@ -193,6 +330,7 @@ def _detect_symbols_pipeline(
                         item[1],
                         scales=used_scales,
                         include_gray_diagonal_rotations=detector_profile == "gray",
+                        disable_text_mirror=ablation_no_text_mirror,
                     ),
                 ),
                 enumerate(templates),
@@ -414,6 +552,7 @@ def _detect_symbols_pipeline(
     diagnostics["skipped_empty_color_masks"] = scan_result.skipped_empty_color_masks
     timings["scan"] = scan_result.timing_seconds
     diagnostics["raw_peaks"] = len(raw_template_hits)
+    _record_candidate_trace("raw_scan", raw_template_hits)
 
     # Per-scale histograms for diagnostics: count raw_peaks at each scale
     # before budget/prefilter so we can see whether matchTemplate fires at all
@@ -433,6 +572,7 @@ def _detect_symbols_pipeline(
         diagnostics["raw_budget_removed"] = int(gray_budget_profile.get("removed", 0))
     else:
         diagnostics["raw_budget_hits"] = len(raw_template_hits)
+    _record_candidate_trace("raw_budget", raw_template_hits)
 
     phase_start = time.perf_counter()
     raw_before_prefilter = len(raw_template_hits)
@@ -458,6 +598,7 @@ def _detect_symbols_pipeline(
     diagnostics["gray_frame_raw_rescue_hits"] = len(gray_frame_raw_rescue_hits)
     diagnostics["gray_frame_raw_rescue_restored"] = len(restored)
     timings["raw_prefilter"] = time.perf_counter() - phase_start
+    _record_candidate_trace("raw_prefilter", raw_template_hits)
 
     candidates_by_scale: dict[float, int] = {}
     for _hit in raw_template_hits:
@@ -484,6 +625,8 @@ def _detect_symbols_pipeline(
     validation_workers = validation_result.validation_workers
     diagnostics["promoted_targeted_hits"] += validation_result.promoted_targeted_hits
     validated_candidates.extend(validated_hits)
+    _record_candidate_trace("validation_accepted", validated_hits)
+    _record_candidate_trace("validation_rejected", validation_result.rejected_hits)
 
     accepted_by_scale: dict[float, int] = {}
     for _hit in validated_hits:
@@ -497,11 +640,17 @@ def _detect_symbols_pipeline(
     prefiltered_candidates = _prefilter_candidates(validated_candidates)
     diagnostics["prefilter_hits"] = len(prefiltered_candidates)
     timings["prefilter"] = time.perf_counter() - phase_start
+    _record_candidate_trace("prefilter", prefiltered_candidates)
 
     phase_start = time.perf_counter()
-    pre_parent_candidates = _cluster_candidates(prefiltered_candidates, parent_ids_by_child)
+    pre_parent_candidates = _cluster_candidates(
+        prefiltered_candidates,
+        parent_ids_by_child,
+        mode=detector_profile,
+    )
     diagnostics["pre_parent_clusters"] = len(pre_parent_candidates)
     timings["pre_parent_clustering"] = time.perf_counter() - phase_start
+    _record_candidate_trace("pre_parent_clusters", pre_parent_candidates)
 
     parent_search_result = search_parent_candidates(
         pre_parent_candidates=pre_parent_candidates,
@@ -522,16 +671,27 @@ def _detect_symbols_pipeline(
     diagnostics["parent_search_candidates"] += parent_search_result.attempted_candidates
     diagnostics["promoted_parent_search_hits"] += parent_search_result.promoted_hits
     timings["parent_search"] = parent_search_result.timing_seconds
+    _record_candidate_trace("parent_search", parent_search_candidates)
 
     phase_start = time.perf_counter()
     _progress("final_clustering", 94, "Finalne laczenie wynikow")
-    final_hits = _cluster_candidates(parent_search_candidates, parent_ids_by_child)
+    final_hits = _cluster_candidates(
+        parent_search_candidates,
+        parent_ids_by_child,
+        mode=detector_profile,
+    )
     if detector_profile == "gray":
-        final_hits, rescued_gray_frames = gray_strategy.rescue_validated_gray_frame_hits(
+        final_hits, rescued_gray_frames, gray_rescue_trace = gray_strategy.rescue_validated_gray_frame_hits(
             final_hits,
             validated_hits,
             templates,
         )
+        for stage_name, stage_trace in gray_rescue_trace.items():
+            _record_candidate_trace(
+                stage_name,
+                stage_trace["hits"],
+                stage_trace.get("reasons"),
+            )
         gray_unresolved_strong_hits = gray_strategy.trace_unresolved_strong_gray_hits(
             final_hits,
             validated_hits,
@@ -543,6 +703,7 @@ def _detect_symbols_pipeline(
     diagnostics["gray_frame_final_rescued"] = rescued_gray_frames
     diagnostics["final_hits"] = len(final_hits)
     timings["clustering"] = time.perf_counter() - phase_start
+    _record_candidate_trace("final", final_hits)
 
 
     timings_ms = {name: round(seconds * 1000.0, 3) for name, seconds in timings.items()}
@@ -554,6 +715,7 @@ def _detect_symbols_pipeline(
                 "counters": {key: int(value) for key, value in diagnostics.items()},
                 "profile": detector_profile,
                 "threading": {
+                    "scanStrategy": scan_result.scan_strategy,
                     "scanWorkers": int(scan_workers),
                     "configuredScanWorkers": int(DETECTOR_SCAN_MAX_WORKERS),
                     "validationWorkers": int(validation_workers if raw_template_hits else 0),
@@ -561,7 +723,8 @@ def _detect_symbols_pipeline(
                         parent_search_workers if pre_parent_candidates else 0
                     ),
                     "configuredPostprocessWorkers": int(DETECTOR_POSTPROCESS_MAX_WORKERS),
-                    "opencvThreads": int(OPENCV_NUM_THREADS),
+                    "opencvThreads": int(scan_result.opencv_threads),
+                    "configuredOpencvThreads": int(OPENCV_NUM_THREADS),
                     "cpuCount": int(_safe_cpu_count()),
                 },
                 "searchRoi": {
@@ -572,6 +735,8 @@ def _detect_symbols_pipeline(
                     "fullImageAreaPixels": int(plan_image.shape[0] * plan_image.shape[1]),
                 },
                 "grayRawBudget": gray_budget_profile,
+                "candidateTrace": candidate_trace if candidate_trace_enabled else {},
+                "ablation": {"noTextMirror": bool(ablation_no_text_mirror)},
                 "grayStrokeSuppression": {
                     "removedPixels": int(diagnostics["gray_suppressed_pixels"]),
                     "rawPixels": int(gray_raw_ink_pixels),
@@ -661,7 +826,7 @@ def _detect_symbols_pipeline(
         f" gray_evidence<{diagnostics['gray_dark_evidence_threshold']}={diagnostics['gray_dark_evidence_pixels']}px,"
         f" gray_zone_suppress={diagnostics['gray_dark_zone_suppressed_pixels']}px({diagnostics['gray_dark_zone_suppressed_ratio']:.0%}),"
         f" gray_dark_suppress={diagnostics['gray_dark_suppressed_pixels']}px({diagnostics['gray_dark_suppressed_ratio']:.0%}),"
-        f" threads=scan:{scan_workers}/{DETECTOR_SCAN_MAX_WORKERS}|post:{postprocess_workers}/{DETECTOR_POSTPROCESS_MAX_WORKERS}|opencv:{OPENCV_NUM_THREADS},"  # noqa: E501
+        f" threads={scan_result.scan_strategy}:scan:{scan_workers}/{DETECTOR_SCAN_MAX_WORKERS}|post:{postprocess_workers}/{DETECTOR_POSTPROCESS_MAX_WORKERS}|opencv:{scan_result.opencv_threads},"  # noqa: E501
         f" timings_ms="
         f"pdf_text:{timings_ms['pdf_text']:.0f}|"
         f"prepare:{timings_ms['prepare']:.0f}|"

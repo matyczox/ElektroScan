@@ -37,6 +37,7 @@ from core.detector_config import (
 )
 from core.detector_masks import _hue_distance
 from core.detector_models import CandidateHit
+from core.detector_selection import candidate_quality_key
 
 
 def _bbox_metrics(
@@ -299,23 +300,10 @@ def _suppress_same_template_ghosts(candidates: list[CandidateHit]) -> list[Candi
     return [candidate for idx, candidate in enumerate(candidates) if idx not in suppressed]
 
 
-def _candidate_rank_key(hit: CandidateHit) -> tuple[float, float, float, int]:
+def _candidate_rank_key(hit: CandidateHit) -> tuple[float, ...]:
     """Return the default winner ranking inside a cluster."""
 
-    if hit.is_text_label:
-        return (
-            float(hit.content_score),
-            float(hit.verification_score),
-            float(hit.match_score),
-            1 if hit.source == "pdf_text" else 0,
-        )
-
-    return (
-        float(hit.verification_score),
-        float(hit.color_similarity),
-        float(hit.match_score),
-        1 if hit.source == "pdf_text" else 0,
-    )
+    return candidate_quality_key(hit, mode="color")
 
 
 def _maybe_prefer_fuller_text_label(
@@ -526,6 +514,7 @@ def _select_cluster_satellites(
 def _cluster_candidates(
     candidates: list[CandidateHit],
     parent_ids_by_child: dict[int, set[int]] | None = None,
+    mode: str = "color",
 ) -> list[CandidateHit]:
     """Cluster class-agnostic overlaps and keep one winner per physical place."""
 

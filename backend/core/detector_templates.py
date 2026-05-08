@@ -75,13 +75,13 @@ def _prepare_variants(
     scales: list[float] | tuple[float, ...] | None = None,
     *,
     include_gray_diagonal_rotations: bool = False,
+    disable_text_mirror: bool = False,
 ) -> list[TemplateVariant]:
     """Precompute all scale/rotation variants for one template."""
 
     variants: list[TemplateVariant] = []
     base_mask = template.mask
     template_prefix = _template_numeric_prefix(Path(template.path).name)
-    allow_mirror = template.is_text_label or template_prefix in MIRRORED_VARIANT_PREFIXES
 
     def _mask_aspect(mask: np.ndarray) -> float:
         bbox = _mask_bbox(mask)
@@ -89,6 +89,11 @@ def _prepare_variants(
             return 1.0
         _x, _y, width, height = bbox
         return max(width / max(1, height), height / max(1, width))
+
+    allow_mirror = (
+        (template.is_text_label and not disable_text_mirror)
+        or (not template.is_text_label and template_prefix in MIRRORED_VARIANT_PREFIXES)
+    )
 
     use_diagonal_rotations = (
         include_gray_diagonal_rotations

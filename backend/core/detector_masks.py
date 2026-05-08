@@ -147,11 +147,17 @@ def _ink_mask(
     image_bgr: np.ndarray,
     dilate: bool = False,
     threshold: int = 238,
+    ignore_color: bool = True,
 ) -> np.ndarray:
     """Create a binary mask of visible ink for gray/black vector PDFs."""
 
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
-    mask = np.where(gray < threshold, 255, 0).astype(np.uint8)
+    ink_pixels = gray < threshold
+    if ignore_color:
+        hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
+        color_pixels = cv2.inRange(hsv, HSV_LOWER, HSV_UPPER) > 0
+        ink_pixels = np.logical_and(ink_pixels, np.logical_not(color_pixels))
+    mask = np.where(ink_pixels, 255, 0).astype(np.uint8)
     if dilate:
         mask = cv2.dilate(mask, DILATE_KERNEL, iterations=1)
     return mask
@@ -267,6 +273,9 @@ def _find_local_maxima(
 
     if match_result.size == 0:
         return []
+    _min_value, max_value, _min_loc, _max_loc = cv2.minMaxLoc(match_result)
+    if max_value < threshold:
+        return []
 
     kernel_w = min(
         match_result.shape[1], _odd_size(max(3, int(template_width * LOCAL_MAX_KERNEL_RATIO)))
@@ -317,9 +326,13 @@ def _extract_label_content_mask(mask: np.ndarray) -> np.ndarray | None:
     """Extract glyph-like content from a label by removing long frame/line strokes."""
 
     height, width = mask.shape[:2]
-    if width < LABEL_TEMPLATE_MIN_WIDTH:
+    long_side = max(width, height)
+    short_side = min(width, height)
+    if long_side < LABEL_TEMPLATE_MIN_WIDTH:
         return None
-    if width / max(1, height) < LABEL_TEMPLATE_MIN_ASPECT_RATIO:
+    if short_side < max(18, int(round(LABEL_TEMPLATE_MIN_WIDTH * 0.45))):
+        return None
+    if long_side / max(1, short_side) < LABEL_TEMPLATE_MIN_ASPECT_RATIO:
         return None
 
     foreground_pixels = int(cv2.countNonZero(mask))
@@ -331,9 +344,10 @@ def _extract_label_content_mask(mask: np.ndarray) -> np.ndarray | None:
         if suffix_mode and components <= 2:
             return None
 
-        content = np.zeros_like(mask)
+        candidate_components: list[tuple[int, bool]] = []
         for component_id in range(1, components):
             x = int(stats[component_id, cv2.CC_STAT_LEFT])
+            y = int(stats[component_id, cv2.CC_STAT_TOP])
             w = int(stats[component_id, cv2.CC_STAT_WIDTH])
             h = int(stats[component_id, cv2.CC_STAT_HEIGHT])
             area = int(stats[component_id, cv2.CC_STAT_AREA])
@@ -353,7 +367,40 @@ def _extract_label_content_mask(mask: np.ndarray) -> np.ndarray | None:
             if w >= int(width * 0.92) or h >= int(height * 0.92):
                 continue
 
+            bbox_area = max(1, w * h)
+            fill_ratio = area / bbox_area
+            horizontal_edge_marker = (
+                fill_ratio >= 0.50
+                and (y <= int(height * 0.12) or y + h >= int(height * 0.88))
+                and h <= max(5, int(height * 0.16))
+                and w <= max(8, int(width * 0.45))
+            )
+            vertical_edge_marker = (
+                fill_ratio >= 0.50
+                and (x <= int(width * 0.12) or x + w >= int(width * 0.88))
+                and w <= max(5, int(width * 0.16))
+                and h <= max(8, int(height * 0.45))
+            )
+            # Direction markers on framed labels can move around the label on the
+            # plan. Keep the glyphs, but do not let a top/bottom/side arrow anchor
+            # the content-only match to one legend orientation.
+            is_edge_marker = horizontal_edge_marker or vertical_edge_marker
+            candidate_components.append((component_id, is_edge_marker))
+
+        non_marker_components = [
+            component_id for component_id, is_marker in candidate_components if not is_marker
+        ]
+        if len(non_marker_components) >= 2:
+            kept_component_ids = non_marker_components
+        else:
+            kept_component_ids = [component_id for component_id, _ in candidate_components]
+
+        content = np.zeros_like(mask)
+        for component_id in kept_component_ids:
             content[labels == component_id] = 255
+
+        if len(kept_component_ids) < 2:
+            return None
 
         content_pixels = int(cv2.countNonZero(content))
         if content_pixels < LABEL_CONTENT_MIN_PIXELS:
@@ -367,7 +414,11 @@ def _extract_label_content_mask(mask: np.ndarray) -> np.ndarray | None:
         if content_bbox is None:
             return None
 
-        content_x, _, content_w, _ = content_bbox
+        content_x, _, content_w, content_h = content_bbox
+        if content_w < max(6, int(round(width * 0.12))):
+            return None
+        if content_h < max(8, int(round(height * 0.20))):
+            return None
         if not suffix_mode and content_x <= int(width * 0.10) and content_w < int(width * 0.55):
             return None
 
@@ -647,6 +698,7 @@ def _is_gray_rect_frame_candidate(hit: CandidateHit) -> bool:
     density = hit.pixel_count / max(1, width * height)
     return (
         hit.dominant_hsv is None
+        and not hit.is_text_label
         and aspect >= GRAY_RECT_FRAME_MIN_ASPECT
         and GRAY_RECT_FRAME_MIN_DENSITY <= density <= GRAY_RECT_FRAME_MAX_DENSITY
     )
