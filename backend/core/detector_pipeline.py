@@ -465,6 +465,7 @@ def _detect_symbols_pipeline(
 
     search_rois_by_template: dict[int, list[tuple[int, int, int, int]]] = {}
     search_roi_stats_by_template: dict[int, tuple[bool, int, int]] = {}
+    search_roi_strategy_by_template: dict[int, str] = {}
     gray_search_component_index = (
         gray_strategy.build_gray_search_component_index(gray_zone_mask)
         if detector_profile == "gray" and gray_zone_mask is not None
@@ -478,6 +479,9 @@ def _detect_symbols_pipeline(
         max_width, max_height = max_variant_size_by_template[template_id]
         if detector_profile == "gray":
             roi_seed_mask = gray_zone_mask if gray_zone_mask is not None else plan_mask
+            roi_strategy, tile_size, max_tile_rois = gray_strategy.gray_tile_roi_strategy(
+                templates[template_id]
+            )
             rois, uses_full_scan, roi_area, foreground_pixels = gray_strategy.build_gray_search_rois(
                 roi_seed_mask,
                 plan_image.shape,
@@ -487,22 +491,26 @@ def _detect_symbols_pipeline(
                     templates[template_id]
                 ),
                 component_index=gray_search_component_index,
+                tile_size_override=tile_size,
+                max_tile_rois_override=max_tile_rois,
             )
         else:
+            roi_strategy = "color"
             rois, uses_full_scan, roi_area, foreground_pixels = _build_search_rois(
                 plan_mask,
                 plan_image.shape,
                 max_width,
                 max_height,
             )
-        return template_id, rois, (uses_full_scan, roi_area, foreground_pixels)
+        return template_id, rois, (uses_full_scan, roi_area, foreground_pixels), roi_strategy
 
     roi_workers = max(1, min(len(plan_masks_by_template), DETECTOR_POSTPROCESS_MAX_WORKERS))
     with ThreadPoolExecutor(max_workers=roi_workers) as pool:
         roi_items = list(pool.map(_prepare_search_roi, plan_masks_by_template.items()))
-    for template_id, rois, stats in roi_items:
+    for template_id, rois, stats, roi_strategy in roi_items:
         search_rois_by_template[template_id] = rois
         search_roi_stats_by_template[template_id] = stats
+        search_roi_strategy_by_template[template_id] = roi_strategy
     dilated_plan_masks_by_template: dict[int, np.ndarray] = {}
     timings["prepare"] = time.perf_counter() - phase_start
 
@@ -549,6 +557,24 @@ def _detect_symbols_pipeline(
         "pre_parent_clusters": 0,
         "final_hits": 0,
         "search_rois": sum(len(rois) for rois in search_rois_by_template.values()),
+        "gray_roi_fast_templates": sum(
+            1
+            for strategy in search_roi_strategy_by_template.values()
+            if strategy in {"large_text_fast", "fast_compact"}
+        ),
+        "gray_roi_fast_rois": sum(
+            len(search_rois_by_template[template_id])
+            for template_id, strategy in search_roi_strategy_by_template.items()
+            if strategy in {"large_text_fast", "fast_compact"}
+        ),
+        "gray_roi_safe_templates": sum(
+            1 for strategy in search_roi_strategy_by_template.values() if strategy == "safe_elongated"
+        ),
+        "gray_roi_safe_rois": sum(
+            len(search_rois_by_template[template_id])
+            for template_id, strategy in search_roi_strategy_by_template.items()
+            if strategy == "safe_elongated"
+        ),
         "full_scan_templates": sum(
             1 for uses_full, _, _ in search_roi_stats_by_template.values() if uses_full
         ),

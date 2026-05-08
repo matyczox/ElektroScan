@@ -63,6 +63,8 @@ from core.detector_config import (
     GRAY_RECT_FRAME_WEAK_EDGE_COVERAGE,
     GRAY_SEARCH_COMPONENT_PADDING_RATIO,
     GRAY_SEARCH_COMPONENT_DILATE_ITERATIONS,
+    GRAY_SEARCH_FAST_MAX_TILE_ROIS,
+    GRAY_SEARCH_FAST_TILE_SIZE,
     GRAY_SEARCH_LARGE_TEXT_MAX_TILE_ROIS,
     GRAY_SEARCH_LARGE_TEXT_MIN_TEMPLATE_AREA,
     GRAY_SEARCH_LARGE_TEXT_TILE_SIZE,
@@ -70,6 +72,7 @@ from core.detector_config import (
     GRAY_SEARCH_MAX_TILE_ROIS,
     GRAY_SEARCH_ROI_CONTAINMENT_THRESHOLD,
     GRAY_SEARCH_ROI_OVERLAP_THRESHOLD,
+    GRAY_SEARCH_SAFE_ELONGATED_ASPECT,
     GRAY_SEARCH_TILE_MIN_FOREGROUND,
     GRAY_SEARCH_TILE_PADDING,
     GRAY_SEARCH_TILE_SIZE,
@@ -177,6 +180,42 @@ def use_large_text_tile_rois(template: TemplateInfo) -> bool:
     return (
         template.is_text_label
         and gray_template_area(template) >= GRAY_SEARCH_LARGE_TEXT_MIN_TEMPLATE_AREA
+    )
+
+
+def _gray_template_aspect(template: TemplateInfo) -> float:
+    height, width = template.mask.shape[:2]
+    return max(width / max(1, height), height / max(1, width))
+
+
+def gray_tile_roi_strategy(template: TemplateInfo) -> tuple[str, int, int]:
+    """Return the coarse tile strategy for gray ROI coverage.
+
+    Compact symbols can use smaller tiles with a larger coverage budget. Slender
+    symbols are more sensitive to tile boundaries and isolated line fragments, so
+    they keep the old safety tiles as a fallback.
+    """
+
+    if use_large_text_tile_rois(template):
+        return (
+            "large_text_fast",
+            int(GRAY_SEARCH_LARGE_TEXT_TILE_SIZE),
+            int(GRAY_SEARCH_LARGE_TEXT_MAX_TILE_ROIS),
+        )
+
+    if (not template.is_text_label) and _gray_template_aspect(template) >= float(
+        GRAY_SEARCH_SAFE_ELONGATED_ASPECT
+    ):
+        return (
+            "safe_elongated",
+            int(GRAY_SEARCH_TILE_SIZE),
+            int(GRAY_SEARCH_MAX_TILE_ROIS),
+        )
+
+    return (
+        "fast_compact",
+        int(GRAY_SEARCH_FAST_TILE_SIZE),
+        int(GRAY_SEARCH_FAST_MAX_TILE_ROIS),
     )
 
 
@@ -624,6 +663,8 @@ def build_gray_search_rois(
     *,
     is_large_text_template: bool = False,
     component_index: GraySearchComponentIndex | None = None,
+    tile_size_override: int | None = None,
+    max_tile_rois_override: int | None = None,
 ) -> tuple[list[tuple[int, int, int, int]], bool, int, int]:
     """Build bounded ROIs for gray/ink plans."""
 
@@ -768,10 +809,18 @@ def build_gray_search_rois(
         image_shape,
         foreground_integral,
         tile_size_override=(
-            int(GRAY_SEARCH_LARGE_TEXT_TILE_SIZE) if is_large_text_template else None
+            int(tile_size_override)
+            if tile_size_override is not None
+            else int(GRAY_SEARCH_LARGE_TEXT_TILE_SIZE)
+            if is_large_text_template
+            else None
         ),
         max_tile_rois_override=(
-            int(GRAY_SEARCH_LARGE_TEXT_MAX_TILE_ROIS) if is_large_text_template else None
+            int(max_tile_rois_override)
+            if max_tile_rois_override is not None
+            else int(GRAY_SEARCH_LARGE_TEXT_MAX_TILE_ROIS)
+            if is_large_text_template
+            else None
         ),
     )
     rois = _coalesce_gray_rois(rois, image_shape)
