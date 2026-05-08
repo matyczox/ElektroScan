@@ -30,6 +30,9 @@ from core.detector_config import (
     RAW_PREFILTER_CENTER_DISTANCE_RATIO,
     RAW_PREFILTER_IOM_THRESHOLD,
     RAW_PREFILTER_IOU_THRESHOLD,
+    RAW_PREFILTER_LOCAL_CENTER_DISTANCE_RATIO,
+    RAW_PREFILTER_LOCAL_IOM_THRESHOLD,
+    RAW_PREFILTER_LOCAL_MAX_ALTERNATIVES,
     RAW_PREFILTER_MIN_CANDIDATES,
     TEXT_LABEL_FULLER_AREA_RATIO,
     TEXT_LABEL_FULLER_MAX_CONTENT_DROP,
@@ -37,6 +40,7 @@ from core.detector_config import (
 )
 from core.detector_masks import _hue_distance
 from core.detector_models import CandidateHit
+from core.detector_selection import candidate_quality_key
 
 
 def _bbox_metrics(
@@ -209,6 +213,97 @@ def _should_keep_gray_scale_alternative(
     return nearby_alternatives < 3
 
 
+def _raw_candidates_are_local_alternatives(left: CandidateHit, right: CandidateHit) -> bool:
+    """Return true for same-template gray alternatives in one local place."""
+
+    if left.dominant_hsv is not None or right.dominant_hsv is not None:
+        return False
+    if left.template_id != right.template_id:
+        return False
+    if left.source != right.source:
+        return False
+    if left.roi_strategy != right.roi_strategy:
+        return False
+
+    inter_area, _iou, iom, center_distance = _bbox_metrics(left.bbox, right.bbox)
+    return (
+        inter_area > 0
+        and iom >= RAW_PREFILTER_LOCAL_IOM_THRESHOLD
+        and center_distance <= RAW_PREFILTER_LOCAL_CENTER_DISTANCE_RATIO
+    )
+
+
+def _limit_same_template_raw_local_alternatives(
+    candidates: list[CandidateHit],
+) -> list[CandidateHit]:
+    """Cap duplicate same-template raw alternatives before full validation.
+
+    This is intentionally not a class competition.  It only limits many raw
+    variants from the same template/source/ROI strategy in the same local
+    place, while keeping several alternatives so validation can still choose
+    the scale/rotation that carries real evidence.
+    """
+
+    if len(candidates) < RAW_PREFILTER_MIN_CANDIDATES:
+        return candidates
+    if RAW_PREFILTER_LOCAL_MAX_ALTERNATIVES <= 0:
+        return candidates
+
+    grouped: dict[int, list[CandidateHit]] = {}
+    passthrough: list[CandidateHit] = []
+    for candidate in candidates:
+        if candidate.dominant_hsv is not None:
+            passthrough.append(candidate)
+            continue
+        grouped.setdefault(candidate.template_id, []).append(candidate)
+
+    grid_cell_px = 32
+    filtered: list[CandidateHit] = list(passthrough)
+    for template_hits in grouped.values():
+        kept: list[CandidateHit] = []
+        kept_grid: dict[tuple[str, str, int, int], list[CandidateHit]] = {}
+        for candidate in sorted(template_hits, key=lambda hit: hit.match_score, reverse=True):
+            _x, _y, w, h = candidate.bbox
+            cx, cy = _box_center(candidate.bbox)
+            cell_x = int(cx // grid_cell_px)
+            cell_y = int(cy // grid_cell_px)
+            radius_px = (
+                max(1.0, float(np.hypot(w, h)))
+                * RAW_PREFILTER_LOCAL_CENTER_DISTANCE_RATIO
+            )
+            cell_radius = int(np.ceil(radius_px / grid_cell_px)) + 1
+            key_prefix = (str(candidate.source), str(candidate.roi_strategy))
+
+            local_alternatives = 0
+            for dx in range(-cell_radius, cell_radius + 1):
+                if local_alternatives >= RAW_PREFILTER_LOCAL_MAX_ALTERNATIVES:
+                    break
+                for dy in range(-cell_radius, cell_radius + 1):
+                    bucket = kept_grid.get(
+                        (key_prefix[0], key_prefix[1], cell_x + dx, cell_y + dy)
+                    )
+                    if not bucket:
+                        continue
+                    for existing in bucket:
+                        if _raw_candidates_are_local_alternatives(candidate, existing):
+                            local_alternatives += 1
+                            if local_alternatives >= RAW_PREFILTER_LOCAL_MAX_ALTERNATIVES:
+                                break
+                    if local_alternatives >= RAW_PREFILTER_LOCAL_MAX_ALTERNATIVES:
+                        break
+            if local_alternatives >= RAW_PREFILTER_LOCAL_MAX_ALTERNATIVES:
+                continue
+            kept.append(candidate)
+            kept_grid.setdefault(
+                (key_prefix[0], key_prefix[1], cell_x, cell_y),
+                [],
+            ).append(candidate)
+        filtered.extend(kept)
+
+    filtered.sort(key=lambda hit: (hit.bbox[1], hit.bbox[0], -hit.match_score))
+    return filtered
+
+
 def _prefilter_raw_template_hits(candidates: list[CandidateHit]) -> list[CandidateHit]:
     """Drop near-identical raw candidates only inside the same template family member."""
 
@@ -242,6 +337,14 @@ def _prefilter_raw_template_hits(candidates: list[CandidateHit]) -> list[Candida
 
     filtered.sort(key=lambda hit: (hit.bbox[1], hit.bbox[0], -hit.match_score))
     return filtered
+
+
+def _dedupe_raw_template_hits_before_validation(
+    candidates: list[CandidateHit],
+) -> list[CandidateHit]:
+    """Run conservative same-template raw de-duplication before validation."""
+
+    return _limit_same_template_raw_local_alternatives(candidates)
 
 
 def _suppress_same_template_ghosts(candidates: list[CandidateHit]) -> list[CandidateHit]:
@@ -299,23 +402,10 @@ def _suppress_same_template_ghosts(candidates: list[CandidateHit]) -> list[Candi
     return [candidate for idx, candidate in enumerate(candidates) if idx not in suppressed]
 
 
-def _candidate_rank_key(hit: CandidateHit) -> tuple[float, float, float, int]:
+def _candidate_rank_key(hit: CandidateHit) -> tuple[float, ...]:
     """Return the default winner ranking inside a cluster."""
 
-    if hit.is_text_label:
-        return (
-            float(hit.content_score),
-            float(hit.verification_score),
-            float(hit.match_score),
-            1 if hit.source == "pdf_text" else 0,
-        )
-
-    return (
-        float(hit.verification_score),
-        float(hit.color_similarity),
-        float(hit.match_score),
-        1 if hit.source == "pdf_text" else 0,
-    )
+    return candidate_quality_key(hit, mode="color")
 
 
 def _maybe_prefer_fuller_text_label(
@@ -526,6 +616,7 @@ def _select_cluster_satellites(
 def _cluster_candidates(
     candidates: list[CandidateHit],
     parent_ids_by_child: dict[int, set[int]] | None = None,
+    mode: str = "color",
 ) -> list[CandidateHit]:
     """Cluster class-agnostic overlaps and keep one winner per physical place."""
 

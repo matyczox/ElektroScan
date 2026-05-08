@@ -10,6 +10,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+import os
 
 import cv2
 import numpy as np
@@ -17,8 +18,8 @@ import numpy as np
 from core import detector_color as color_strategy
 from core import detector_gray as gray_strategy
 from core.detector_clustering import (
-    _bbox_metrics,
     _cluster_candidates,
+    _dedupe_raw_template_hits_before_validation,
     _prefilter_candidates,
     _prefilter_raw_template_hits,
 )
@@ -37,6 +38,11 @@ from core.detector_config import (
     OPENCV_NUM_THREADS,
     SCALES,
     _safe_cpu_count,
+)
+from core.detector_diagnostics import (
+    build_candidate_stage_counts,
+    build_hit_flow_profile,
+    build_roi_strategy_profile,
 )
 from core.detector_masks import (
     _build_search_rois,
@@ -93,6 +99,154 @@ def _detect_symbols_pipeline(
             pass
 
     detector_profile = detector_profile if detector_profile in {"color", "gray"} else "color"
+    initial_debug_profile = dict(debug_profile or {})
+    collect_performance_profile = bool(initial_debug_profile.get("performanceProfile"))
+    ablation_value = str(
+        initial_debug_profile.get("ablation") or os.getenv("ELEKTROSCAN_ABLATION", "")
+    ).strip().lower()
+    ablation_no_text_mirror = ablation_value in {
+        "no-text-mirror",
+        "no_text_mirror",
+        "notextmirror",
+    } or os.getenv("ELEKTROSCAN_ABLATION_NO_TEXT_MIRROR", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    gray_text_mirror_override = os.getenv("ELEKTROSCAN_GRAY_TEXT_MIRROR", "").strip().lower()
+    gray_force_text_mirror = ablation_value in {
+        "text-mirror",
+        "text_mirror",
+        "with-text-mirror",
+        "with_text_mirror",
+    } or gray_text_mirror_override in {"1", "true", "yes", "on"}
+    disable_text_mirror = ablation_no_text_mirror or (
+        detector_profile == "gray" and not gray_force_text_mirror
+    )
+
+    trace_input = initial_debug_profile.get("candidateTrace") or initial_debug_profile.get("trace") or {}
+    if not isinstance(trace_input, dict):
+        trace_input = {}
+
+    def _trace_values(value: object) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [part.strip() for part in value.replace(";", ",").split(",") if part.strip()]
+        if isinstance(value, (list, tuple, set)):
+            return [str(part).strip() for part in value if str(part).strip()]
+        return [str(value).strip()] if str(value).strip() else []
+
+    def _trace_points(value: object) -> list[tuple[float, float]]:
+        raw_values: list[object]
+        if value is None:
+            raw_values = []
+        elif isinstance(value, str):
+            raw_values = [part.strip() for part in value.split(";") if part.strip()]
+        elif isinstance(value, (list, tuple, set)):
+            raw_values = list(value)
+        else:
+            raw_values = [value]
+
+        points: list[tuple[float, float]] = []
+        for item in raw_values:
+            if isinstance(item, (list, tuple)) and len(item) >= 2:
+                points.append((float(item[0]), float(item[1])))
+                continue
+            parts = str(item).replace(":", ",").split(",")
+            if len(parts) >= 2:
+                points.append((float(parts[0].strip()), float(parts[1].strip())))
+        return points
+
+    trace_symbols = set(_trace_values(trace_input.get("symbols") or trace_input.get("symbol")))
+    trace_symbols.update(_trace_values(os.getenv("ELEKTROSCAN_TRACE_SYMBOLS")))
+    trace_points = _trace_points(trace_input.get("points") or trace_input.get("point"))
+    trace_points.extend(_trace_points(os.getenv("ELEKTROSCAN_TRACE_POINTS")))
+    trace_radius = float(trace_input.get("radius") or os.getenv("ELEKTROSCAN_TRACE_RADIUS", 80))
+    trace_max_items = int(trace_input.get("maxItems") or os.getenv("ELEKTROSCAN_TRACE_MAX_ITEMS", 40))
+    candidate_trace_enabled = bool(trace_symbols or trace_points)
+    candidate_trace: dict[str, dict] = {}
+
+    def _trace_symbol_matches(symbol_name: str) -> bool:
+        if not trace_symbols:
+            return True
+        return any(
+            symbol_name == requested
+            or symbol_name.startswith(f"{requested}_")
+            or symbol_name.startswith(requested)
+            for requested in trace_symbols
+        )
+
+    def _trace_box_distance(bbox: tuple[int, int, int, int]) -> float:
+        if not trace_points:
+            return 0.0
+        x, y, w, h = bbox
+        best = float("inf")
+        for px, py in trace_points:
+            dx = max(float(x) - px, 0.0, px - float(x + w))
+            dy = max(float(y) - py, 0.0, py - float(y + h))
+            best = min(best, float(np.hypot(dx, dy)))
+        return best
+
+    def _record_candidate_trace(
+        stage: str,
+        hits: list[CandidateHit],
+        reason_by_id: dict[int, str] | None = None,
+    ) -> None:
+        if not candidate_trace_enabled:
+            return
+
+        matched: list[tuple[float, CandidateHit]] = []
+        for hit in hits:
+            if not (0 <= hit.template_id < len(templates)):
+                continue
+            symbol_name = templates[hit.template_id].name
+            if not _trace_symbol_matches(symbol_name):
+                continue
+            distance = _trace_box_distance(hit.bbox)
+            if trace_points and distance > trace_radius:
+                continue
+            matched.append((distance, hit))
+
+        matched.sort(
+            key=lambda item: (
+                item[0],
+                -float(item[1].verification_score),
+                -float(item[1].match_score),
+            )
+        )
+        items = []
+        reason_by_id = reason_by_id or {}
+        for distance, hit in matched[:trace_max_items]:
+            x, y, w, h = hit.bbox
+            item = {
+                "symbolName": templates[hit.template_id].name,
+                "templateId": int(hit.template_id),
+                "bbox": [int(x), int(y), int(w), int(h)],
+                "match": round(float(hit.match_score), 3),
+                "verification": round(float(hit.verification_score), 3),
+                "coverage": round(float(hit.coverage), 3),
+                "purity": round(float(hit.purity), 3),
+                "context": round(float(hit.context_purity), 3),
+                "contentScore": round(float(hit.content_score), 3),
+                "pixelCount": int(hit.pixel_count),
+                "scale": round(float(hit.scale), 3),
+                "rotation": int(hit.rotation),
+                "mirrored": bool(hit.mirrored),
+                "source": str(hit.source),
+                "isTextLabel": bool(hit.is_text_label),
+                "roiStrategy": str(hit.roi_strategy),
+                "distance": round(float(distance), 3),
+            }
+            reason = reason_by_id.get(id(hit))
+            if reason:
+                item["reason"] = reason
+            items.append(item)
+        candidate_trace[stage] = {
+            "totalCandidates": int(len(hits)),
+            "matchedCandidates": int(len(matched)),
+            "items": items,
+        }
 
     legend_rect = _estimate_legend_exclude_rect(
         pdf_path=pdf_path or "",
@@ -122,15 +276,24 @@ def _detect_symbols_pipeline(
 
     color_masks_cache: dict[str, np.ndarray] = {}
     ink_mask_cache: np.ndarray | None = None
+    dilated_ink_mask_cache: np.ndarray | None = None
     empty_plan_mask_cache: np.ndarray | None = None
 
     def _get_ink_plan_mask(*, dilate: bool) -> np.ndarray:
-        nonlocal ink_mask_cache
+        nonlocal ink_mask_cache, dilated_ink_mask_cache
         if ink_mask_cache is None:
             ink_mask_cache = _ink_mask(plan_image, dilate=False)
             for ex, ey, ew, eh in exclude_rects:
                 cv2.rectangle(ink_mask_cache, (ex, ey), (ex + ew, ey + eh), 0, -1)
-        return cv2.dilate(ink_mask_cache, np.ones((3, 3), np.uint8), iterations=1) if dilate else ink_mask_cache
+        if not dilate:
+            return ink_mask_cache
+        if dilated_ink_mask_cache is None:
+            dilated_ink_mask_cache = cv2.dilate(
+                ink_mask_cache,
+                np.ones((3, 3), np.uint8),
+                iterations=1,
+            )
+        return dilated_ink_mask_cache
 
     def _get_empty_plan_mask() -> np.ndarray:
         nonlocal empty_plan_mask_cache
@@ -179,7 +342,7 @@ def _detect_symbols_pipeline(
 
     phase_start = time.perf_counter()
     _progress("prepare", 18, "Przygotowanie masek i wariantow")
-    plan_hsv = cv2.cvtColor(plan_image, cv2.COLOR_BGR2HSV)
+    plan_hsv = cv2.cvtColor(plan_image, cv2.COLOR_BGR2HSV) if detector_profile == "color" else None
 
     variant_workers = max(1, min(len(templates), DETECTOR_POSTPROCESS_MAX_WORKERS))
     used_scales = list(GRAY_SCALES) if detector_profile == "gray" else list(SCALES)
@@ -193,6 +356,7 @@ def _detect_symbols_pipeline(
                         item[1],
                         scales=used_scales,
                         include_gray_diagonal_rotations=detector_profile == "gray",
+                        disable_text_mirror=disable_text_mirror,
                     ),
                 ),
                 enumerate(templates),
@@ -316,6 +480,12 @@ def _detect_symbols_pipeline(
 
     search_rois_by_template: dict[int, list[tuple[int, int, int, int]]] = {}
     search_roi_stats_by_template: dict[int, tuple[bool, int, int]] = {}
+    search_roi_strategy_by_template: dict[int, str] = {}
+    gray_search_component_index = (
+        gray_strategy.build_gray_search_component_index(gray_zone_mask)
+        if detector_profile == "gray" and gray_zone_mask is not None
+        else None
+    )
 
     def _prepare_search_roi(
         item: tuple[int, np.ndarray]
@@ -324,27 +494,46 @@ def _detect_symbols_pipeline(
         max_width, max_height = max_variant_size_by_template[template_id]
         if detector_profile == "gray":
             roi_seed_mask = gray_zone_mask if gray_zone_mask is not None else plan_mask
+            roi_strategy, tile_size, max_tile_rois = gray_strategy.gray_tile_roi_strategy(
+                templates[template_id]
+            )
+            roi_strategy, tile_size, max_tile_rois = (
+                gray_strategy.adapt_gray_tile_roi_strategy_for_plan(
+                    roi_strategy,
+                    tile_size,
+                    max_tile_rois,
+                    gray_search_component_index,
+                )
+            )
             rois, uses_full_scan, roi_area, foreground_pixels = gray_strategy.build_gray_search_rois(
                 roi_seed_mask,
                 plan_image.shape,
                 max_width,
                 max_height,
+                is_large_text_template=gray_strategy.use_large_text_tile_rois(
+                    templates[template_id]
+                ),
+                component_index=gray_search_component_index,
+                tile_size_override=tile_size,
+                max_tile_rois_override=max_tile_rois,
             )
         else:
+            roi_strategy = "color"
             rois, uses_full_scan, roi_area, foreground_pixels = _build_search_rois(
                 plan_mask,
                 plan_image.shape,
                 max_width,
                 max_height,
             )
-        return template_id, rois, (uses_full_scan, roi_area, foreground_pixels)
+        return template_id, rois, (uses_full_scan, roi_area, foreground_pixels), roi_strategy
 
     roi_workers = max(1, min(len(plan_masks_by_template), DETECTOR_POSTPROCESS_MAX_WORKERS))
     with ThreadPoolExecutor(max_workers=roi_workers) as pool:
         roi_items = list(pool.map(_prepare_search_roi, plan_masks_by_template.items()))
-    for template_id, rois, stats in roi_items:
+    for template_id, rois, stats, roi_strategy in roi_items:
         search_rois_by_template[template_id] = rois
         search_roi_stats_by_template[template_id] = stats
+        search_roi_strategy_by_template[template_id] = roi_strategy
     dilated_plan_masks_by_template: dict[int, np.ndarray] = {}
     timings["prepare"] = time.perf_counter() - phase_start
 
@@ -374,6 +563,7 @@ def _detect_symbols_pipeline(
         "raw_prefilter_hits": 0,
         "raw_prefilter_removed": 0,
         "prepared_variants": sum(len(variants) for variants in variants_by_template.values()),
+        "gray_text_mirror_enabled": int(detector_profile == "gray" and not disable_text_mirror),
         "color_no_hsv_templates": sum(
             1
             for template in templates
@@ -390,6 +580,24 @@ def _detect_symbols_pipeline(
         "pre_parent_clusters": 0,
         "final_hits": 0,
         "search_rois": sum(len(rois) for rois in search_rois_by_template.values()),
+        "gray_roi_fast_templates": sum(
+            1
+            for strategy in search_roi_strategy_by_template.values()
+            if strategy in {"large_text_fast", "fast_compact", "fast_compact_connected"}
+        ),
+        "gray_roi_fast_rois": sum(
+            len(search_rois_by_template[template_id])
+            for template_id, strategy in search_roi_strategy_by_template.items()
+            if strategy in {"large_text_fast", "fast_compact", "fast_compact_connected"}
+        ),
+        "gray_roi_safe_templates": sum(
+            1 for strategy in search_roi_strategy_by_template.values() if strategy == "safe_elongated"
+        ),
+        "gray_roi_safe_rois": sum(
+            len(search_rois_by_template[template_id])
+            for template_id, strategy in search_roi_strategy_by_template.items()
+            if strategy == "safe_elongated"
+        ),
         "full_scan_templates": sum(
             1 for uses_full, _, _ in search_roi_stats_by_template.values() if uses_full
         ),
@@ -405,24 +613,32 @@ def _detect_symbols_pipeline(
         scan_masks_by_template=scan_masks_by_template,
         scan_mask_kinds_by_template=scan_mask_kinds_by_template,
         search_rois_by_template=search_rois_by_template,
+        roi_strategies_by_template=search_roi_strategy_by_template,
         plan_mask_foregrounds=plan_mask_foregrounds,
         detector_profile=detector_profile,
         progress_callback=_progress,
+        collect_profile=collect_performance_profile,
     )
     raw_template_hits = scan_result.raw_template_hits
     scan_workers = scan_result.scan_workers
     diagnostics["skipped_empty_color_masks"] = scan_result.skipped_empty_color_masks
+    diagnostics["scan_tasks"] = scan_result.scan_tasks
+    diagnostics["scan_task_rois"] = scan_result.scan_task_rois
     timings["scan"] = scan_result.timing_seconds
     diagnostics["raw_peaks"] = len(raw_template_hits)
+    raw_scan_hits = raw_template_hits
+    _record_candidate_trace("raw_scan", raw_template_hits)
 
     # Per-scale histograms for diagnostics: count raw_peaks at each scale
     # before budget/prefilter so we can see whether matchTemplate fires at all
     # at a given scale (especially important on gray plans).
     raw_peaks_by_scale: dict[float, int] = {}
-    for _hit in raw_template_hits:
-        raw_peaks_by_scale[_hit.scale] = raw_peaks_by_scale.get(_hit.scale, 0) + 1
+    if debug_profile is not None:
+        for _hit in raw_template_hits:
+            raw_peaks_by_scale[_hit.scale] = raw_peaks_by_scale.get(_hit.scale, 0) + 1
 
     gray_budget_profile: dict = {}
+    phase_start = time.perf_counter()
     if detector_profile == "gray":
         raw_template_hits, gray_budget_profile = gray_strategy.gray_raw_budget(
             raw_template_hits,
@@ -433,6 +649,9 @@ def _detect_symbols_pipeline(
         diagnostics["raw_budget_removed"] = int(gray_budget_profile.get("removed", 0))
     else:
         diagnostics["raw_budget_hits"] = len(raw_template_hits)
+    timings["raw_budget"] = time.perf_counter() - phase_start
+    raw_budget_hits = raw_template_hits
+    _record_candidate_trace("raw_budget", raw_template_hits)
 
     phase_start = time.perf_counter()
     raw_before_prefilter = len(raw_template_hits)
@@ -453,15 +672,19 @@ def _detect_symbols_pipeline(
             raw_template_hits.extend(restored)
     else:
         restored = []
+    raw_template_hits = _dedupe_raw_template_hits_before_validation(raw_template_hits)
     diagnostics["raw_prefilter_hits"] = len(raw_template_hits)
     diagnostics["raw_prefilter_removed"] = raw_before_prefilter - len(raw_template_hits)
     diagnostics["gray_frame_raw_rescue_hits"] = len(gray_frame_raw_rescue_hits)
     diagnostics["gray_frame_raw_rescue_restored"] = len(restored)
+    raw_prefilter_hits = raw_template_hits
     timings["raw_prefilter"] = time.perf_counter() - phase_start
+    _record_candidate_trace("raw_prefilter", raw_template_hits)
 
     candidates_by_scale: dict[float, int] = {}
-    for _hit in raw_template_hits:
-        candidates_by_scale[_hit.scale] = candidates_by_scale.get(_hit.scale, 0) + 1
+    if debug_profile is not None:
+        for _hit in raw_template_hits:
+            candidates_by_scale[_hit.scale] = candidates_by_scale.get(_hit.scale, 0) + 1
 
     validated_candidates: list[CandidateHit] = list(pdf_candidates)
     postprocess_workers = max(1, DETECTOR_POSTPROCESS_MAX_WORKERS)
@@ -484,10 +707,13 @@ def _detect_symbols_pipeline(
     validation_workers = validation_result.validation_workers
     diagnostics["promoted_targeted_hits"] += validation_result.promoted_targeted_hits
     validated_candidates.extend(validated_hits)
+    _record_candidate_trace("validation_accepted", validated_hits)
+    _record_candidate_trace("validation_rejected", validation_result.rejected_hits)
 
     accepted_by_scale: dict[float, int] = {}
-    for _hit in validated_hits:
-        accepted_by_scale[_hit.scale] = accepted_by_scale.get(_hit.scale, 0) + 1
+    if debug_profile is not None:
+        for _hit in validated_hits:
+            accepted_by_scale[_hit.scale] = accepted_by_scale.get(_hit.scale, 0) + 1
 
     diagnostics["validated_template_hits"] = len(validated_candidates) - len(pdf_candidates)
     timings["validation_targeted"] = validation_result.timing_seconds
@@ -497,11 +723,17 @@ def _detect_symbols_pipeline(
     prefiltered_candidates = _prefilter_candidates(validated_candidates)
     diagnostics["prefilter_hits"] = len(prefiltered_candidates)
     timings["prefilter"] = time.perf_counter() - phase_start
+    _record_candidate_trace("prefilter", prefiltered_candidates)
 
     phase_start = time.perf_counter()
-    pre_parent_candidates = _cluster_candidates(prefiltered_candidates, parent_ids_by_child)
+    pre_parent_candidates = _cluster_candidates(
+        prefiltered_candidates,
+        parent_ids_by_child,
+        mode=detector_profile,
+    )
     diagnostics["pre_parent_clusters"] = len(pre_parent_candidates)
     timings["pre_parent_clustering"] = time.perf_counter() - phase_start
+    _record_candidate_trace("pre_parent_clusters", pre_parent_candidates)
 
     parent_search_result = search_parent_candidates(
         pre_parent_candidates=pre_parent_candidates,
@@ -522,16 +754,27 @@ def _detect_symbols_pipeline(
     diagnostics["parent_search_candidates"] += parent_search_result.attempted_candidates
     diagnostics["promoted_parent_search_hits"] += parent_search_result.promoted_hits
     timings["parent_search"] = parent_search_result.timing_seconds
+    _record_candidate_trace("parent_search", parent_search_candidates)
 
     phase_start = time.perf_counter()
     _progress("final_clustering", 94, "Finalne laczenie wynikow")
-    final_hits = _cluster_candidates(parent_search_candidates, parent_ids_by_child)
+    final_hits = _cluster_candidates(
+        parent_search_candidates,
+        parent_ids_by_child,
+        mode=detector_profile,
+    )
     if detector_profile == "gray":
-        final_hits, rescued_gray_frames = gray_strategy.rescue_validated_gray_frame_hits(
+        final_hits, rescued_gray_frames, gray_rescue_trace = gray_strategy.rescue_validated_gray_frame_hits(
             final_hits,
             validated_hits,
             templates,
         )
+        for stage_name, stage_trace in gray_rescue_trace.items():
+            _record_candidate_trace(
+                stage_name,
+                stage_trace["hits"],
+                stage_trace.get("reasons"),
+            )
         gray_unresolved_strong_hits = gray_strategy.trace_unresolved_strong_gray_hits(
             final_hits,
             validated_hits,
@@ -543,25 +786,71 @@ def _detect_symbols_pipeline(
     diagnostics["gray_frame_final_rescued"] = rescued_gray_frames
     diagnostics["final_hits"] = len(final_hits)
     timings["clustering"] = time.perf_counter() - phase_start
-
+    _record_candidate_trace("final", final_hits)
 
     timings_ms = {name: round(seconds * 1000.0, 3) for name, seconds in timings.items()}
     if debug_profile is not None:
+        candidate_stage_counts = build_candidate_stage_counts(
+            pdf_candidates=pdf_candidates,
+            raw_scan_hits=raw_scan_hits,
+            raw_budget_hits=raw_budget_hits,
+            raw_prefilter_hits=raw_prefilter_hits,
+            validation_rejected_hits=validation_result.rejected_hits,
+            validated_hits=validated_hits,
+            prefiltered_hits=prefiltered_candidates,
+            pre_parent_hits=pre_parent_candidates,
+            parent_search_hits=parent_search_candidates,
+            final_hits=final_hits,
+            rescued_gray_frames=rescued_gray_frames,
+        )
+        hit_flow_profile = {}
+        roi_strategy_profile = {}
+        if collect_performance_profile:
+            hit_flow_profile = build_hit_flow_profile(
+                templates=templates,
+                raw_scan_hits=raw_scan_hits,
+                raw_budget_hits=raw_budget_hits,
+                raw_prefilter_hits=raw_prefilter_hits,
+                validated_hits=validated_hits,
+                pre_cluster_hits=pre_parent_candidates,
+                final_hits=final_hits,
+            )
+            roi_strategy_profile = build_roi_strategy_profile(
+                templates=templates,
+                variants_by_template=variants_by_template,
+                search_rois_by_template=search_rois_by_template,
+                search_roi_stats_by_template=search_roi_stats_by_template,
+                search_roi_strategy_by_template=search_roi_strategy_by_template,
+                raw_scan_hits=raw_scan_hits,
+                raw_budget_hits=raw_budget_hits,
+                raw_prefilter_hits=raw_prefilter_hits,
+                validated_hits=validated_hits,
+                final_hits=final_hits,
+            )
         debug_profile.clear()
         debug_profile.update(
             {
+                "profileFlags": {
+                    "debugProfile": True,
+                    "performanceProfile": bool(collect_performance_profile),
+                    "candidateTrace": bool(candidate_trace_enabled),
+                },
                 "timingsMs": timings_ms,
                 "counters": {key: int(value) for key, value in diagnostics.items()},
                 "profile": detector_profile,
                 "threading": {
+                    "scanStrategy": scan_result.scan_strategy,
                     "scanWorkers": int(scan_workers),
-                    "configuredScanWorkers": int(DETECTOR_SCAN_MAX_WORKERS),
+                    "scanTasks": int(scan_result.scan_tasks),
+                    "scanTaskRois": int(scan_result.scan_task_rois),
+                    "configuredScanWorkers": int(scan_result.configured_scan_workers),
                     "validationWorkers": int(validation_workers if raw_template_hits else 0),
                     "parentSearchWorkers": int(
                         parent_search_workers if pre_parent_candidates else 0
                     ),
                     "configuredPostprocessWorkers": int(DETECTOR_POSTPROCESS_MAX_WORKERS),
-                    "opencvThreads": int(OPENCV_NUM_THREADS),
+                    "opencvThreads": int(scan_result.opencv_threads),
+                    "configuredOpencvThreads": int(OPENCV_NUM_THREADS),
                     "cpuCount": int(_safe_cpu_count()),
                 },
                 "searchRoi": {
@@ -572,6 +861,18 @@ def _detect_symbols_pipeline(
                     "fullImageAreaPixels": int(plan_image.shape[0] * plan_image.shape[1]),
                 },
                 "grayRawBudget": gray_budget_profile,
+                "candidateTrace": candidate_trace if candidate_trace_enabled else {},
+                "candidateStageCounts": candidate_stage_counts,
+                "scanProfile": scan_result.scan_profile,
+                "hitFlowProfile": hit_flow_profile,
+                "roiStrategyProfile": roi_strategy_profile,
+                "ablation": {"noTextMirror": bool(ablation_no_text_mirror)},
+                "grayVariantStrategy": {
+                    "textMirrorEnabled": bool(
+                        detector_profile == "gray" and not disable_text_mirror
+                    ),
+                    "textMirrorOverride": bool(gray_force_text_mirror),
+                },
                 "grayStrokeSuppression": {
                     "removedPixels": int(diagnostics["gray_suppressed_pixels"]),
                     "rawPixels": int(gray_raw_ink_pixels),
@@ -613,67 +914,69 @@ def _detect_symbols_pipeline(
             }
         )
 
-    def _fmt_scale_hist(hist: dict[float, int]) -> str:
-        if not hist:
-            return "{}"
-        return "{" + ",".join(f"{s:.2f}:{hist.get(s, 0)}" for s in used_scales) + "}"
+    if debug_profile is not None:
+        def _fmt_scale_hist(hist: dict[float, int]) -> str:
+            if not hist:
+                return "{}"
+            return "{" + ",".join(f"{s:.2f}:{hist.get(s, 0)}" for s in used_scales) + "}"
 
-    rejection_summary = (
-        ",".join(f"{k}:{v}" for k, v in sorted(rejection_reasons.items(), key=lambda kv: -kv[1]))
-        if rejection_reasons
-        else "-"
-    )
-    scan_mask_summary = (
-        ",".join(f"{k}:{v}" for k, v in sorted(scan_result.raw_hits_by_mask_kind.items()))
-        if scan_result.raw_hits_by_mask_kind
-        else "-"
-    )
+        rejection_summary = (
+            ",".join(f"{k}:{v}" for k, v in sorted(rejection_reasons.items(), key=lambda kv: -kv[1]))
+            if rejection_reasons
+            else "-"
+        )
+        scan_mask_summary = (
+            ",".join(f"{k}:{v}" for k, v in sorted(scan_result.raw_hits_by_mask_kind.items()))
+            if scan_result.raw_hits_by_mask_kind
+            else "-"
+        )
 
-    print(
-        "Detection diagnostics:"
-        f" profile={detector_profile},"
-        f" templates={len(templates)},"
-        f" used_scales=[{','.join(f'{s:.2f}' for s in used_scales)}],"
-        f" prepared_variants={diagnostics['prepared_variants']},"
-        f" color_no_hsv_templates={diagnostics['color_no_hsv_templates']},"
-        f" skipped_empty_color_masks={diagnostics['skipped_empty_color_masks']},"
-        f" raw_peaks={diagnostics['raw_peaks']} per_scale={_fmt_scale_hist(raw_peaks_by_scale)},"
-        f" raw_peaks_by_mask={scan_mask_summary},"
-        f" raw_budget={diagnostics['raw_budget_hits']}(-{diagnostics['raw_budget_removed']}),"
-        f" raw_budget_protected={int(gray_budget_profile.get('geometryProtectedKept', 0))}/{int(gray_budget_profile.get('geometryProtected', 0))},"
-        f" raw_after_prefilter={diagnostics['raw_prefilter_hits']}(-{diagnostics['raw_prefilter_removed']})"  # noqa: E501
-        f" candidates_per_scale={_fmt_scale_hist(candidates_by_scale)},"
-        f" validated_template_hits={diagnostics['validated_template_hits']}"
-        f" accepted_per_scale={_fmt_scale_hist(accepted_by_scale)},"
-        f" rejects=nms:{diagnostics['raw_prefilter_removed']}|suppression(budget):{diagnostics['raw_budget_removed']}|validation:[{rejection_summary}],"  # noqa: E501
-        f" promoted_targeted_hits={diagnostics['promoted_targeted_hits']},"
-        f" parent_search_input_hits={diagnostics['parent_search_input_hits']},"
-        f" parent_search_candidates={diagnostics['parent_search_candidates']},"
-        f" promoted_parent_search_hits={diagnostics['promoted_parent_search_hits']},"
-        f" pdf_text_hits={diagnostics['pdf_text_hits']},"
-        f" after_prefilter={diagnostics['prefilter_hits']},"
-        f" pre_parent_clusters={diagnostics['pre_parent_clusters']},"
-        f" final_clusters={diagnostics['final_hits']},"
-        f" rois={diagnostics['search_rois']} full_scan_templates={diagnostics['full_scan_templates']},"  # noqa: E501
-        f" gray_suppress={diagnostics['gray_suppressed_pixels']}px({diagnostics['gray_suppressed_ratio']:.0%}),"
-        f" gray_dark<{diagnostics['gray_dark_threshold']}={diagnostics['gray_dark_ink_pixels']}px,"
-        f" gray_zone<{diagnostics['gray_dark_zone_threshold']}={diagnostics['gray_dark_zone_pixels']}px,"
-        f" gray_evidence<{diagnostics['gray_dark_evidence_threshold']}={diagnostics['gray_dark_evidence_pixels']}px,"
-        f" gray_zone_suppress={diagnostics['gray_dark_zone_suppressed_pixels']}px({diagnostics['gray_dark_zone_suppressed_ratio']:.0%}),"
-        f" gray_dark_suppress={diagnostics['gray_dark_suppressed_pixels']}px({diagnostics['gray_dark_suppressed_ratio']:.0%}),"
-        f" threads=scan:{scan_workers}/{DETECTOR_SCAN_MAX_WORKERS}|post:{postprocess_workers}/{DETECTOR_POSTPROCESS_MAX_WORKERS}|opencv:{OPENCV_NUM_THREADS},"  # noqa: E501
-        f" timings_ms="
-        f"pdf_text:{timings_ms['pdf_text']:.0f}|"
-        f"prepare:{timings_ms['prepare']:.0f}|"
-        f"gray_suppress:{timings_ms['gray_suppress']:.0f}|"
-        f"scan:{timings_ms['scan']:.0f}|"
-        f"raw_prefilter:{timings_ms['raw_prefilter']:.0f}|"
-        f"validation_targeted:{timings_ms['validation_targeted']:.0f}|"
-        f"prefilter:{timings_ms['prefilter']:.0f}|"
-        f"pre_parent_clustering:{timings_ms['pre_parent_clustering']:.0f}|"
-        f"parent_search:{timings_ms['parent_search']:.0f}|"
-        f"clustering:{timings_ms['clustering']:.0f}"
-    )
+        print(
+            "Detection diagnostics:"
+            f" profile={detector_profile},"
+            f" templates={len(templates)},"
+            f" used_scales=[{','.join(f'{s:.2f}' for s in used_scales)}],"
+            f" prepared_variants={diagnostics['prepared_variants']},"
+            f" color_no_hsv_templates={diagnostics['color_no_hsv_templates']},"
+            f" skipped_empty_color_masks={diagnostics['skipped_empty_color_masks']},"
+            f" raw_peaks={diagnostics['raw_peaks']} per_scale={_fmt_scale_hist(raw_peaks_by_scale)},"
+            f" raw_peaks_by_mask={scan_mask_summary},"
+            f" raw_budget={diagnostics['raw_budget_hits']}(-{diagnostics['raw_budget_removed']}),"
+            f" raw_budget_protected={int(gray_budget_profile.get('geometryProtectedKept', 0))}/{int(gray_budget_profile.get('geometryProtected', 0))},"
+            f" raw_after_prefilter={diagnostics['raw_prefilter_hits']}(-{diagnostics['raw_prefilter_removed']})"  # noqa: E501
+            f" candidates_per_scale={_fmt_scale_hist(candidates_by_scale)},"
+            f" validated_template_hits={diagnostics['validated_template_hits']}"
+            f" accepted_per_scale={_fmt_scale_hist(accepted_by_scale)},"
+            f" rejects=nms:{diagnostics['raw_prefilter_removed']}|suppression(budget):{diagnostics['raw_budget_removed']}|validation:[{rejection_summary}],"  # noqa: E501
+            f" promoted_targeted_hits={diagnostics['promoted_targeted_hits']},"
+            f" parent_search_input_hits={diagnostics['parent_search_input_hits']},"
+            f" parent_search_candidates={diagnostics['parent_search_candidates']},"
+            f" promoted_parent_search_hits={diagnostics['promoted_parent_search_hits']},"
+            f" pdf_text_hits={diagnostics['pdf_text_hits']},"
+            f" after_prefilter={diagnostics['prefilter_hits']},"
+            f" pre_parent_clusters={diagnostics['pre_parent_clusters']},"
+            f" final_clusters={diagnostics['final_hits']},"
+            f" rois={diagnostics['search_rois']} full_scan_templates={diagnostics['full_scan_templates']},"  # noqa: E501
+            f" scan_tasks={diagnostics['scan_tasks']} task_rois={diagnostics['scan_task_rois']},"
+            f" gray_suppress={diagnostics['gray_suppressed_pixels']}px({diagnostics['gray_suppressed_ratio']:.0%}),"
+            f" gray_dark<{diagnostics['gray_dark_threshold']}={diagnostics['gray_dark_ink_pixels']}px,"
+            f" gray_zone<{diagnostics['gray_dark_zone_threshold']}={diagnostics['gray_dark_zone_pixels']}px,"
+            f" gray_evidence<{diagnostics['gray_dark_evidence_threshold']}={diagnostics['gray_dark_evidence_pixels']}px,"
+            f" gray_zone_suppress={diagnostics['gray_dark_zone_suppressed_pixels']}px({diagnostics['gray_dark_zone_suppressed_ratio']:.0%}),"
+            f" gray_dark_suppress={diagnostics['gray_dark_suppressed_pixels']}px({diagnostics['gray_dark_suppressed_ratio']:.0%}),"
+            f" threads={scan_result.scan_strategy}:scan:{scan_workers}/{scan_result.configured_scan_workers}|post:{postprocess_workers}/{DETECTOR_POSTPROCESS_MAX_WORKERS}|opencv:{scan_result.opencv_threads},"  # noqa: E501
+            f" timings_ms="
+            f"pdf_text:{timings_ms['pdf_text']:.0f}|"
+            f"prepare:{timings_ms['prepare']:.0f}|"
+            f"gray_suppress:{timings_ms['gray_suppress']:.0f}|"
+            f"scan:{timings_ms['scan']:.0f}|"
+            f"raw_prefilter:{timings_ms['raw_prefilter']:.0f}|"
+            f"validation_targeted:{timings_ms['validation_targeted']:.0f}|"
+            f"prefilter:{timings_ms['prefilter']:.0f}|"
+            f"pre_parent_clustering:{timings_ms['pre_parent_clustering']:.0f}|"
+            f"parent_search:{timings_ms['parent_search']:.0f}|"
+            f"clustering:{timings_ms['clustering']:.0f}"
+        )
 
     per_template: dict[int, list[Detection]] = {}
     _progress("format_results", 99, "Formatowanie wynikow")
@@ -708,6 +1011,7 @@ def _detect_symbols_pipeline(
                 else None
             ),
             content_source=hit.source if hit.is_text_label else "",
+            roi_strategy=hit.roi_strategy,
         )
         per_template.setdefault(hit.template_id, []).append(detection)
 

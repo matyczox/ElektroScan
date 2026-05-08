@@ -46,6 +46,7 @@ from core.detector_config import (
     GRAY_RAW_MAX_HITS_PER_TEMPLATE,
     GRAY_RAW_MAX_HITS_PER_VARIANT,
     GRAY_RAW_MAX_TOTAL_HITS,
+    GRAY_RAW_MIN_HITS_PER_TEMPLATE,
     GRAY_RAW_SCAN_MIN_TEMPLATE_AREA,
     GRAY_RAW_SCAN_MIN_TEMPLATE_PIXELS,
     GRAY_RAW_SCAN_THRESHOLD,
@@ -62,10 +63,18 @@ from core.detector_config import (
     GRAY_RECT_FRAME_WEAK_EDGE_COVERAGE,
     GRAY_SEARCH_COMPONENT_PADDING_RATIO,
     GRAY_SEARCH_COMPONENT_DILATE_ITERATIONS,
+    GRAY_SEARCH_CONNECTED_FAST_COMPONENTS_MAX,
+    GRAY_SEARCH_CONNECTED_FAST_MAX_TILE_ROIS,
+    GRAY_SEARCH_FAST_MAX_TILE_ROIS,
+    GRAY_SEARCH_FAST_TILE_SIZE,
+    GRAY_SEARCH_LARGE_TEXT_MAX_TILE_ROIS,
+    GRAY_SEARCH_LARGE_TEXT_MIN_TEMPLATE_AREA,
+    GRAY_SEARCH_LARGE_TEXT_TILE_SIZE,
     GRAY_SEARCH_MAX_ROIS,
     GRAY_SEARCH_MAX_TILE_ROIS,
     GRAY_SEARCH_ROI_CONTAINMENT_THRESHOLD,
     GRAY_SEARCH_ROI_OVERLAP_THRESHOLD,
+    GRAY_SEARCH_SAFE_ELONGATED_ASPECT,
     GRAY_SEARCH_TILE_MIN_FOREGROUND,
     GRAY_SEARCH_TILE_PADDING,
     GRAY_SEARCH_TILE_SIZE,
@@ -90,6 +99,11 @@ from core.detector_config import (
 )
 from core.detector_masks import _context_purity, _ink_mask, _suppress_long_strokes
 from core.detector_models import CandidateHit, TemplateInfo
+from core.detector_selection import (
+    candidate_quality_key,
+    local_dominates,
+    same_physical_place,
+)
 
 
 @dataclass(slots=True)
@@ -123,6 +137,14 @@ class GrayScanMasks:
 
 
 @dataclass(slots=True)
+class GraySearchComponentIndex:
+    foreground_pixels: int
+    components: int
+    stats: np.ndarray
+    foreground_integral: np.ndarray
+
+
+@dataclass(slots=True)
 class GrayLegendThresholds:
     dark: int
     zone: int
@@ -152,6 +174,79 @@ def gray_template_area(template: TemplateInfo) -> int:
 
 def gray_template_pixels(template: TemplateInfo) -> int:
     return int(getattr(template, "pixel_count", 0) or cv2.countNonZero(template.mask))
+
+
+def use_large_text_tile_rois(template: TemplateInfo) -> bool:
+    """Use smaller coarse tiles for large gray text labels while preserving coverage."""
+
+    return (
+        template.is_text_label
+        and gray_template_area(template) >= GRAY_SEARCH_LARGE_TEXT_MIN_TEMPLATE_AREA
+    )
+
+
+def _gray_template_aspect(template: TemplateInfo) -> float:
+    height, width = template.mask.shape[:2]
+    return max(width / max(1, height), height / max(1, width))
+
+
+def gray_tile_roi_strategy(template: TemplateInfo) -> tuple[str, int, int]:
+    """Return the coarse tile strategy for gray ROI coverage.
+
+    Compact symbols can use smaller tiles with a larger coverage budget. Slender
+    symbols are more sensitive to tile boundaries and isolated line fragments, so
+    they keep the old safety tiles as a fallback.
+    """
+
+    if use_large_text_tile_rois(template):
+        return (
+            "large_text_fast",
+            int(GRAY_SEARCH_LARGE_TEXT_TILE_SIZE),
+            int(GRAY_SEARCH_LARGE_TEXT_MAX_TILE_ROIS),
+        )
+
+    if (not template.is_text_label) and _gray_template_aspect(template) >= float(
+        GRAY_SEARCH_SAFE_ELONGATED_ASPECT
+    ):
+        return (
+            "safe_elongated",
+            int(GRAY_SEARCH_TILE_SIZE),
+            int(GRAY_SEARCH_MAX_TILE_ROIS),
+        )
+
+    return (
+        "fast_compact",
+        int(GRAY_SEARCH_FAST_TILE_SIZE),
+        int(GRAY_SEARCH_FAST_MAX_TILE_ROIS),
+    )
+
+
+def adapt_gray_tile_roi_strategy_for_plan(
+    strategy: str,
+    tile_size: int,
+    max_tile_rois: int,
+    component_index: GraySearchComponentIndex | None,
+) -> tuple[str, int, int]:
+    """Tighten compact-tile coverage only on highly connected gray plans.
+
+    A low component count with substantial foreground usually means symbols are
+    attached to large connected linework.  In that topology, the broad compact
+    tile budget creates very large merged ROIs; a smaller spatial budget cuts
+    matchTemplate pixels while component ROIs still provide local coverage.
+    Plans with many isolated components keep the wider safe budget.
+    """
+
+    if (
+        strategy == "fast_compact"
+        and component_index is not None
+        and component_index.components <= GRAY_SEARCH_CONNECTED_FAST_COMPONENTS_MAX
+    ):
+        return (
+            "fast_compact_connected",
+            int(tile_size),
+            min(int(max_tile_rois), int(GRAY_SEARCH_CONNECTED_FAST_MAX_TILE_ROIS)),
+        )
+    return strategy, tile_size, max_tile_rois
 
 
 def _edge_band_densities(mask: np.ndarray) -> tuple[float, float, float, float, float]:
@@ -426,6 +521,37 @@ def _rect_union(
     return _clamp_roi((x1, y1, x2 - x1, y2 - y1), image_shape)
 
 
+def _integral_rect_sum(integral: np.ndarray, rect: tuple[int, int, int, int]) -> int:
+    x, y, w, h = rect
+    return int(
+        integral[y + h, x + w]
+        - integral[y, x + w]
+        - integral[y + h, x]
+        + integral[y, x]
+    )
+
+
+def build_gray_search_component_index(plan_mask: np.ndarray) -> GraySearchComponentIndex:
+    foreground_pixels = int(cv2.countNonZero(plan_mask))
+    dilate_iterations = max(0, int(GRAY_SEARCH_COMPONENT_DILATE_ITERATIONS))
+    seed_mask = (
+        cv2.dilate(plan_mask, np.ones((3, 3), np.uint8), iterations=dilate_iterations)
+        if dilate_iterations > 0
+        else plan_mask
+    )
+    components, _labels, stats, _centroids = cv2.connectedComponentsWithStats(
+        seed_mask,
+        connectivity=8,
+    )
+    foreground_integral = cv2.integral((plan_mask > 0).astype(np.uint8, copy=False), sdepth=cv2.CV_32S)
+    return GraySearchComponentIndex(
+        foreground_pixels=foreground_pixels,
+        components=int(components),
+        stats=stats,
+        foreground_integral=foreground_integral,
+    )
+
+
 def _coalesce_gray_rois(
     rois: list[tuple[int, int, int, int]],
     image_shape: tuple[int, int, int] | tuple[int, int],
@@ -495,13 +621,25 @@ def _append_gray_tile_rois(
     rois: list[tuple[int, int, int, int]],
     plan_mask: np.ndarray,
     image_shape: tuple[int, int, int] | tuple[int, int],
+    foreground_integral: np.ndarray | None = None,
+    *,
+    tile_size_override: int | None = None,
+    max_tile_rois_override: int | None = None,
 ) -> list[tuple[int, int, int, int]]:
     """Add coarse gray tiles so symbols connected to walls still get scanned."""
 
-    if GRAY_SEARCH_MAX_TILE_ROIS <= 0:
+    max_tile_rois = (
+        int(max_tile_rois_override)
+        if max_tile_rois_override is not None
+        else int(GRAY_SEARCH_MAX_TILE_ROIS)
+    )
+    if max_tile_rois <= 0:
         return rois
 
-    tile_size = max(64, int(GRAY_SEARCH_TILE_SIZE))
+    tile_size = max(
+        64,
+        int(tile_size_override) if tile_size_override is not None else int(GRAY_SEARCH_TILE_SIZE),
+    )
     padding = max(0, int(GRAY_SEARCH_TILE_PADDING))
     min_foreground = max(1, int(GRAY_SEARCH_TILE_MIN_FOREGROUND))
     image_h, image_w = int(image_shape[0]), int(image_shape[1])
@@ -516,7 +654,11 @@ def _append_gray_tile_rois(
             if tile_w <= 0:
                 continue
 
-            foreground = int(cv2.countNonZero(plan_mask[y : y + tile_h, x : x + tile_w]))
+            foreground = (
+                _integral_rect_sum(foreground_integral, (x, y, tile_w, tile_h))
+                if foreground_integral is not None
+                else int(cv2.countNonZero(plan_mask[y : y + tile_h, x : x + tile_w]))
+            )
             if foreground < min_foreground:
                 continue
 
@@ -534,7 +676,7 @@ def _append_gray_tile_rois(
 
     tile_candidates.sort(key=lambda item: item[0], reverse=True)
     existing = set(rois)
-    for _foreground, rect in tile_candidates[:GRAY_SEARCH_MAX_TILE_ROIS]:
+    for _foreground, rect in tile_candidates[:max_tile_rois]:
         if rect in existing:
             continue
         rois.append(rect)
@@ -548,24 +690,28 @@ def build_gray_search_rois(
     image_shape: tuple[int, int, int] | tuple[int, int],
     max_template_width: int,
     max_template_height: int,
+    *,
+    is_large_text_template: bool = False,
+    component_index: GraySearchComponentIndex | None = None,
+    tile_size_override: int | None = None,
+    max_tile_rois_override: int | None = None,
 ) -> tuple[list[tuple[int, int, int, int]], bool, int, int]:
     """Build bounded ROIs for gray/ink plans."""
 
-    foreground_pixels = int(cv2.countNonZero(plan_mask))
+    foreground_pixels = (
+        component_index.foreground_pixels
+        if component_index is not None
+        else int(cv2.countNonZero(plan_mask))
+    )
     if foreground_pixels <= 0:
         return [], False, 0, foreground_pixels
 
     image_h, image_w = image_shape[:2]
-    dilate_iterations = max(0, int(GRAY_SEARCH_COMPONENT_DILATE_ITERATIONS))
-    seed_mask = (
-        cv2.dilate(plan_mask, np.ones((3, 3), np.uint8), iterations=dilate_iterations)
-        if dilate_iterations > 0
-        else plan_mask
-    )
-    components, _labels, stats, _centroids = cv2.connectedComponentsWithStats(
-        seed_mask,
-        connectivity=8,
-    )
+    if component_index is None:
+        component_index = build_gray_search_component_index(plan_mask)
+    components = component_index.components
+    stats = component_index.stats
+    foreground_integral = component_index.foreground_integral
     if components <= 1:
         return [], False, 0, foreground_pixels
 
@@ -649,7 +795,7 @@ def build_gray_search_rois(
                 clamped = _clamp_roi((tile_x, tile_y, tile_w, tile_h), image_shape)
                 if clamped is not None:
                     rx, ry, rw, rh = clamped
-                    foreground = int(cv2.countNonZero(plan_mask[ry : ry + rh, rx : rx + rw]))
+                    foreground = _integral_rect_sum(foreground_integral, (rx, ry, rw, rh))
                     if foreground >= GRAY_SEARCH_TILE_MIN_FOREGROUND:
                         component_rects.append(
                             (
@@ -687,7 +833,26 @@ def build_gray_search_rois(
         GRAY_SEARCH_MAX_ROIS,
     )
     rois = [rect for _score, _area, rect in component_rects]
-    rois = _append_gray_tile_rois(rois, plan_mask, image_shape)
+    rois = _append_gray_tile_rois(
+        rois,
+        plan_mask,
+        image_shape,
+        foreground_integral,
+        tile_size_override=(
+            int(tile_size_override)
+            if tile_size_override is not None
+            else int(GRAY_SEARCH_LARGE_TEXT_TILE_SIZE)
+            if is_large_text_template
+            else None
+        ),
+        max_tile_rois_override=(
+            int(max_tile_rois_override)
+            if max_tile_rois_override is not None
+            else int(GRAY_SEARCH_LARGE_TEXT_MAX_TILE_ROIS)
+            if is_large_text_template
+            else None
+        ),
+    )
     rois = _coalesce_gray_rois(rois, image_shape)
     roi_area = min(
         sum(_rect_area(roi) for roi in rois),
@@ -754,6 +919,11 @@ def gray_raw_budget(
             "removed": 0,
             "geometryProtected": 0,
             "geometryProtectedKept": 0,
+            "geometryProtectedDropped": 0,
+            "perTemplateReserved": 0,
+            "perTemplateReservedKept": 0,
+            "perTemplateReservedActive": 0,
+            "perTemplateReserveLimit": int(max(0, GRAY_RAW_MIN_HITS_PER_TEMPLATE)),
             "topGenerators": [],
         }
 
@@ -769,23 +939,44 @@ def gray_raw_budget(
             if score is not None:
                 protected_scores[id(hit)] = score
 
-    def _budget_rank(hit: CandidateHit) -> tuple[float, float, float, float]:
+    def _budget_rank(hit: CandidateHit) -> tuple[float, float, float, float, float, float]:
         geometry = protected_scores.get(id(hit))
         if geometry is not None:
             coverage, purity = geometry
-            return (1.0, coverage, purity, float(hit.match_score))
-        return (0.0, float(hit.match_score), 0.0, 0.0)
+            return (
+                1.0,
+                coverage,
+                purity,
+                float(hit.match_score),
+                -float(hit.bbox[1]),
+                -float(hit.bbox[0]),
+            )
+        return (
+            0.0,
+            float(hit.match_score),
+            0.0,
+            0.0,
+            -float(hit.bbox[1]),
+            -float(hit.bbox[0]),
+        )
 
-    def _limit_with_geometry_reserve(hits: list[CandidateHit], limit: int) -> list[CandidateHit]:
+    def _limit_with_geometry_reserve(
+        hits: list[CandidateHit],
+        limit: int,
+        extra_reserved_ids: set[int] | None = None,
+    ) -> list[CandidateHit]:
         """Apply a soft cap without dropping raw hits that already prove geometry."""
 
-        protected = [hit for hit in hits if id(hit) in protected_scores]
-        unprotected = [hit for hit in hits if id(hit) not in protected_scores]
-        protected.sort(key=_budget_rank, reverse=True)
-        unprotected.sort(key=_budget_rank, reverse=True)
-        if len(protected) >= limit:
-            return protected
-        return protected + unprotected[: max(0, limit - len(protected))]
+        reserved_ids = extra_reserved_ids or set()
+        reserved = [hit for hit in hits if id(hit) in protected_scores or id(hit) in reserved_ids]
+        unreserved = [
+            hit for hit in hits if id(hit) not in protected_scores and id(hit) not in reserved_ids
+        ]
+        reserved.sort(key=_budget_rank, reverse=True)
+        unreserved.sort(key=_budget_rank, reverse=True)
+        if len(reserved) >= limit:
+            return reserved
+        return reserved + unreserved[: max(0, limit - len(reserved))]
 
     grouped_by_variant: dict[tuple[int, float, int, bool, str], list[CandidateHit]] = {}
     for hit in candidates:
@@ -809,10 +1000,29 @@ def gray_raw_budget(
     for hits in grouped_by_template.values():
         template_limited.extend(_limit_with_geometry_reserve(hits, GRAY_RAW_MAX_HITS_PER_TEMPLATE))
 
+    per_template_reserved_ids: set[int] = set()
+    per_template_reserved_total = 0
+    per_template_reserve_limit = max(0, int(GRAY_RAW_MIN_HITS_PER_TEMPLATE))
+    if per_template_reserve_limit > 0:
+        regrouped_template_limited: dict[int, list[CandidateHit]] = {}
+        for hit in template_limited:
+            regrouped_template_limited.setdefault(hit.template_id, []).append(hit)
+        for hits in regrouped_template_limited.values():
+            ranked = sorted(hits, key=_budget_rank, reverse=True)
+            for hit in ranked[:per_template_reserve_limit]:
+                per_template_reserved_ids.add(id(hit))
+            per_template_reserved_total += min(len(ranked), per_template_reserve_limit)
+
+    active_reserved_ids = (
+        per_template_reserved_ids
+        if len(protected_scores) < int(GRAY_RAW_MAX_TOTAL_HITS)
+        else set()
+    )
     if len(template_limited) > GRAY_RAW_MAX_TOTAL_HITS:
         template_limited = _limit_with_geometry_reserve(
             template_limited,
             GRAY_RAW_MAX_TOTAL_HITS,
+            active_reserved_ids,
         )
 
     top_generators = []
@@ -837,6 +1047,12 @@ def gray_raw_budget(
         "geometryProtectedKept": sum(1 for hit in template_limited if id(hit) in protected_scores),
         "geometryProtectedDropped": sum(1 for hit in candidates if id(hit) in protected_scores)
         - sum(1 for hit in template_limited if id(hit) in protected_scores),
+        "perTemplateReserved": per_template_reserved_total,
+        "perTemplateReservedKept": sum(
+            1 for hit in template_limited if id(hit) in per_template_reserved_ids
+        ),
+        "perTemplateReservedActive": len(active_reserved_ids),
+        "perTemplateReserveLimit": int(per_template_reserve_limit),
         "topGenerators": top_generators,
     }
 
@@ -954,10 +1170,7 @@ def _is_gray_frame_validated_rescue_hit(
 
 
 def _same_physical_hit(left: CandidateHit, right: CandidateHit) -> bool:
-    inter_area, iou, iom, center_distance = _bbox_metrics(left.bbox, right.bbox)
-    if inter_area <= 0:
-        return False
-    return iou >= 0.35 or iom >= 0.72 or center_distance <= 0.30
+    return same_physical_place(left, right, mode="gray")
 
 
 def _hit_area(hit: CandidateHit) -> int:
@@ -1032,10 +1245,49 @@ def _is_same_template_duplicate_shadow(small: CandidateHit, large: CandidateHit)
     if not (iom >= 0.55 or (center_nested and center_distance <= 0.58)):
         return False
 
-    if large.coverage < 0.88:
+    min_large_coverage = 0.86 if large.is_text_label else 0.88
+    if large.coverage < min_large_coverage:
         return False
 
     return large.verification_score + 0.12 >= small.verification_score
+
+
+def _weak_gray_compact_fragment_loses_to_larger(
+    compact: CandidateHit,
+    large: CandidateHit,
+) -> bool:
+    if compact.dominant_hsv is not None or large.dominant_hsv is not None:
+        return False
+    if compact.is_text_label != large.is_text_label:
+        return False
+
+    compact_area = _hit_area(compact)
+    large_area = _hit_area(large)
+    if compact_area > 3600 or large_area < compact_area * 1.24:
+        return False
+
+    inter_area, _iou, iom, center_distance = _bbox_metrics(compact.bbox, large.bbox)
+    if inter_area <= 0:
+        return False
+    compact_center_nested = _center_inside_bbox(
+        _hit_center(compact),
+        large.bbox,
+        margin_ratio=0.05,
+    )
+    if not (iom >= 0.48 and (compact_center_nested or center_distance <= 0.44)):
+        return False
+
+    if large.verification_score + 0.08 < compact.verification_score:
+        return False
+    if large.match_score + 0.08 < compact.match_score:
+        return False
+
+    weak_compact_evidence = compact.context_purity <= 0.24 and compact.purity <= 0.56
+    stronger_large_evidence = (
+        large.purity >= compact.purity + 0.08
+        and large.context_purity >= compact.context_purity + 0.05
+    )
+    return weak_compact_evidence and stronger_large_evidence
 
 
 def _compact_gray_hit_beats_large_partial(
@@ -1149,6 +1401,9 @@ def _suppress_nested_gray_core_hits(hits: list[CandidateHit]) -> list[CandidateH
             if _is_same_template_duplicate_shadow(small, large):
                 suppressed.add(small_idx)
                 break
+            if _weak_gray_compact_fragment_loses_to_larger(small, large):
+                suppressed.add(small_idx)
+                break
             area_ratio = 1.25 if large.template_id == small.template_id else GRAY_FULLER_SYMBOL_MIN_AREA_RATIO
             if _hit_area(large) < small_area * area_ratio:
                 continue
@@ -1193,59 +1448,92 @@ def _dedupe_gray_overlapping_alternatives(hits: list[CandidateHit]) -> list[Cand
     if len(hits) < 2:
         return hits
 
-    parent = list(range(len(hits)))
+    def _score_rank(hit: CandidateHit) -> float:
+        area_bonus = min(0.45, float(np.log1p(_hit_area(hit))) * 0.05)
+        return float(
+            hit.verification_score
+            + hit.match_score
+            + hit.context_purity
+            + 0.70 * hit.purity
+            + area_bonus
+        )
 
-    def find(index: int) -> int:
-        while parent[index] != index:
-            parent[index] = parent[parent[index]]
-            index = parent[index]
-        return index
+    def _fuller_rank(hit: CandidateHit) -> tuple[float, ...]:
+        return (
+            float(_hit_area(hit)),
+            float(hit.pixel_count),
+            float(hit.context_purity),
+            float(hit.purity),
+            float(hit.coverage),
+            float(hit.verification_score),
+            float(hit.match_score),
+            0.0 if hit.mirrored else 1.0,
+        )
 
-    def union(left: int, right: int) -> None:
-        root_left = find(left)
-        root_right = find(right)
-        if root_left != root_right:
-            parent[root_right] = root_left
+    def _competing_winner(
+        left: CandidateHit,
+        right: CandidateHit,
+    ) -> CandidateHit | None:
+        if left.dominant_hsv is not None or right.dominant_hsv is not None:
+            return None
+        if left.is_text_label != right.is_text_label:
+            return None
+        if not _same_physical_hit(left, right):
+            return None
+        if _strong_compact_gray_hit_should_coexist(left, right):
+            return None
+        if local_dominates(left, right, mode="gray"):
+            return left
+        if local_dominates(right, left, mode="gray"):
+            return right
 
-    for left in range(len(hits)):
-        left_hit = hits[left]
-        if left_hit.dominant_hsv is not None:
-            continue
-        for right in range(left + 1, len(hits)):
-            right_hit = hits[right]
-            if right_hit.dominant_hsv is not None:
+        score_left = _score_rank(left)
+        score_right = _score_rank(right)
+        score_margin = abs(score_left - score_right)
+        area_ratio = max(_hit_area(left), _hit_area(right)) / max(
+            1,
+            min(_hit_area(left), _hit_area(right)),
+        )
+        similar_size_gray_symbols = (
+            not left.is_text_label
+            and not right.is_text_label
+            and area_ratio <= 1.25
+            and score_margin < 0.22
+        )
+        if similar_size_gray_symbols:
+            return max((left, right), key=_fuller_rank)
+        return left if score_left >= score_right else right
+
+    ordered_hits = sorted(
+        hits,
+        key=lambda hit: (
+            _score_rank(hit),
+            *candidate_quality_key(hit, mode="gray"),
+            -float(hit.bbox[1]),
+            -float(hit.bbox[0]),
+        ),
+        reverse=True,
+    )
+
+    selected: list[CandidateHit] = []
+    for candidate in ordered_hits:
+        candidate_survives = True
+        next_selected: list[CandidateHit] = []
+        for existing in selected:
+            winner = _competing_winner(candidate, existing)
+            if winner is existing:
+                candidate_survives = False
+                next_selected.append(existing)
+            elif winner is candidate:
                 continue
-            if left_hit.is_text_label != right_hit.is_text_label:
-                continue
-            if _same_physical_hit(left_hit, right_hit):
-                if _strong_compact_gray_hit_should_coexist(left_hit, right_hit):
-                    continue
-                union(left, right)
+            else:
+                next_selected.append(existing)
+        if candidate_survives:
+            next_selected.append(candidate)
+        selected = next_selected
 
-    groups: dict[int, list[int]] = {}
-    for index in range(len(hits)):
-        groups.setdefault(find(index), []).append(index)
-
-    keep: set[int] = set()
-    for indexes in groups.values():
-        if len(indexes) == 1:
-            keep.add(indexes[0])
-            continue
-
-        def _rank(index: int) -> float:
-            hit = hits[index]
-            area_bonus = min(0.45, float(np.log1p(_hit_area(hit))) * 0.05)
-            return float(
-                hit.verification_score
-                + hit.match_score
-                + hit.context_purity
-                + 0.70 * hit.purity
-                + area_bonus
-            )
-
-        keep.add(max(indexes, key=_rank))
-
-    return [hit for index, hit in enumerate(hits) if index in keep]
+    selected.sort(key=lambda hit: (hit.bbox[1], hit.bbox[0], -hit.verification_score))
+    return selected
 
 
 def _filter_weak_gray_text_fragments(hits: list[CandidateHit]) -> list[CandidateHit]:
@@ -1339,10 +1627,10 @@ def _is_gray_rescue_blocked_by_existing(
 
     if hit.dominant_hsv is not None or existing.dominant_hsv is not None:
         return False
-    if existing.template_id == hit.template_id:
-        if _is_same_template_duplicate_shadow(hit, existing):
-            return True
-        return False
+    if local_dominates(existing, hit, mode="gray"):
+        return True
+    if existing.template_id == hit.template_id and _same_physical_hit(existing, hit):
+        return candidate_quality_key(existing, mode="gray") >= candidate_quality_key(hit, mode="gray")
 
     if _compact_gray_hit_beats_large_partial(hit, existing):
         return False
@@ -1372,42 +1660,130 @@ def _is_gray_rescue_blocked_by_existing(
     return hit.context_purity <= 0.35 or hit.purity <= 0.55 or existing.is_text_label
 
 
+def _is_gray_rescue_locally_dominated(
+    hit: CandidateHit,
+    competitor: CandidateHit,
+) -> bool:
+    """Skip a rescued interpretation beaten by a better local gray candidate."""
+
+    return local_dominates(competitor, hit, mode="gray")
+
+
 def rescue_validated_gray_frame_hits(
     final_hits: list[CandidateHit],
     validated_hits: list[CandidateHit],
     templates: list[TemplateInfo],
-) -> tuple[list[CandidateHit], int]:
+) -> tuple[list[CandidateHit], int, dict[str, dict[str, object]]]:
     """Re-add strong gray detections lost by global NMS/clustering."""
 
-    rescued: list[CandidateHit] = []
-    for hit in validated_hits:
-        if not _is_gray_frame_validated_rescue_hit(hit, templates):
-            continue
-        duplicate = any(
-            existing.template_id == hit.template_id and _same_physical_hit(existing, hit)
-            for existing in final_hits + rescued
-        )
-        blocked = any(
-            _is_gray_rescue_blocked_by_existing(hit, existing)
-            for existing in final_hits + rescued
-        )
-        if not duplicate and not blocked:
-            rescued.append(hit)
+    trace: dict[str, dict[str, object]] = {}
 
-    if not rescued:
-        suppressed = _filter_weak_gray_text_fragments(final_hits)
-        suppressed = _suppress_nested_gray_core_hits(suppressed)
-        suppressed = _dedupe_gray_overlapping_alternatives(suppressed)
-        merged, _merged_count = _merge_duplicate_gray_rect_frames(suppressed, templates)
-        return merged, 0
+    def _trace_stage(
+        stage: str,
+        hits: list[CandidateHit],
+        reasons: dict[int, str] | None = None,
+    ) -> None:
+        trace[stage] = {"hits": hits, "reasons": reasons or {}}
+
+    def _rescue_rank(hit: CandidateHit) -> tuple[float, ...]:
+        x, y, width, height = hit.bbox
+        return (
+            *candidate_quality_key(hit, mode="gray"),
+            -float(y),
+            -float(x),
+            -float(width * height),
+            -float(hit.template_id),
+        )
+
+    rescue_candidates = sorted(
+        (hit for hit in validated_hits if _is_gray_frame_validated_rescue_hit(hit, templates)),
+        key=_rescue_rank,
+        reverse=True,
+    )
+    _trace_stage("rescue_candidates", rescue_candidates)
+
+    rescued: list[CandidateHit] = []
+    dominated: list[CandidateHit] = []
+    dominated_reasons: dict[int, str] = {}
+    blocked: list[CandidateHit] = []
+    blocked_reasons: dict[int, str] = {}
+    local_competitors = final_hits
+
+    for hit in rescue_candidates:
+        dominator = next(
+            (
+                competitor
+                for competitor in local_competitors
+                if competitor is not hit and _is_gray_rescue_locally_dominated(hit, competitor)
+                and not (
+                    competitor.template_id == hit.template_id
+                    and competitor.bbox == hit.bbox
+                    and candidate_quality_key(competitor, mode="gray")
+                    == candidate_quality_key(hit, mode="gray")
+                )
+            ),
+            None,
+        )
+        if dominator is not None:
+            dominated.append(hit)
+            dominated_reasons[id(hit)] = (
+                f"dominated_by:{templates[dominator.template_id].name}"
+                if 0 <= dominator.template_id < len(templates)
+                else "dominated_by:unknown"
+            )
+            continue
+
+        duplicate = next(
+            (
+                existing
+                for existing in final_hits + rescued
+                if existing.template_id == hit.template_id and _same_physical_hit(existing, hit)
+            ),
+            None,
+        )
+        if duplicate is not None:
+            blocked.append(hit)
+            blocked_reasons[id(hit)] = "duplicate_same_template"
+            continue
+
+        blocker = next(
+            (
+                existing
+                for existing in final_hits + rescued
+                if _is_gray_rescue_blocked_by_existing(hit, existing)
+            ),
+            None,
+        )
+        if blocker is not None:
+            blocked.append(hit)
+            blocked_reasons[id(hit)] = (
+                f"blocked_by:{templates[blocker.template_id].name}"
+                if 0 <= blocker.template_id < len(templates)
+                else "blocked_by:unknown"
+            )
+            continue
+
+        rescued.append(hit)
+
+    _trace_stage("rescue_dominated", dominated, dominated_reasons)
+    _trace_stage("rescue_blocked_existing", blocked, blocked_reasons)
+    _trace_stage("rescue_added", rescued)
 
     combined = final_hits + rescued
     combined = _filter_weak_gray_text_fragments(combined)
+    _trace_stage("post_gray_filter_weak_text", combined)
+
     combined = _suppress_nested_gray_core_hits(combined)
+    _trace_stage("post_gray_suppress_nested", combined)
+
     combined = _dedupe_gray_overlapping_alternatives(combined)
+    _trace_stage("post_gray_dedupe", combined)
+
     combined, _merged_count = _merge_duplicate_gray_rect_frames(combined, templates)
+    _trace_stage("post_gray_merge_frames", combined)
+
     combined.sort(key=lambda item: (item.bbox[1], item.bbox[0], -item.verification_score))
-    return combined, len(rescued)
+    return combined, len(rescued), trace
 
 
 def trace_unresolved_strong_gray_hits(

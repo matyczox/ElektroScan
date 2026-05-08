@@ -76,6 +76,24 @@ def _sanitize_filename(text: str) -> str:
     return text[:MAX_FILENAME_LENGTH].strip("_")
 
 
+def _symbol_text_token(text: str) -> str | None:
+    """Return a short alphanumeric symbol token from PDF text, if it looks like one."""
+
+    token = _sanitize_filename(str(text or "")).upper()
+    if not re.fullmatch(r"[A-Z0-9_]{2,12}", token):
+        return None
+
+    compact = token.replace("_", "")
+    if not (2 <= len(compact) <= 10):
+        return None
+    if not re.search(r"[A-Z]", compact):
+        return None
+    if not (re.search(r"\d", compact) or len(compact) <= 4):
+        return None
+
+    return compact
+
+
 def _next_template_index(output_path: Path) -> int:
     """Return next numeric template prefix so repeated legend crops append."""
     max_index = 0
@@ -96,7 +114,11 @@ def _hsv_mask(image_bgr: np.ndarray) -> np.ndarray:
 def _ink_mask(image_bgr: np.ndarray, threshold: int = 238) -> np.ndarray:
     """Create a binary mask for dark ink in gray/black PDFs."""
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
-    return np.where(gray < threshold, 255, 0).astype(np.uint8)
+    ink_pixels = gray < threshold
+    hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
+    color_pixels = cv2.inRange(hsv, HSV_LOWER, HSV_UPPER) > 0
+    ink_pixels = np.logical_and(ink_pixels, np.logical_not(color_pixels))
+    return np.where(ink_pixels, 255, 0).astype(np.uint8)
 
 
 def _legend_symbol_mask(image_bgr: np.ndarray, mask_mode: str = "auto") -> tuple[np.ndarray, str]:
@@ -453,6 +475,53 @@ def _get_row_index_text(
     return None
 
 
+def _get_symbol_text_inside_region(
+    text_words: list,
+    *,
+    x_start: int,
+    y_start: int,
+    scale: float,
+    local_bbox: tuple[int, int, int, int],
+) -> str | None:
+    """Find a short PDF text token inside the cropped legend symbol bbox."""
+
+    x, y, w, h = local_bbox
+    pad = max(4, int(round(max(w, h) * 0.12)))
+    left = (x_start + x - pad) / scale
+    top = (y_start + y - pad) / scale
+    right = (x_start + x + w + pad) / scale
+    bottom = (y_start + y + h + pad) / scale
+
+    candidates: list[tuple[float, str]] = []
+    for word in text_words:
+        if len(word) < 5:
+            continue
+
+        token = _symbol_text_token(str(word[4]))
+        if token is None:
+            continue
+
+        wx0 = float(word[0])
+        wy0 = float(word[1])
+        wx1 = float(word[2])
+        wy1 = float(word[3])
+        center_x = (wx0 + wx1) / 2.0
+        center_y = (wy0 + wy1) / 2.0
+        if not (left <= center_x <= right and top <= center_y <= bottom):
+            continue
+
+        symbol_center_x = (left + right) / 2.0
+        symbol_center_y = (top + bottom) / 2.0
+        distance = abs(center_x - symbol_center_x) + abs(center_y - symbol_center_y)
+        candidates.append((distance, token))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: item[0])
+    return candidates[0][1]
+
+
 def _extract_table_legend_raw(
     legend_area: np.ndarray,
     text_blocks: list,
@@ -739,6 +808,7 @@ def extract_legend(
     doc = fitz.open(pdf_path)
     page = doc.load_page(0)
     text_blocks = page.get_text("blocks")
+    text_words = page.get_text("words")
 
     # Aplikujemy strefy wykluczone do obrazu planu (żeby zamazać niechciane fragmenty legendy)
     if exclude_rects:
@@ -865,6 +935,14 @@ def extract_legend(
         if symbol_image.size == 0:
             continue
 
+        symbol_text = _get_symbol_text_inside_region(
+            text_words,
+            x_start=x_start,
+            y_start=y_start,
+            scale=scale,
+            local_bbox=(x1, y1, out_w, out_h),
+        )
+
         # ── Dopasowanie tekstu z PDF ──
         # Używamy współrzędnych ORYGINALNEGO konturu (ze sklejonej maski)
         # bo ona daje lepszy "środek" grupy symboli złożonych
@@ -887,7 +965,10 @@ def extract_legend(
                 found_texts.append((dx, block[4].strip()))
 
         # Łączymy wszystkie fragmenty tekstu (posortowane od lewej do prawej)
-        if found_texts:
+        if symbol_text:
+            safe_name = symbol_text
+            filename = f"{counter:02d}_{safe_name}.png"
+        elif found_texts:
             found_texts.sort(key=lambda t: t[0])
             full_name = "_".join(t[1] for t in found_texts)
             safe_name = _sanitize_filename(full_name)

@@ -30,6 +30,7 @@ class Detection:
     content_score: float = 0.0
     content_bbox: tuple[int, int, int, int] | None = None
     content_source: str = ""
+    roi_strategy: str = ""
 
 
 @dataclass(slots=True)
@@ -102,6 +103,7 @@ class CandidateHit:
     verification_score: float = 0.0
     content_score: float = 0.0
     promoted_from_template_id: int | None = None
+    roi_strategy: str = ""
 
 
 @dataclass(slots=True)

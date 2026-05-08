@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+from dataclasses import dataclass
+
 import cv2
 import numpy as np
 
@@ -108,6 +111,102 @@ from core.detector_config import (
 from core.detector_models import CandidateHit
 
 
+@dataclass(slots=True)
+class ValidationMaskCache:
+    """Per-validation-run cache for template-mask derived metrics."""
+
+    normalized_masks: dict[int, np.ndarray]
+    normalized_pixels: dict[int, int]
+    centroids: dict[int, tuple[float, float] | None]
+    content_bboxes: dict[int, tuple[int, int, int, int] | None]
+    foreground_integrals: dict[int, np.ndarray]
+
+    @classmethod
+    def build(
+        cls,
+        hits: list[CandidateHit],
+        plan_masks: Iterable[np.ndarray] = (),
+    ) -> "ValidationMaskCache":
+        transformed_masks: dict[int, np.ndarray] = {}
+        content_masks: dict[int, np.ndarray] = {}
+        for hit in hits:
+            if hit.transformed_mask is not None:
+                transformed_masks[id(hit.transformed_mask)] = hit.transformed_mask
+            if hit.content_mask is not None:
+                content_masks[id(hit.content_mask)] = hit.content_mask
+
+        foreground_integrals: dict[int, np.ndarray] = {}
+        for mask in plan_masks:
+            if not isinstance(mask, np.ndarray):
+                continue
+            mask_id = id(mask)
+            if mask_id in foreground_integrals:
+                continue
+            foreground_integrals[mask_id] = cv2.integral(
+                (mask > 0).astype(np.uint8, copy=False),
+                sdepth=cv2.CV_32S,
+            )
+
+        normalized_masks: dict[int, np.ndarray] = {}
+        normalized_pixels: dict[int, int] = {}
+        centroids: dict[int, tuple[float, float] | None] = {}
+        for mask_id, mask in transformed_masks.items():
+            normalized = _thickness_normalized_mask(mask)
+            normalized_masks[mask_id] = normalized
+            normalized_pixels[mask_id] = max(1, int(cv2.countNonZero(normalized)))
+            centroids[mask_id] = _mask_centroid(mask)
+
+        return cls(
+            normalized_masks=normalized_masks,
+            normalized_pixels=normalized_pixels,
+            centroids=centroids,
+            content_bboxes={
+                mask_id: _mask_bbox(mask)
+                for mask_id, mask in content_masks.items()
+            },
+            foreground_integrals=foreground_integrals,
+        )
+
+    def normalized_mask(self, mask: np.ndarray) -> np.ndarray:
+        cached = self.normalized_masks.get(id(mask))
+        if cached is not None:
+            return cached
+        return _thickness_normalized_mask(mask)
+
+    def normalized_pixel_count(self, mask: np.ndarray) -> int:
+        cached = self.normalized_pixels.get(id(mask))
+        if cached is not None:
+            return cached
+        return max(1, int(cv2.countNonZero(self.normalized_mask(mask))))
+
+    def centroid(self, mask: np.ndarray) -> tuple[float, float] | None:
+        cached = self.centroids.get(id(mask))
+        if id(mask) in self.centroids:
+            return cached
+        return _mask_centroid(mask)
+
+    def content_bbox(self, mask: np.ndarray) -> tuple[int, int, int, int] | None:
+        cached = self.content_bboxes.get(id(mask))
+        if id(mask) in self.content_bboxes:
+            return cached
+        return _mask_bbox(mask)
+
+    def foreground_count(
+        self,
+        mask: np.ndarray,
+        bbox: tuple[int, int, int, int],
+    ) -> int:
+        integral = self.foreground_integrals.get(id(mask))
+        if integral is None:
+            roi = _roi_mask(mask, bbox)
+            return 0 if roi is None else int(cv2.countNonZero(roi))
+
+        x, y, w, h = bbox
+        x2 = x + w
+        y2 = y + h
+        return int(integral[y2, x2] - integral[y, x2] - integral[y2, x] + integral[y, x])
+
+
 def _clamp_bbox(
     bbox: tuple[int, int, int, int],
     image_shape: tuple[int, int, int] | tuple[int, int],
@@ -147,11 +246,17 @@ def _ink_mask(
     image_bgr: np.ndarray,
     dilate: bool = False,
     threshold: int = 238,
+    ignore_color: bool = True,
 ) -> np.ndarray:
     """Create a binary mask of visible ink for gray/black vector PDFs."""
 
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
-    mask = np.where(gray < threshold, 255, 0).astype(np.uint8)
+    ink_pixels = gray < threshold
+    if ignore_color:
+        hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
+        color_pixels = cv2.inRange(hsv, HSV_LOWER, HSV_UPPER) > 0
+        ink_pixels = np.logical_and(ink_pixels, np.logical_not(color_pixels))
+    mask = np.where(ink_pixels, 255, 0).astype(np.uint8)
     if dilate:
         mask = cv2.dilate(mask, DILATE_KERNEL, iterations=1)
     return mask
@@ -267,6 +372,9 @@ def _find_local_maxima(
 
     if match_result.size == 0:
         return []
+    _min_value, max_value, _min_loc, _max_loc = cv2.minMaxLoc(match_result)
+    if max_value < threshold:
+        return []
 
     kernel_w = min(
         match_result.shape[1], _odd_size(max(3, int(template_width * LOCAL_MAX_KERNEL_RATIO)))
@@ -317,9 +425,13 @@ def _extract_label_content_mask(mask: np.ndarray) -> np.ndarray | None:
     """Extract glyph-like content from a label by removing long frame/line strokes."""
 
     height, width = mask.shape[:2]
-    if width < LABEL_TEMPLATE_MIN_WIDTH:
+    long_side = max(width, height)
+    short_side = min(width, height)
+    if long_side < LABEL_TEMPLATE_MIN_WIDTH:
         return None
-    if width / max(1, height) < LABEL_TEMPLATE_MIN_ASPECT_RATIO:
+    if short_side < max(18, int(round(LABEL_TEMPLATE_MIN_WIDTH * 0.45))):
+        return None
+    if long_side / max(1, short_side) < LABEL_TEMPLATE_MIN_ASPECT_RATIO:
         return None
 
     foreground_pixels = int(cv2.countNonZero(mask))
@@ -331,9 +443,10 @@ def _extract_label_content_mask(mask: np.ndarray) -> np.ndarray | None:
         if suffix_mode and components <= 2:
             return None
 
-        content = np.zeros_like(mask)
+        candidate_components: list[tuple[int, bool]] = []
         for component_id in range(1, components):
             x = int(stats[component_id, cv2.CC_STAT_LEFT])
+            y = int(stats[component_id, cv2.CC_STAT_TOP])
             w = int(stats[component_id, cv2.CC_STAT_WIDTH])
             h = int(stats[component_id, cv2.CC_STAT_HEIGHT])
             area = int(stats[component_id, cv2.CC_STAT_AREA])
@@ -353,7 +466,40 @@ def _extract_label_content_mask(mask: np.ndarray) -> np.ndarray | None:
             if w >= int(width * 0.92) or h >= int(height * 0.92):
                 continue
 
+            bbox_area = max(1, w * h)
+            fill_ratio = area / bbox_area
+            horizontal_edge_marker = (
+                fill_ratio >= 0.50
+                and (y <= int(height * 0.12) or y + h >= int(height * 0.88))
+                and h <= max(5, int(height * 0.16))
+                and w <= max(8, int(width * 0.45))
+            )
+            vertical_edge_marker = (
+                fill_ratio >= 0.50
+                and (x <= int(width * 0.12) or x + w >= int(width * 0.88))
+                and w <= max(5, int(width * 0.16))
+                and h <= max(8, int(height * 0.45))
+            )
+            # Direction markers on framed labels can move around the label on the
+            # plan. Keep the glyphs, but do not let a top/bottom/side arrow anchor
+            # the content-only match to one legend orientation.
+            is_edge_marker = horizontal_edge_marker or vertical_edge_marker
+            candidate_components.append((component_id, is_edge_marker))
+
+        non_marker_components = [
+            component_id for component_id, is_marker in candidate_components if not is_marker
+        ]
+        if len(non_marker_components) >= 2:
+            kept_component_ids = non_marker_components
+        else:
+            kept_component_ids = [component_id for component_id, _ in candidate_components]
+
+        content = np.zeros_like(mask)
+        for component_id in kept_component_ids:
             content[labels == component_id] = 255
+
+        if len(kept_component_ids) < 2:
+            return None
 
         content_pixels = int(cv2.countNonZero(content))
         if content_pixels < LABEL_CONTENT_MIN_PIXELS:
@@ -367,7 +513,11 @@ def _extract_label_content_mask(mask: np.ndarray) -> np.ndarray | None:
         if content_bbox is None:
             return None
 
-        content_x, _, content_w, _ = content_bbox
+        content_x, _, content_w, content_h = content_bbox
+        if content_w < max(6, int(round(width * 0.12))):
+            return None
+        if content_h < max(8, int(round(height * 0.20))):
+            return None
         if not suffix_mode and content_x <= int(width * 0.10) and content_w < int(width * 0.55):
             return None
 
@@ -401,6 +551,7 @@ def _label_content_score(
     roi: np.ndarray,
     template_content_mask: np.ndarray | None,
     template_content_pixels: int,
+    validation_cache: ValidationMaskCache | None = None,
 ) -> float:
     """Score how well the ROI matches the template glyph mask, ignoring frame strokes."""
 
@@ -409,7 +560,11 @@ def _label_content_score(
     if roi.shape != template_content_mask.shape:
         return 0.0
 
-    content_bbox = _mask_bbox(template_content_mask)
+    content_bbox = (
+        validation_cache.content_bbox(template_content_mask)
+        if validation_cache is not None
+        else _mask_bbox(template_content_mask)
+    )
     if content_bbox is None:
         return 0.0
 
@@ -647,6 +802,7 @@ def _is_gray_rect_frame_candidate(hit: CandidateHit) -> bool:
     density = hit.pixel_count / max(1, width * height)
     return (
         hit.dominant_hsv is None
+        and not hit.is_text_label
         and aspect >= GRAY_RECT_FRAME_MIN_ASPECT
         and GRAY_RECT_FRAME_MIN_DENSITY <= density <= GRAY_RECT_FRAME_MAX_DENSITY
     )
@@ -715,6 +871,9 @@ def _context_purity(
     plan_mask: np.ndarray,
     bbox: tuple[int, int, int, int],
     intersection_mask: np.ndarray,
+    *,
+    explained_pixels: int | None = None,
+    validation_cache: ValidationMaskCache | None = None,
 ) -> float:
     """Measure how much local foreground around the hit is explained by the template."""
 
@@ -726,15 +885,20 @@ def _context_purity(
     x1 = min(plan_mask.shape[1], x + w + margin)
     y1 = min(plan_mask.shape[0], y + h + margin)
 
-    context_mask = plan_mask[y0:y1, x0:x1]
-    if context_mask.size == 0:
+    context_bbox = (x0, y0, x1 - x0, y1 - y0)
+    if context_bbox[2] <= 0 or context_bbox[3] <= 0:
         return 0.0
 
-    context_foreground = int(cv2.countNonZero(context_mask))
+    context_foreground = (
+        validation_cache.foreground_count(plan_mask, context_bbox)
+        if validation_cache is not None
+        else int(cv2.countNonZero(plan_mask[y0:y1, x0:x1]))
+    )
     if context_foreground == 0:
         return 0.0
 
-    explained_pixels = int(cv2.countNonZero(intersection_mask))
+    if explained_pixels is None:
+        explained_pixels = int(cv2.countNonZero(intersection_mask))
     return explained_pixels / context_foreground
 
 
@@ -746,6 +910,7 @@ def _validate_template_hit(
     plan_hsv: np.ndarray | None = None,
     evidence_mask: np.ndarray | None = None,
     relaxed_evidence_mask: np.ndarray | None = None,
+    validation_cache: ValidationMaskCache | None = None,
 ) -> bool:
     """Validate a candidate by foreground overlap, purity and hue consistency.
 
@@ -765,7 +930,11 @@ def _validate_template_hit(
         _record("roi_shape")
         return False
 
-    roi_foreground = int(cv2.countNonZero(roi))
+    roi_foreground = (
+        validation_cache.foreground_count(plan_mask, hit.bbox)
+        if validation_cache is not None
+        else int(cv2.countNonZero(roi))
+    )
     if roi_foreground == 0 or hit.pixel_count <= 0:
         _record("empty_roi")
         return False
@@ -782,7 +951,15 @@ def _validate_template_hit(
         _record("purity")
         return False
 
-    if (context_purity := _context_purity(plan_mask, hit.bbox, intersection_mask)) <= 0.0:
+    if (
+        context_purity := _context_purity(
+            plan_mask,
+            hit.bbox,
+            intersection_mask,
+            explained_pixels=intersection,
+            validation_cache=validation_cache,
+        )
+    ) <= 0.0:
         _record("context_purity")
         return False
 
@@ -829,11 +1006,19 @@ def _validate_template_hit(
         template_area = max(1, hit.bbox[2] * hit.bbox[3])
         template_density = hit.pixel_count / template_area
         normalized_roi = _thickness_normalized_mask(roi)
-        normalized_template = _thickness_normalized_mask(hit.transformed_mask)
+        normalized_template = (
+            validation_cache.normalized_mask(hit.transformed_mask)
+            if validation_cache is not None
+            else _thickness_normalized_mask(hit.transformed_mask)
+        )
         normalized_intersection = int(
             cv2.countNonZero(cv2.bitwise_and(normalized_roi, normalized_template))
         )
-        normalized_template_pixels = max(1, int(cv2.countNonZero(normalized_template)))
+        normalized_template_pixels = (
+            validation_cache.normalized_pixel_count(hit.transformed_mask)
+            if validation_cache is not None
+            else max(1, int(cv2.countNonZero(normalized_template)))
+        )
         normalized_roi_pixels = max(1, int(cv2.countNonZero(normalized_roi)))
         normalized_coverage = normalized_intersection / normalized_template_pixels
         normalized_purity = normalized_intersection / normalized_roi_pixels
@@ -942,7 +1127,11 @@ def _validate_template_hit(
         _record("gray_large_scale_partial")
         return False
 
-    template_centroid = _mask_centroid(hit.transformed_mask)
+    template_centroid = (
+        validation_cache.centroid(hit.transformed_mask)
+        if validation_cache is not None
+        else _mask_centroid(hit.transformed_mask)
+    )
     intersection_centroid = _mask_centroid(intersection_mask)
     if template_centroid is None or intersection_centroid is None:
         _record("centroid")
@@ -1040,7 +1229,12 @@ def _validate_template_hit(
 
     content_score = 0.0
     if hit.is_text_label:
-        content_score = _label_content_score(roi, hit.content_mask, hit.content_pixel_count)
+        content_score = _label_content_score(
+            roi,
+            hit.content_mask,
+            hit.content_pixel_count,
+            validation_cache=validation_cache,
+        )
         content_threshold = LABEL_CONTENT_MIN_SCORE
         if hit.content_bbox is not None:
             content_width_ratio = hit.content_bbox[2] / max(1, hit.bbox[2])

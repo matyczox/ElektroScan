@@ -119,6 +119,30 @@ def _collect_pdf_text_hits(
             token_rect_cache[cache_key] = matches
             return matches
 
+        def expand_text_bbox_for_template(
+            template: TemplateInfo,
+            text_bbox: tuple[int, int, int, int],
+        ) -> tuple[int, int, int, int]:
+            if (
+                not template.is_text_label
+                or template.content_bbox is None
+                or template.mask.size == 0
+            ):
+                return text_bbox
+
+            content_x, content_y, content_w, content_h = template.content_bbox
+            if content_w <= 0 or content_h <= 0:
+                return text_bbox
+
+            scale_x = text_bbox[2] / max(1, content_w)
+            scale_y = text_bbox[3] / max(1, content_h)
+            scale_factor = max(0.55, min(1.45, (scale_x + scale_y) / 2.0))
+            full_w = max(text_bbox[2], int(round(template.mask.shape[1] * scale_factor)))
+            full_h = max(text_bbox[3], int(round(template.mask.shape[0] * scale_factor)))
+            full_x = int(round(text_bbox[0] - content_x * scale_factor))
+            full_y = int(round(text_bbox[1] - content_y * scale_factor))
+            return (full_x, full_y, full_w, full_h)
+
         for template_id, template in enumerate(templates):
             if not template.text_tokens:
                 continue
@@ -129,13 +153,14 @@ def _collect_pdf_text_hits(
             for token in template.text_tokens:
                 for hit in get_token_hits(token):
                     rect = hit.rect if hasattr(hit, "rect") else hit
+                    text_bbox = (
+                        int(round(rect.x0 * scale)),
+                        int(round(rect.y0 * scale)),
+                        int(round(rect.width * scale)),
+                        int(round(rect.height * scale)),
+                    )
                     bbox = _clamp_bbox(
-                        (
-                            int(round(rect.x0 * scale)),
-                            int(round(rect.y0 * scale)),
-                            int(round(rect.width * scale)),
-                            int(round(rect.height * scale)),
-                        ),
+                        expand_text_bbox_for_template(template, text_bbox),
                         plan_image_shape,
                     )
                     if bbox is None or bbox in seen_boxes:
@@ -164,6 +189,7 @@ def _collect_pdf_text_hits(
                             purity=1.0,
                             color_similarity=1.0,
                             verification_score=1.0,
+                            content_score=1.0 if template.is_text_label else 0.0,
                         )
                     )
 
