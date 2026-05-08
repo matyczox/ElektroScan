@@ -27,6 +27,7 @@ from core.detector_config import (
     THRESHOLD_PRECISE,
     _safe_cpu_count,
 )
+from core.detector_diagnostics import aggregate_scan_profile, scan_roi_bucket
 from core.detector_masks import _find_local_maxima, _tight_mask_crop
 from core.detector_models import CandidateHit, TemplateInfo, TemplateVariant
 
@@ -135,25 +136,15 @@ def scan_template_candidates(
 
     scan_profile_records: list[dict] = []
     scan_profile_lock = Lock()
-
-    def _roi_bucket(width: int, height: int) -> str:
-        area = int(width) * int(height)
-        if area < 10_000:
-            return "<10k"
-        if area < 50_000:
-            return "10k-50k"
-        if area < 100_000:
-            return "50k-100k"
-        if area < 200_000:
-            return "100k-200k"
-        return ">=200k"
+    foreground_integrals_by_mask_id: dict[int, np.ndarray] = {}
+    foreground_integral_lock = Lock()
 
     def _record_roi_scan(stats: dict, roi_w: int, roi_h: int, output_pixels: int) -> str:
         pixels = int(roi_w) * int(roi_h)
         stats["calls"] += 1
         stats["pixels"] += pixels
         stats["outputPixels"] += int(output_pixels)
-        bucket = _roi_bucket(roi_w, roi_h)
+        bucket = scan_roi_bucket(roi_w, roi_h)
         bucket_stats = stats["roiBuckets"].setdefault(
             bucket,
             {"calls": 0, "pixels": 0, "outputPixels": 0, "rawPeaks": 0},
@@ -163,87 +154,16 @@ def scan_template_candidates(
         bucket_stats["outputPixels"] += int(output_pixels)
         return bucket
 
-    def _aggregate_scan_profile(records: list[dict]) -> dict:
-        def _empty_group() -> dict[str, int]:
-            return {
-                "calls": 0,
-                "pixels": 0,
-                "outputPixels": 0,
-                "rawPeaks": 0,
-                "emittedHits": 0,
-                "contentCalls": 0,
-            }
+    def _foreground_integral_for_scan_mask(scan_mask: np.ndarray) -> np.ndarray:
+        key = id(scan_mask)
+        cached = foreground_integrals_by_mask_id.get(key)
+        if cached is not None:
+            return cached
 
-        def _add(group: dict, stats: dict) -> None:
-            group["calls"] += int(stats.get("calls", 0))
-            group["pixels"] += int(stats.get("pixels", 0))
-            group["outputPixels"] += int(stats.get("outputPixels", 0))
-            group["rawPeaks"] += int(stats.get("rawPeaks", 0))
-            group["emittedHits"] += int(stats.get("emittedHits", 0))
-            group["contentCalls"] += int(stats.get("contentCalls", 0))
-
-        totals = _empty_group()
-        by_template: dict[str, dict] = {}
-        by_scale: dict[str, dict] = {}
-        by_rotation: dict[str, dict] = {}
-        by_mirror: dict[str, dict] = {}
-        by_mask_kind: dict[str, dict] = {}
-        by_roi_bucket: dict[str, dict] = {}
-        for stats in records:
-            _add(totals, stats)
-            template_key = f"{stats['templateId']}:{stats['templateName']}"
-            for groups, key in (
-                (by_template, template_key),
-                (by_scale, f"{float(stats['scale']):.2f}"),
-                (by_rotation, str(stats["rotation"])),
-                (by_mirror, "mirrored" if stats["mirrored"] else "normal"),
-                (by_mask_kind, str(stats["maskKind"])),
-            ):
-                group = groups.setdefault(key, _empty_group())
-                _add(group, stats)
-            for bucket, bucket_stats in stats.get("roiBuckets", {}).items():
-                group = by_roi_bucket.setdefault(bucket, _empty_group())
-                group["calls"] += int(bucket_stats.get("calls", 0))
-                group["pixels"] += int(bucket_stats.get("pixels", 0))
-                group["outputPixels"] += int(bucket_stats.get("outputPixels", 0))
-                group["rawPeaks"] += int(bucket_stats.get("rawPeaks", 0))
-
-        def _sorted_groups(groups: dict[str, dict]) -> list[dict]:
-            return [
-                {"key": key, **value}
-                for key, value in sorted(
-                    groups.items(),
-                    key=lambda item: (-int(item[1].get("pixels", 0)), item[0]),
-                )
-            ]
-
-        top_by_pixels = sorted(
-            records,
-            key=lambda item: (-int(item.get("pixels", 0)), -int(item.get("calls", 0))),
-        )[:10]
-        top_by_peaks = sorted(
-            records,
-            key=lambda item: (-int(item.get("rawPeaks", 0)), -int(item.get("emittedHits", 0))),
-        )[:10]
-        top_by_large_roi_pixels = sorted(
-            records,
-            key=lambda item: (
-                -int(item.get("roiBuckets", {}).get(">=200k", {}).get("pixels", 0)),
-                -int(item.get("roiBuckets", {}).get(">=200k", {}).get("calls", 0)),
-            ),
-        )[:10]
-        return {
-            "total": totals,
-            "byTemplate": _sorted_groups(by_template),
-            "byScale": _sorted_groups(by_scale),
-            "byRotation": _sorted_groups(by_rotation),
-            "byMirror": _sorted_groups(by_mirror),
-            "byMaskKind": _sorted_groups(by_mask_kind),
-            "byRoiBucket": _sorted_groups(by_roi_bucket),
-            "topVariantsByPixels": top_by_pixels,
-            "topVariantsByRawPeaks": top_by_peaks,
-            "topVariantsByLargeRoiPixels": top_by_large_roi_pixels,
-        }
+        foreground_mask = (scan_mask > 0).astype(np.uint8, copy=False)
+        foreground_integral = cv2.integral(foreground_mask, sdepth=cv2.CV_32S)
+        with foreground_integral_lock:
+            return foreground_integrals_by_mask_id.setdefault(key, foreground_integral)
 
     def _scan_variant(
         template_id: int,
@@ -473,8 +393,7 @@ def scan_template_candidates(
         if plan_mask_foregrounds.get(template_id, 0) < MIN_TEMPLATE_PIXELS or not search_rois:
             return []
 
-        foreground_mask = (scan_mask > 0).astype(np.uint8, copy=False)
-        foreground_integral = cv2.integral(foreground_mask, sdepth=cv2.CV_32S)
+        foreground_integral = _foreground_integral_for_scan_mask(scan_mask)
         search_rois_with_foreground = []
         for roi_x, roi_y, roi_w, roi_h in search_rois:
             roi_foreground = int(
@@ -618,5 +537,5 @@ def scan_template_candidates(
         configured_scan_workers=max_scan_workers,
         scan_tasks=len(scan_items),
         scan_task_rois=scan_task_rois,
-        scan_profile=_aggregate_scan_profile(scan_profile_records) if collect_profile else {},
+        scan_profile=aggregate_scan_profile(scan_profile_records) if collect_profile else {},
     )
