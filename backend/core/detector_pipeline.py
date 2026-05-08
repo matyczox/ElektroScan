@@ -578,6 +578,7 @@ def _detect_symbols_pipeline(
         raw_peaks_by_scale[_hit.scale] = raw_peaks_by_scale.get(_hit.scale, 0) + 1
 
     gray_budget_profile: dict = {}
+    phase_start = time.perf_counter()
     if detector_profile == "gray":
         raw_template_hits, gray_budget_profile = gray_strategy.gray_raw_budget(
             raw_template_hits,
@@ -588,6 +589,7 @@ def _detect_symbols_pipeline(
         diagnostics["raw_budget_removed"] = int(gray_budget_profile.get("removed", 0))
     else:
         diagnostics["raw_budget_hits"] = len(raw_template_hits)
+    timings["raw_budget"] = time.perf_counter() - phase_start
     raw_budget_hits = raw_template_hits
     _record_candidate_trace("raw_budget", raw_template_hits)
 

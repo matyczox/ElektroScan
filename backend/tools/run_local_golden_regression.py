@@ -111,7 +111,9 @@ def _run_fixture(
     image = pdf_to_png(str(pdf_path), dpi=300)
     render_elapsed = time.perf_counter() - started
 
+    templates_started = time.perf_counter()
     templates = load_templates(str(templates_dir))
+    templates_elapsed = time.perf_counter() - templates_started
     expected_templates = manifest.get("templateCount")
     if expected_templates is not None and int(expected_templates) != len(templates):
         raise RuntimeError(
@@ -150,6 +152,7 @@ def _run_fixture(
     output_dir.mkdir(parents=True, exist_ok=True)
     output_suffix = f"_{ablation}" if ablation else ""
     output_path = output_dir / f"{name}_local_candidate{output_suffix}.json"
+    candidate_write_started = time.perf_counter()
     output_path.write_text(
         json.dumps(
             {
@@ -166,14 +169,17 @@ def _run_fixture(
         ),
         encoding="utf-8",
     )
+    candidate_write_elapsed = time.perf_counter() - candidate_write_started
 
     detector_timings = debug_profile.get("timingsMs", {})
     counters = debug_profile.get("counters", {})
     print(
         "Timing: "
-        f"render={render_elapsed:.1f}s detect={detect_elapsed:.1f}s "
+        f"render={render_elapsed:.1f}s templates={templates_elapsed:.3f}s "
+        f"detect={detect_elapsed:.1f}s "
         f"scan={float(detector_timings.get('scan', 0.0)) / 1000.0:.1f}s "
-        f"prepare={float(detector_timings.get('prepare', 0.0)) / 1000.0:.1f}s"
+        f"prepare={float(detector_timings.get('prepare', 0.0)) / 1000.0:.1f}s "
+        f"write={candidate_write_elapsed:.3f}s"
     )
     print(
         "Counters: "
@@ -199,6 +205,7 @@ def _run_fixture(
             )
 
     focus = tuple(part.strip() for part in str(manifest.get("focus", "")).split(",") if part.strip())
+    compare_started = time.perf_counter()
     report = compare_snapshots(
         golden_path,
         output_path,
@@ -206,7 +213,9 @@ def _run_fixture(
         center_tolerance=float(manifest.get("centerTolerance", 18)),
         size_tolerance=float(manifest.get("sizeTolerance", 0.35)),
     )
+    compare_elapsed = time.perf_counter() - compare_started
     print(report)
+    print(f"Runner compare: {compare_elapsed:.3f}s")
 
     failed = (
         "Missing focus boxes: 0" not in report
@@ -218,7 +227,10 @@ def _run_fixture(
         "passed": not failed,
         "ablation": ablation or "",
         "renderSeconds": round(render_elapsed, 3),
+        "templateLoadSeconds": round(templates_elapsed, 3),
         "detectSeconds": round(detect_elapsed, 3),
+        "candidateWriteSeconds": round(candidate_write_elapsed, 3),
+        "compareSeconds": round(compare_elapsed, 3),
         "boxes": len(boxes),
         "candidatePath": str(output_path),
         "goldenPath": str(golden_path),
@@ -276,6 +288,7 @@ def main() -> None:
     if args.perf_json:
         perf_path = args.perf_json if args.perf_json.is_absolute() else (REPO_ROOT / args.perf_json)
         perf_path.parent.mkdir(parents=True, exist_ok=True)
+        perf_write_started = time.perf_counter()
         perf_path.write_text(
             json.dumps(
                 {
@@ -288,7 +301,8 @@ def main() -> None:
             ),
             encoding="utf-8",
         )
-        print(f"Performance JSON: {perf_path}")
+        perf_write_elapsed = time.perf_counter() - perf_write_started
+        print(f"Performance JSON: {perf_path} (write={perf_write_elapsed:.3f}s)")
     if not all_ok:
         raise SystemExit(1)
 
