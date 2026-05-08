@@ -19,6 +19,7 @@ from core import detector_color as color_strategy
 from core import detector_gray as gray_strategy
 from core.detector_clustering import (
     _cluster_candidates,
+    _dedupe_raw_template_hits_before_validation,
     _prefilter_candidates,
     _prefilter_raw_template_hits,
 )
@@ -654,6 +655,7 @@ def _detect_symbols_pipeline(
             raw_template_hits.extend(restored)
     else:
         restored = []
+    raw_template_hits = _dedupe_raw_template_hits_before_validation(raw_template_hits)
     diagnostics["raw_prefilter_hits"] = len(raw_template_hits)
     diagnostics["raw_prefilter_removed"] = raw_before_prefilter - len(raw_template_hits)
     diagnostics["gray_frame_raw_rescue_hits"] = len(gray_frame_raw_rescue_hits)
