@@ -1,13 +1,16 @@
 import base64
 import json
+import math
 import os
 import re
 import shutil
 import time
 import uuid
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Lock
 from typing import List, Optional
 
 import cv2
@@ -62,6 +65,11 @@ ANALYSIS_DIR.mkdir(exist_ok=True)
 
 SNAPSHOT_EXECUTOR = ThreadPoolExecutor(max_workers=1)
 ANALYSIS_PROGRESS: dict[str, dict] = {}
+ANALYSIS_DPI = 300
+PREVIEW_DPI = int(os.getenv("ELEKTROSCAN_PREVIEW_DPI", "180"))
+RENDER_CACHE_MAX_ENTRIES = int(os.getenv("ELEKTROSCAN_RENDER_CACHE_MAX_ENTRIES", "4"))
+RENDER_CACHE: OrderedDict[tuple[str, int, int, tuple[str, ...]], np.ndarray] = OrderedDict()
+RENDER_CACHE_LOCK = Lock()
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -123,6 +131,84 @@ def _read_session_meta(session_id: str) -> dict:
         return json.loads(meta_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return {}
+
+
+def _normalized_hidden_layer_key(hidden_layers: list[str] | None = None) -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            _normalize_layer_name(layer)
+            for layer in (hidden_layers or [])
+            if str(layer).strip()
+        )
+    )
+
+
+def _clear_render_cache(session_id: str | None = None) -> None:
+    with RENDER_CACHE_LOCK:
+        if session_id is None:
+            RENDER_CACHE.clear()
+            return
+        for key in list(RENDER_CACHE.keys()):
+            if key[0] == session_id:
+                RENDER_CACHE.pop(key, None)
+
+
+def _pdf_page_size_at_dpi(pdf_path: str, *, page: int = 0, dpi: int = ANALYSIS_DPI) -> dict:
+    doc = fitz.open(pdf_path)
+    try:
+        pg = doc.load_page(page)
+        zoom = dpi / 72.0
+        return {
+            "width": int(math.ceil(pg.rect.width * zoom)),
+            "height": int(math.ceil(pg.rect.height * zoom)),
+        }
+    finally:
+        doc.close()
+
+
+def _render_pdf_for_session(
+    session_id: str,
+    pdf_path: str,
+    *,
+    page: int = 0,
+    dpi: int = ANALYSIS_DPI,
+    hidden_layers: list[str] | None = None,
+    copy_image: bool = False,
+) -> tuple[np.ndarray, bool]:
+    key = (session_id, int(page), int(dpi), _normalized_hidden_layer_key(hidden_layers))
+    with RENDER_CACHE_LOCK:
+        cached = RENDER_CACHE.get(key)
+        if cached is not None:
+            RENDER_CACHE.move_to_end(key)
+            return (cached.copy() if copy_image else cached), True
+
+    rendered = pdf_to_png(pdf_path, page=page, dpi=dpi, hidden_layers=hidden_layers or [])
+
+    with RENDER_CACHE_LOCK:
+        RENDER_CACHE[key] = rendered
+        RENDER_CACHE.move_to_end(key)
+        while len(RENDER_CACHE) > max(1, RENDER_CACHE_MAX_ENTRIES):
+            RENDER_CACHE.popitem(last=False)
+
+    return (rendered.copy() if copy_image else rendered), False
+
+
+def _preview_response_meta(
+    plan_img: np.ndarray,
+    *,
+    preview_dpi: int,
+    analysis_size: dict,
+    cache_hit: bool,
+) -> dict:
+    return {
+        "previewDpi": int(preview_dpi),
+        "analysisDpi": int(ANALYSIS_DPI),
+        "analysisSize": analysis_size,
+        "isFullResolution": int(preview_dpi) == int(ANALYSIS_DPI),
+        "renderCacheHit": bool(cache_hit),
+        "imageWidth": int(plan_img.shape[1]),
+        "imageHeight": int(plan_img.shape[0]),
+    }
 
 
 def _analysis_snapshot_path(analysis_id: str) -> Path:
@@ -455,6 +541,7 @@ async def api_preview(file: UploadFile = File(...)):
     session_id = str(uuid.uuid4())
     file_path = UPLOAD_DIR / f"{session_id}.pdf"
     _clear_directory_contents(TEMPLATES_DIR)
+    _clear_render_cache()
 
     # Zapis
     with file_path.open("wb") as buffer:
@@ -463,7 +550,12 @@ async def api_preview(file: UploadFile = File(...)):
 
     try:
         # Render podglądu (300 DPI — identycznie jak detekcja)
-        plan_img = pdf_to_png(str(file_path), dpi=300)
+        plan_img, cache_hit = _render_pdf_for_session(
+            session_id,
+            str(file_path),
+            dpi=PREVIEW_DPI,
+        )
+        analysis_size = _pdf_page_size_at_dpi(str(file_path), dpi=ANALYSIS_DPI)
         pdf_diagnostics = _build_pdf_diagnostics(str(file_path), plan_img)
         _, buffer_plan = cv2.imencode(".jpg", plan_img, [cv2.IMWRITE_JPEG_QUALITY, 80])
         plan_base64 = base64.b64encode(buffer_plan).decode("utf-8")
@@ -473,6 +565,12 @@ async def api_preview(file: UploadFile = File(...)):
             "sessionId": session_id,
             "sourcePdf": filename or file_path.name,
             "pdfDiagnostics": pdf_diagnostics,
+            **_preview_response_meta(
+                plan_img,
+                preview_dpi=PREVIEW_DPI,
+                analysis_size=analysis_size,
+                cache_hit=cache_hit,
+            ),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -505,13 +603,24 @@ async def api_render_preview(session_id: str, body: RenderRequest = None):
         raise HTTPException(status_code=404, detail="Nie znaleziono pliku sesji.")
     try:
         hidden_layers = body.hidden_layers if body else []
-        plan_img = pdf_to_png(str(file_path), dpi=300, hidden_layers=hidden_layers)
+        plan_img, cache_hit = _render_pdf_for_session(
+            session_id,
+            str(file_path),
+            dpi=ANALYSIS_DPI,
+            hidden_layers=hidden_layers,
+        )
         pdf_diagnostics = _build_pdf_diagnostics(str(file_path), plan_img)
         _, buffer_plan = cv2.imencode(".jpg", plan_img, [cv2.IMWRITE_JPEG_QUALITY, 80])
         plan_base64 = base64.b64encode(buffer_plan).decode("utf-8")
         return {
             "planPreview": f"data:image/jpeg;base64,{plan_base64}",
             "pdfDiagnostics": pdf_diagnostics,
+            **_preview_response_meta(
+                plan_img,
+                preview_dpi=ANALYSIS_DPI,
+                analysis_size={"width": int(plan_img.shape[1]), "height": int(plan_img.shape[0])},
+                cache_hit=cache_hit,
+            ),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -527,7 +636,13 @@ async def api_extract_legend(session_id: str, body: ExtractRequest = None):
         _log("Renderowanie planu do ekstrakcji (300 DPI)")
         hidden_layers = body.hidden_layers if body else []
         requested_profile = _normalize_detector_profile(body.detector_profile if body else "auto")
-        plan_img = pdf_to_png(str(file_path), dpi=300, hidden_layers=hidden_layers)
+        plan_img, _cache_hit = _render_pdf_for_session(
+            session_id,
+            str(file_path),
+            dpi=ANALYSIS_DPI,
+            hidden_layers=hidden_layers,
+            copy_image=True,
+        )
         pdf_diagnostics = _build_pdf_diagnostics(str(file_path), plan_img)
         resolved_profile = (
             pdf_diagnostics.get("recommendedProfile", "color")
@@ -571,6 +686,7 @@ async def api_extract_legend(session_id: str, body: ExtractRequest = None):
             str(file_path),
             plan_img,
             output_dir=str(TEMPLATES_DIR),
+            dpi=ANALYSIS_DPI,
             exclude_rects=exclude_rects,
             legend_rect_px=legend_rect_px,
             mask_mode=mask_mode,
@@ -691,11 +807,17 @@ def api_analyze(session_id: str, body: AnalyzeRequest = None):
             session_id, "render_pdf", 5, "Renderowanie PDF", analysis_id=analysis_id
         )
         phase_start = time.perf_counter()
-        plan_img = pdf_to_png(str(plan_path), dpi=300, hidden_layers=hidden_layers)
+        plan_img, render_cache_hit = _render_pdf_for_session(
+            session_id,
+            str(plan_path),
+            dpi=ANALYSIS_DPI,
+            hidden_layers=hidden_layers,
+        )
         timings_ms["renderPdf"] = _elapsed_ms(phase_start)
         counters["planWidth"] = int(plan_img.shape[1])
         counters["planHeight"] = int(plan_img.shape[0])
         counters["hiddenLayers"] = len(hidden_layers)
+        counters["renderCacheHit"] = 1 if render_cache_hit else 0
 
         _set_analysis_progress(
             session_id, "diagnostics", 8, "Diagnostyka PDF", analysis_id=analysis_id
@@ -784,7 +906,7 @@ def api_analyze(session_id: str, body: AnalyzeRequest = None):
             templates,
             exclude_rects=exclude_rects,
             pdf_path=str(plan_path),
-            pdf_dpi=300,
+            pdf_dpi=ANALYSIS_DPI,
             hidden_layers=hidden_layers,
             debug_profile=detector_profile if include_debug else None,
             detector_profile=resolved_profile,
@@ -994,7 +1116,12 @@ def api_inspect_roi(session_id: str, body: RoiInspectRequest):
     try:
         hidden_layers = body.hidden_layers if body else []
         requested_profile = _normalize_detector_profile(body.detector_profile if body else "auto")
-        plan_img = pdf_to_png(str(plan_path), dpi=300, hidden_layers=hidden_layers)
+        plan_img, _cache_hit = _render_pdf_for_session(
+            session_id,
+            str(plan_path),
+            dpi=ANALYSIS_DPI,
+            hidden_layers=hidden_layers,
+        )
         pdf_diagnostics = _build_pdf_diagnostics(str(plan_path), plan_img)
         resolved_profile = (
             pdf_diagnostics.get("recommendedProfile", "color")
@@ -1036,7 +1163,12 @@ def api_gray_debug_zones(session_id: str, body: GrayDebugZonesRequest = None):
 
     try:
         hidden_layers = body.hidden_layers if body else []
-        plan_img = pdf_to_png(str(plan_path), dpi=300, hidden_layers=hidden_layers)
+        plan_img, _cache_hit = _render_pdf_for_session(
+            session_id,
+            str(plan_path),
+            dpi=ANALYSIS_DPI,
+            hidden_layers=hidden_layers,
+        )
         templates = load_templates(str(TEMPLATES_DIR))
         exclude_rects, plan_zone_rect, plan_zone_outside_rects = (
             _extract_exclude_rects_from_request(
@@ -1155,9 +1287,10 @@ async def api_crop_template(template_name: str, body: TemplateCropRequest):
         raise HTTPException(status_code=404, detail="Nie znaleziono pliku sesji.")
 
     try:
-        plan_img = pdf_to_png(
+        plan_img, _cache_hit = _render_pdf_for_session(
+            body.session_id,
             str(plan_path),
-            dpi=300,
+            dpi=ANALYSIS_DPI,
             hidden_layers=body.hidden_layers or [],
         )
         rect = (

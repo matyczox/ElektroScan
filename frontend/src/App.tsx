@@ -58,6 +58,14 @@ interface PdfDiagnostics {
   recommendedProfile?: 'color' | 'gray';
 }
 
+interface PreviewMeta {
+  previewDpi?: number;
+  analysisDpi?: number;
+  analysisSize?: { width: number; height: number };
+  isFullResolution?: boolean;
+  renderCacheHit?: boolean;
+}
+
 interface AnalysisProgress {
   sessionId?: string;
   analysisId?: string | null;
@@ -168,6 +176,7 @@ interface LegendCorrectionTarget {
 function App() {
   const [file, setFile] = useState<File | null>(null);
   const [pdfPreview, setPdfPreview] = useState<string | null>(null);
+  const [previewMeta, setPreviewMeta] = useState<PreviewMeta | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [progressText, setProgressText] = useState('');
   const [patterns, setPatterns] = useState<Pattern[]>([]);
@@ -192,6 +201,7 @@ function App() {
   const [isLoadingGrayZones, setIsLoadingGrayZones] = useState(false);
   const detectRequestSeqRef = useRef(0);
   const detectAbortRef = useRef<AbortController | null>(null);
+  const previewRenderSeqRef = useRef(0);
 
   const legendReviewCompleted = legendReviewItems.filter(item => item.status !== 'pending').length;
   const hasLegendReview = legendReviewItems.length > 0;
@@ -205,6 +215,17 @@ function App() {
       next[index] = pattern;
       return next;
     });
+  };
+
+  const readPreviewMeta = (data: Partial<PreviewMeta>): PreviewMeta | null => {
+    if (!data.analysisSize) return null;
+    return {
+      previewDpi: data.previewDpi,
+      analysisDpi: data.analysisDpi,
+      analysisSize: data.analysisSize,
+      isFullResolution: data.isFullResolution,
+      renderCacheHit: data.renderCacheHit,
+    };
   };
 
   const fetchTemplates = async () => {
@@ -222,8 +243,10 @@ function App() {
   // ── Handlery ────────────────────────────────────────────
 
   const handleFileSelect = async (selectedFile: File) => {
+    previewRenderSeqRef.current += 1;
     setFile(selectedFile);
     setPdfPreview(null);
+    setPreviewMeta(null);
     setPatterns([]);
     setResults([]);
     setBoxes([]);
@@ -255,7 +278,25 @@ function App() {
       const data = await res.json();
       setPdfPreview(data.planPreview);
       setSessionId(data.sessionId);
+      setPreviewMeta(readPreviewMeta(data));
       setPdfDiagnostics(data.pdfDiagnostics || null);
+
+      const renderSeq = ++previewRenderSeqRef.current;
+      const loadedSessionId = data.sessionId;
+      void fetch(withNoCache(`/api/render-preview?session_id=${loadedSessionId}`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
+        body: JSON.stringify({ hidden_layers: [] }),
+      })
+        .then(response => response.ok ? response.json() : null)
+        .then(fullData => {
+          if (!fullData || renderSeq !== previewRenderSeqRef.current) return;
+          setPdfPreview(fullData.planPreview);
+          setPreviewMeta(readPreviewMeta(fullData));
+          setPdfDiagnostics(fullData.pdfDiagnostics || null);
+        })
+        .catch(err => console.error('Full preview warmup error', err));
       
       // Fetch layers
       fetch(withNoCache(`/api/layers?session_id=${data.sessionId}`), { cache: 'no-store' })
@@ -275,6 +316,7 @@ function App() {
     if (!sessionId) return;
     const newLayers = layers.map(l => l.name === layerName ? { ...l, visible: !l.visible } : l);
     setLayers(newLayers);
+    const renderSeq = ++previewRenderSeqRef.current;
     
     setIsProcessing(true);
     setProgressText('Przeliczanie warstw...');
@@ -288,7 +330,9 @@ function App() {
       });
       if (!res.ok) throw new Error('Błąd odświeżania podglądu');
       const data = await res.json();
+      if (renderSeq !== previewRenderSeqRef.current) return;
       setPdfPreview(data.planPreview);
+      setPreviewMeta(readPreviewMeta(data));
       setPdfDiagnostics(data.pdfDiagnostics || null);
     } catch (err) {
       console.error(err);
@@ -491,11 +535,13 @@ function App() {
   };
 
   const handleClear = async () => {
+    previewRenderSeqRef.current += 1;
     try {
       await fetch(withNoCache('/api/clear'), { method: 'POST', cache: 'no-store' });
     } catch { /* ignore */ }
     setFile(null);
     setPdfPreview(null);
+    setPreviewMeta(null);
     setPatterns([]);
     setLegendReviewItems([]);
     setIsLegendReviewOpen(false);
@@ -853,6 +899,8 @@ function App() {
       <CanvasView
         key={analysisContext?.analysisId ?? sessionId ?? 'canvas-empty'}
         imageSrc={pdfPreview}
+        imageSize={previewMeta?.analysisSize ?? null}
+        imageResetKey={sessionId}
         boxes={boxes}
         analysisContext={analysisContext}
         focusedBoxId={focusedBoxId}

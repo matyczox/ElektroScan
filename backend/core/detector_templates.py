@@ -11,10 +11,17 @@ import cv2
 import numpy as np
 
 from core.detector_config import (
+    GRAY_COMPACT_TEXT_DIAGONAL_ROTATION_MAX_ASPECT,
+    GRAY_COMPACT_TEXT_DIAGONAL_ROTATION_MAX_SCALE,
+    GRAY_COMPACT_TEXT_DIAGONAL_ROTATION_MAX_TEMPLATE_PIXELS,
+    GRAY_COMPACT_TEXT_DIAGONAL_ROTATION_MIN_ASPECT,
+    GRAY_COMPACT_TEXT_DIAGONAL_ROTATION_MIN_SCALE,
+    GRAY_COMPACT_TEXT_DIAGONAL_ROTATIONS,
     GRAY_DIAGONAL_ROTATION_MAX_TEMPLATE_PIXELS,
     GRAY_DIAGONAL_ROTATION_MIN_ASPECT,
     GRAY_DIAGONAL_ROTATION_MIN_SCALE,
     GRAY_DIAGONAL_ROTATIONS,
+    GRAY_NON_TEXT_DIAGONAL_ROTATIONS_ENABLED,
     MIN_TEMPLATE_PIXELS,
     MIRRORED_VARIANT_PREFIXES,
     PDF_TEXT_MAX_TOKEN_LENGTH,
@@ -95,16 +102,30 @@ def _prepare_variants(
         or (not template.is_text_label and template_prefix in MIRRORED_VARIANT_PREFIXES)
     )
 
+    base_aspect = _mask_aspect(base_mask)
     use_diagonal_rotations = (
         include_gray_diagonal_rotations
+        and GRAY_NON_TEXT_DIAGONAL_ROTATIONS_ENABLED
         and template.dominant_hsv is None
         and not template.is_text_label
         and template.pixel_count <= GRAY_DIAGONAL_ROTATION_MAX_TEMPLATE_PIXELS
-        and _mask_aspect(base_mask) >= GRAY_DIAGONAL_ROTATION_MIN_ASPECT
+        and base_aspect >= GRAY_DIAGONAL_ROTATION_MIN_ASPECT
+    )
+    use_compact_text_diagonal_rotations = (
+        include_gray_diagonal_rotations
+        and template.dominant_hsv is None
+        and template.is_text_label
+        and template.pixel_count <= GRAY_COMPACT_TEXT_DIAGONAL_ROTATION_MAX_TEMPLATE_PIXELS
+        and GRAY_COMPACT_TEXT_DIAGONAL_ROTATION_MIN_ASPECT
+        <= base_aspect
+        <= GRAY_COMPACT_TEXT_DIAGONAL_ROTATION_MAX_ASPECT
     )
     base_rotation_specs = list(ROTATIONS)
     diagonal_rotation_specs = base_rotation_specs + [
         (angle, None) for angle in GRAY_DIAGONAL_ROTATIONS
+    ]
+    compact_text_diagonal_rotation_specs = base_rotation_specs + [
+        (angle, None) for angle in GRAY_COMPACT_TEXT_DIAGONAL_ROTATIONS
     ]
 
     def _rotate_mask(mask: np.ndarray | None, rotation: int, rotate_code) -> np.ndarray | None:
@@ -149,11 +170,16 @@ def _prepare_variants(
             scaled_mask = base_mask
             scaled_content_mask = template.content_mask
 
-        rotation_specs = (
-            diagonal_rotation_specs
-            if use_diagonal_rotations and scale >= GRAY_DIAGONAL_ROTATION_MIN_SCALE
-            else base_rotation_specs
-        )
+        if use_diagonal_rotations and scale >= GRAY_DIAGONAL_ROTATION_MIN_SCALE:
+            rotation_specs = diagonal_rotation_specs
+        elif (
+            use_compact_text_diagonal_rotations
+            and scale >= GRAY_COMPACT_TEXT_DIAGONAL_ROTATION_MIN_SCALE
+            and scale <= GRAY_COMPACT_TEXT_DIAGONAL_ROTATION_MAX_SCALE
+        ):
+            rotation_specs = compact_text_diagonal_rotation_specs
+        else:
+            rotation_specs = base_rotation_specs
         mask_sources = [(False, scaled_mask)]
         if allow_mirror:
             mask_sources.append((True, cv2.flip(scaled_mask, 1)))

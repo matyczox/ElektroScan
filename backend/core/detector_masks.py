@@ -18,6 +18,36 @@ from core.detector_config import (
     GRAY_COMPLEX_GEOMETRY_MIN_CONTEXT,
     GRAY_COMPLEX_GEOMETRY_MIN_COVERAGE,
     GRAY_COMPLEX_GEOMETRY_MIN_PURITY,
+    GRAY_DISRUPTED_LABEL_MIN_ASPECT,
+    GRAY_DISRUPTED_LABEL_MIN_COVERAGE,
+    GRAY_DISRUPTED_LABEL_MIN_MATCH,
+    GRAY_DISRUPTED_LABEL_MIN_PURITY,
+    GRAY_DISRUPTED_LABEL_MIN_SCALE,
+    GRAY_DIAGONAL_CONTENT_LABEL_MIN_CONTEXT,
+    GRAY_DIAGONAL_CONTENT_LABEL_MIN_COVERAGE,
+    GRAY_DIAGONAL_CONTENT_LABEL_MIN_MATCH,
+    GRAY_DIAGONAL_CONTENT_LABEL_MIN_PURITY,
+    GRAY_DIAGONAL_TEXT_LABEL_MAX_ASPECT,
+    GRAY_DIAGONAL_TEXT_LABEL_MIN_AREA,
+    GRAY_DIAGONAL_TEXT_LABEL_MIN_CONTEXT,
+    GRAY_DIAGONAL_TEXT_LABEL_MIN_COVERAGE,
+    GRAY_DIAGONAL_TEXT_LABEL_MIN_MATCH,
+    GRAY_DIAGONAL_TEXT_LABEL_MIN_PURITY,
+    GRAY_INTERRUPTED_LABEL_DARK_MIN_CONTEXT,
+    GRAY_INTERRUPTED_LABEL_DARK_MIN_COVERAGE,
+    GRAY_INTERRUPTED_LABEL_DARK_MIN_MATCH,
+    GRAY_INTERRUPTED_LABEL_DARK_MIN_PURITY,
+    GRAY_INTERRUPTED_CONTENT_LABEL_DARK_MIN_CONTEXT,
+    GRAY_INTERRUPTED_CONTENT_LABEL_DARK_MIN_COVERAGE,
+    GRAY_INTERRUPTED_CONTENT_LABEL_DARK_MIN_MATCH,
+    GRAY_INTERRUPTED_CONTENT_LABEL_DARK_MIN_PURITY,
+    GRAY_INTERRUPTED_LABEL_RECOVERY_MAX_ASPECT,
+    GRAY_INTERRUPTED_LABEL_RECOVERY_MAX_TEMPLATE_AREA,
+    GRAY_INTERRUPTED_LABEL_RECOVERY_MIN_CONTEXT,
+    GRAY_INTERRUPTED_LABEL_RECOVERY_MIN_COVERAGE,
+    GRAY_INTERRUPTED_LABEL_RECOVERY_MIN_MATCH,
+    GRAY_INTERRUPTED_LABEL_RECOVERY_MIN_PURITY,
+    GRAY_INTERRUPTED_LABEL_RECOVERY_MIN_TEMPLATE_AREA,
     GRAY_ANGLED_INK_MIN_CONTEXT,
     GRAY_ANGLED_INK_MIN_COVERAGE,
     GRAY_ANGLED_INK_MIN_MATCH,
@@ -38,11 +68,27 @@ from core.detector_config import (
     GRAY_LARGE_SCALE_PARTIAL_MIN_CONTEXT,
     GRAY_LARGE_SCALE_PARTIAL_MIN_PURITY,
     GRAY_LARGE_SCALE_PARTIAL_MIN_SCALE,
+    GRAY_LINE_CROSSED_LABEL_ALT_MIN_CONTEXT,
+    GRAY_LINE_CROSSED_LABEL_ALT_MIN_COVERAGE,
+    GRAY_LINE_CROSSED_LABEL_ALT_MIN_MATCH,
+    GRAY_LINE_CROSSED_LABEL_ALT_MIN_PURITY,
+    GRAY_LINE_CROSSED_LABEL_MIN_CONTEXT,
+    GRAY_LINE_CROSSED_LABEL_MIN_COVERAGE,
+    GRAY_LINE_CROSSED_LABEL_MIN_MATCH,
+    GRAY_LINE_CROSSED_LABEL_MIN_PURITY,
+    GRAY_LINE_CROSSED_LABEL_MIN_SCALE,
     GRAY_MID_GEOMETRY_MIN_CONTEXT,
     GRAY_MID_GEOMETRY_MIN_COVERAGE,
     GRAY_MID_GEOMETRY_MIN_MATCH,
     GRAY_MID_GEOMETRY_MIN_PURITY,
     GRAY_MID_GEOMETRY_MIN_TEMPLATE_PIXELS,
+    GRAY_NEAR_THRESHOLD_RECOVERY_MAX_ASPECT,
+    GRAY_NEAR_THRESHOLD_RECOVERY_MAX_TEMPLATE_AREA,
+    GRAY_NEAR_THRESHOLD_RECOVERY_MIN_CONTEXT,
+    GRAY_NEAR_THRESHOLD_RECOVERY_MIN_COVERAGE,
+    GRAY_NEAR_THRESHOLD_RECOVERY_MIN_MATCH,
+    GRAY_NEAR_THRESHOLD_RECOVERY_MIN_PURITY,
+    GRAY_NEAR_THRESHOLD_RECOVERY_MIN_TEMPLATE_AREA,
     GRAY_RAW_SCAN_MIN_TEMPLATE_PIXELS,
     GRAY_RAW_SCAN_THRESHOLD,
     GRAY_RECT_FRAME_MAX_CENTER_DENSITY,
@@ -963,6 +1009,25 @@ def _validate_template_hit(
         _record("context_purity")
         return False
 
+    # Keep diagnostics useful for rejected hits as well.  These fields are
+    # overwritten with the final rounded values at the end for accepted hits.
+    hit.coverage = round(coverage, 4)
+    hit.purity = round(purity, 4)
+    hit.context_purity = round(context_purity, 4)
+    hit_area = max(1, hit.bbox[2] * hit.bbox[3])
+    hit_aspect = max(hit.bbox[2] / max(1, hit.bbox[3]), hit.bbox[3] / max(1, hit.bbox[2]))
+    interrupted_label_recovery_seed = (
+        hit.dominant_hsv is None
+        and hit.source == "template_interrupted_recovery"
+        and hit.match_score >= GRAY_INTERRUPTED_LABEL_RECOVERY_MIN_MATCH
+        and GRAY_INTERRUPTED_LABEL_RECOVERY_MIN_TEMPLATE_AREA
+        <= hit_area
+        <= GRAY_INTERRUPTED_LABEL_RECOVERY_MAX_TEMPLATE_AREA
+        and hit_aspect <= GRAY_INTERRUPTED_LABEL_RECOVERY_MAX_ASPECT
+        and coverage >= GRAY_INTERRUPTED_LABEL_RECOVERY_MIN_COVERAGE
+        and purity >= GRAY_INTERRUPTED_LABEL_RECOVERY_MIN_PURITY
+        and context_purity >= GRAY_INTERRUPTED_LABEL_RECOVERY_MIN_CONTEXT
+    )
     if (
         context_purity < NOISY_PARTIAL_CONTEXT_THRESHOLD
         and coverage < NOISY_PARTIAL_COVERAGE_THRESHOLD
@@ -1002,9 +1067,19 @@ def _validate_template_hit(
                 or evidence_coverage < GRAY_DARK_EVIDENCE_MIN_COVERAGE
             )
 
+    diagonal_content_label_seed = False
     if hit.dominant_hsv is None:
         template_area = max(1, hit.bbox[2] * hit.bbox[3])
         template_density = hit.pixel_count / template_area
+        diagonal_content_label_seed = (
+            hit.is_text_label
+            and hit.source == "template_content"
+            and hit.rotation % 90 != 0
+            and hit.match_score >= GRAY_DIAGONAL_CONTENT_LABEL_MIN_MATCH
+            and coverage >= GRAY_DIAGONAL_CONTENT_LABEL_MIN_COVERAGE
+            and purity >= GRAY_DIAGONAL_CONTENT_LABEL_MIN_PURITY
+            and context_purity >= GRAY_DIAGONAL_CONTENT_LABEL_MIN_CONTEXT
+        )
         normalized_roi = _thickness_normalized_mask(roi)
         normalized_template = (
             validation_cache.normalized_mask(hit.transformed_mask)
@@ -1031,7 +1106,11 @@ def _validate_template_hit(
             if max(coverage, normalized_coverage) < 0.62:
                 _record("gray_coverage")
                 return False
-            if max(purity, normalized_purity) < 0.30 and context_purity < 0.55:
+            if (
+                max(purity, normalized_purity) < 0.30
+                and context_purity < 0.55
+                and not diagonal_content_label_seed
+            ):
                 _record("gray_purity")
                 return False
             if hit.match_score < 0.68 and max(coverage, normalized_coverage) < 0.74:
@@ -1058,9 +1137,9 @@ def _validate_template_hit(
     is_sparse_elongated = False
     strong_gray_elongated_geometry = False
     if hit.dominant_hsv is None and hit.scale <= GRAY_SMALL_SCALE_THRESHOLD:
-        template_area = max(1, hit.bbox[2] * hit.bbox[3])
+        template_area = hit_area
         template_density = hit.pixel_count / template_area
-        aspect = max(hit.bbox[2] / max(1, hit.bbox[3]), hit.bbox[3] / max(1, hit.bbox[2]))
+        aspect = hit_aspect
         is_sparse_elongated = (
             template_density <= GRAY_SMALL_SCALE_ELONGATED_MAX_DENSITY
             and aspect >= GRAY_SMALL_SCALE_ELONGATED_ASPECT
@@ -1074,7 +1153,11 @@ def _validate_template_hit(
         if is_sparse_elongated and coverage < GRAY_SMALL_SCALE_ELONGATED_MIN_COVERAGE:
             _record("gray_small_scale_elongated_coverage")
             return False
-        if is_sparse_elongated and hit.match_score < GRAY_STRONG_GEOMETRY_MIN_MATCH:
+        if (
+            is_sparse_elongated
+            and hit.match_score < GRAY_STRONG_GEOMETRY_MIN_MATCH
+            and not interrupted_label_recovery_seed
+        ):
             _record("gray_elongated_low_match")
             return False
         if (
@@ -1094,9 +1177,88 @@ def _validate_template_hit(
         _record("gray_small_scale_high_purity_partial")
         return False
 
+    near_threshold_geometry_seed = (
+        hit.dominant_hsv is None
+        and hit.source == "template_near_threshold"
+        and hit.match_score >= GRAY_NEAR_THRESHOLD_RECOVERY_MIN_MATCH
+        and coverage >= GRAY_NEAR_THRESHOLD_RECOVERY_MIN_COVERAGE
+        and purity >= GRAY_NEAR_THRESHOLD_RECOVERY_MIN_PURITY
+        and context_purity >= GRAY_NEAR_THRESHOLD_RECOVERY_MIN_CONTEXT
+    )
+    line_crossed_near_threshold_common = (
+        hit.dominant_hsv is None
+        and hit.is_text_label
+        and hit.source == "template_near_threshold"
+        and hit.scale >= GRAY_LINE_CROSSED_LABEL_MIN_SCALE
+        and GRAY_NEAR_THRESHOLD_RECOVERY_MIN_TEMPLATE_AREA
+        <= hit_area
+        <= GRAY_NEAR_THRESHOLD_RECOVERY_MAX_TEMPLATE_AREA
+        and hit_aspect <= GRAY_NEAR_THRESHOLD_RECOVERY_MAX_ASPECT
+    )
+    line_crossed_near_threshold_label_geometry = (
+        line_crossed_near_threshold_common
+        and (
+            (
+                hit.match_score >= GRAY_LINE_CROSSED_LABEL_MIN_MATCH
+                and coverage >= GRAY_LINE_CROSSED_LABEL_MIN_COVERAGE
+                and purity >= GRAY_LINE_CROSSED_LABEL_MIN_PURITY
+                and context_purity >= GRAY_LINE_CROSSED_LABEL_MIN_CONTEXT
+            )
+            or (
+                hit.match_score >= GRAY_LINE_CROSSED_LABEL_ALT_MIN_MATCH
+                and coverage >= GRAY_LINE_CROSSED_LABEL_ALT_MIN_COVERAGE
+                and purity >= GRAY_LINE_CROSSED_LABEL_ALT_MIN_PURITY
+                and context_purity >= GRAY_LINE_CROSSED_LABEL_ALT_MIN_CONTEXT
+            )
+        )
+    )
+    line_interrupted_dark_label_geometry = (
+        hit.dominant_hsv is None
+        and hit.is_text_label
+        and hit.source == "template"
+        and hit.scale >= GRAY_DISRUPTED_LABEL_MIN_SCALE
+        and hit_aspect >= GRAY_DISRUPTED_LABEL_MIN_ASPECT
+        and hit_area >= GRAY_INTERRUPTED_LABEL_RECOVERY_MIN_TEMPLATE_AREA
+        and hit.match_score >= GRAY_INTERRUPTED_LABEL_DARK_MIN_MATCH
+        and coverage >= GRAY_INTERRUPTED_LABEL_DARK_MIN_COVERAGE
+        and purity >= GRAY_INTERRUPTED_LABEL_DARK_MIN_PURITY
+        and context_purity >= GRAY_INTERRUPTED_LABEL_DARK_MIN_CONTEXT
+    )
+    line_interrupted_content_label_strict = (
+        hit.dominant_hsv is None
+        and hit.is_text_label
+        and hit.source == "template_content"
+        and hit.scale >= GRAY_DISRUPTED_LABEL_MIN_SCALE
+        and hit_area >= GRAY_INTERRUPTED_LABEL_RECOVERY_MIN_TEMPLATE_AREA
+        and hit.match_score >= GRAY_INTERRUPTED_CONTENT_LABEL_DARK_MIN_MATCH
+        and coverage >= GRAY_INTERRUPTED_CONTENT_LABEL_DARK_MIN_COVERAGE
+        and purity >= GRAY_INTERRUPTED_CONTENT_LABEL_DARK_MIN_PURITY
+        and context_purity >= GRAY_INTERRUPTED_CONTENT_LABEL_DARK_MIN_CONTEXT
+    )
+    line_interrupted_content_label_relaxed = (
+        hit.dominant_hsv is None
+        and hit.is_text_label
+        and hit.source == "template_content"
+        and hit.scale >= 0.85
+        and GRAY_NEAR_THRESHOLD_RECOVERY_MIN_TEMPLATE_AREA
+        <= hit_area
+        <= GRAY_NEAR_THRESHOLD_RECOVERY_MAX_TEMPLATE_AREA
+        and hit_aspect <= GRAY_NEAR_THRESHOLD_RECOVERY_MAX_ASPECT
+        and hit.match_score >= 0.69
+        and coverage >= 0.84
+        and purity >= 0.28
+        and context_purity >= 0.16
+    )
+    line_interrupted_content_label_geometry = (
+        line_interrupted_content_label_strict
+        or line_interrupted_content_label_relaxed
+    )
+
     if (
         hit.dominant_hsv is None
         and not hit.is_text_label
+        and not near_threshold_geometry_seed
+        and not interrupted_label_recovery_seed
         and hit.scale <= GRAY_TINY_FRAGMENT_MAX_SCALE
         and max(hit.bbox[2], hit.bbox[3]) <= GRAY_TINY_FRAGMENT_MAX_DIMENSION
         and context_purity < GRAY_TINY_FRAGMENT_MAX_CONTEXT
@@ -1107,6 +1269,8 @@ def _validate_template_hit(
     if (
         hit.dominant_hsv is None
         and not hit.is_text_label
+        and not near_threshold_geometry_seed
+        and not interrupted_label_recovery_seed
         and hit.scale <= GRAY_SPARSE_TINY_FRAGMENT_MAX_SCALE
         and max(hit.bbox[2], hit.bbox[3]) <= GRAY_SPARSE_TINY_FRAGMENT_MAX_DIMENSION
         and max(hit.bbox[2], hit.bbox[3]) / max(1, min(hit.bbox[2], hit.bbox[3]))
@@ -1149,7 +1313,6 @@ def _validate_template_hit(
         _record("centroid_offset")
         return False
 
-    hit_aspect = max(hit.bbox[2] / max(1, hit.bbox[3]), hit.bbox[3] / max(1, hit.bbox[2]))
     coherent_ink_geometry = (
         hit.dominant_hsv is None
         and hit.scale >= GRAY_COHERENT_INK_MIN_SCALE
@@ -1178,6 +1341,69 @@ def _validate_template_hit(
             )
         )
     )
+    diagonal_text_label_geometry = (
+        hit.dominant_hsv is None
+        and hit.is_text_label
+        and hit.rotation % 90 != 0
+        and hit_area >= GRAY_DIAGONAL_TEXT_LABEL_MIN_AREA
+        and hit_aspect <= GRAY_DIAGONAL_TEXT_LABEL_MAX_ASPECT
+        and hit.match_score >= GRAY_DIAGONAL_TEXT_LABEL_MIN_MATCH
+        and coverage >= GRAY_DIAGONAL_TEXT_LABEL_MIN_COVERAGE
+        and purity >= GRAY_DIAGONAL_TEXT_LABEL_MIN_PURITY
+        and context_purity >= GRAY_DIAGONAL_TEXT_LABEL_MIN_CONTEXT
+    )
+    diagonal_template_text_candidate = (
+        hit.dominant_hsv is None
+        and hit.is_text_label
+        and hit.source in {"template", "template_near_threshold"}
+        and hit.rotation % 90 != 0
+        and hit_area >= GRAY_DIAGONAL_TEXT_LABEL_MIN_AREA
+        and hit_aspect <= GRAY_DIAGONAL_TEXT_LABEL_MAX_ASPECT
+    )
+    diagonal_template_text_fragment = (
+        diagonal_template_text_candidate
+        and not (
+            (
+                hit.match_score >= 0.66
+                and coverage >= 0.88
+                and purity >= 0.72
+                and context_purity >= 0.34
+            )
+            or (
+                hit.match_score >= 0.62
+                and coverage >= 0.90
+                and purity >= 0.82
+                and context_purity >= 0.45
+            )
+            or (
+                hit.scale >= 1.0
+                and hit.match_score >= 0.60
+                and coverage >= 0.94
+                and purity >= 0.50
+                and context_purity >= 0.26
+            )
+        )
+    )
+    if diagonal_template_text_fragment:
+        _record("gray_diagonal_text_fragment")
+        return False
+    near_threshold_recovery_geometry = (
+        near_threshold_geometry_seed
+        and GRAY_NEAR_THRESHOLD_RECOVERY_MIN_TEMPLATE_AREA
+        <= hit.bbox[2] * hit.bbox[3]
+        <= GRAY_NEAR_THRESHOLD_RECOVERY_MAX_TEMPLATE_AREA
+        and hit_aspect <= GRAY_NEAR_THRESHOLD_RECOVERY_MAX_ASPECT
+    )
+    disrupted_label_geometry = (
+        hit.dominant_hsv is None
+        and hit.is_text_label
+        and hit.source == "template"
+        and hit.scale >= GRAY_DISRUPTED_LABEL_MIN_SCALE
+        and hit_aspect >= GRAY_DISRUPTED_LABEL_MIN_ASPECT
+        and hit.match_score >= GRAY_DISRUPTED_LABEL_MIN_MATCH
+        and coverage >= GRAY_DISRUPTED_LABEL_MIN_COVERAGE
+        and purity >= GRAY_DISRUPTED_LABEL_MIN_PURITY
+    )
     strong_gray_geometry = (
         hit.dominant_hsv is None
         and hit.match_score >= GRAY_STRONG_GEOMETRY_MIN_MATCH
@@ -1200,7 +1426,7 @@ def _validate_template_hit(
         and coverage >= GRAY_MID_GEOMETRY_MIN_COVERAGE
         and purity >= GRAY_MID_GEOMETRY_MIN_PURITY
         and context_purity >= GRAY_MID_GEOMETRY_MIN_CONTEXT
-    ) or coherent_ink_geometry or angled_ink_geometry
+    ) or coherent_ink_geometry or angled_ink_geometry or diagonal_text_label_geometry or diagonal_content_label_seed or near_threshold_recovery_geometry or line_crossed_near_threshold_label_geometry or interrupted_label_recovery_seed or disrupted_label_geometry or line_interrupted_dark_label_geometry or line_interrupted_content_label_geometry
     if gray_evidence_failed and not strong_gray_geometry:
         _record("gray_dark_evidence")
         return False
@@ -1246,6 +1472,8 @@ def _validate_template_hit(
                 and purity >= 0.74
             ):
                 content_threshold = LABEL_FULL_WIDTH_CONTENT_MIN_SCORE
+        if line_crossed_near_threshold_label_geometry:
+            content_threshold = min(content_threshold, 0.62)
 
         if content_score < content_threshold:
             _record("content_score")

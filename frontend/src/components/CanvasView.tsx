@@ -1,5 +1,6 @@
 ﻿import React, { useRef, useState, useEffect } from 'react';
 import { AlertTriangle, Layers, Plus, Trash2, ZoomIn, ZoomOut, Maximize, Move, Slash, X } from 'lucide-react';
+import { useMemo } from 'react';
 
 interface Box {
   id: string;
@@ -76,6 +77,8 @@ interface GrayDebugInfo {
 
 interface CanvasViewProps {
   imageSrc: string | null;
+  imageSize?: { width: number; height: number } | null;
+  imageResetKey?: string | null;
   boxes?: Box[];
   analysisContext?: AnalysisContext | null;
   onBoxClick?: (id: string) => void;
@@ -104,6 +107,8 @@ interface CanvasViewProps {
 
 export const CanvasView: React.FC<CanvasViewProps> = ({
   imageSrc,
+  imageSize = null,
+  imageResetKey = null,
   boxes = [],
   analysisContext,
   onBoxClick,
@@ -132,6 +137,8 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState(1);
   const [position, setPosition] = useState({ x: 0, y: 0 });
+  const scaleRef = useRef(1);
+  const positionRef = useRef({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
   const [isSpaceDown, setIsSpaceDown] = useState(false);
@@ -154,19 +161,36 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
   const [pulsingId, setPulsingId] = useState<string | null>(null);
   const [copiedBoxId, setCopiedBoxId] = useState<string | null>(null);
   const [isZooming, setIsZooming] = useState(false);
+  const [coordinateInput, setCoordinateInput] = useState('');
+  const [inspectedPoint, setInspectedPoint] = useState<{ x: number; y: number } | null>(null);
+  const [coordinateError, setCoordinateError] = useState<string | null>(null);
   const zoomTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    scaleRef.current = scale;
+  }, [scale]);
+
+  useEffect(() => {
+    positionRef.current = position;
+  }, [position]);
+
+  const resetKey = imageResetKey ?? imageSrc;
 
   useEffect(() => {
     if (imageSrc) {
       setScale(0.8);
       setPosition({ x: 50, y: 50 });
     }
-  }, [imageSrc]);
+  }, [resetKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
-    const onWheel = (e: WheelEvent) => e.preventDefault();
+    const onWheel = (e: WheelEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target?.closest('input, textarea, select, button, [data-wheel-ui="true"]')) return;
+      e.preventDefault();
+    };
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
   }, []);
@@ -194,6 +218,8 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
   useEffect(() => {
     setPulsingId(null);
     setCopiedBoxId(null);
+    setInspectedPoint(null);
+    setCoordinateError(null);
   }, [analysisContext?.analysisId]);
 
   useEffect(() => {
@@ -236,6 +262,8 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
 
   const handleWheel = (e: React.WheelEvent) => {
     if (!imageSrc || !containerRef.current) return;
+    const target = e.target as HTMLElement | null;
+    if (target?.closest('input, textarea, select, button, [data-wheel-ui="true"]')) return;
     e.preventDefault();
 
     if (zoomTimerRef.current) clearTimeout(zoomTimerRef.current);
@@ -245,22 +273,39 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
     const rect = containerRef.current.getBoundingClientRect();
     const mouseX = e.clientX - rect.left;
     const mouseY = e.clientY - rect.top;
+    const deltaUnit =
+      e.deltaMode === 1
+        ? 16
+        : e.deltaMode === 2
+        ? containerRef.current.clientHeight
+        : 1;
+    const deltaY = e.deltaY * deltaUnit;
 
-    if (e.shiftKey) {
-      setPosition(p => ({ x: p.x - e.deltaY * 0.8, y: p.y }));
+    if (e.shiftKey && !e.ctrlKey) {
+      const nextPosition = {
+        x: positionRef.current.x - deltaY,
+        y: positionRef.current.y,
+      };
+      positionRef.current = nextPosition;
+      setPosition(nextPosition);
       return;
     }
 
-    const step = e.ctrlKey ? 1.05 : 1.15;
-    const factor = e.deltaY < 0 ? step : 1 / step;
-    setScale(s => {
-      const newScale = Math.min(Math.max(0.1, s * factor), 5);
-      setPosition(p => ({
-        x: mouseX - (mouseX - p.x) * (newScale / s),
-        y: mouseY - (mouseY - p.y) * (newScale / s),
-      }));
-      return newScale;
-    });
+    const oldScale = scaleRef.current;
+    const oldPosition = positionRef.current;
+    const factor = Math.exp(-deltaY * 0.0012);
+    const newScale = Math.min(Math.max(0.1, oldScale * factor), 5);
+    const imageX = (mouseX - oldPosition.x) / oldScale;
+    const imageY = (mouseY - oldPosition.y) / oldScale;
+    const nextPosition = {
+      x: mouseX - imageX * newScale,
+      y: mouseY - imageY * newScale,
+    };
+
+    scaleRef.current = newScale;
+    positionRef.current = nextPosition;
+    setScale(newScale);
+    setPosition(nextPosition);
   };
 
   const getCanvasCoordinates = (clientX: number, clientY: number) => {
@@ -270,6 +315,38 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
       x: (clientX - rect.left - position.x) / scale,
       y: (clientY - rect.top - position.y) / scale,
     };
+  };
+
+  const parseCoordinateInput = (value: string) => {
+    const numbers = value.match(/-?\d+(?:\.\d+)?/g);
+    if (!numbers || numbers.length < 2) return null;
+    const x = Number(numbers[0]);
+    const y = Number(numbers[1]);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    return { x, y };
+  };
+
+  const centerOnPoint = (point: { x: number; y: number }) => {
+    if (!containerRef.current) return;
+    const container = containerRef.current;
+    const targetScale = Math.min(Math.max(scale, 2), 5);
+    setScale(targetScale);
+    setPosition({
+      x: container.clientWidth / 2 - point.x * targetScale,
+      y: container.clientHeight / 2 - point.y * targetScale,
+    });
+    setInspectedPoint(point);
+    setCoordinateError(null);
+  };
+
+  const handleCoordinateSubmit = (event: React.FormEvent) => {
+    event.preventDefault();
+    const point = parseCoordinateInput(coordinateInput);
+    if (!point) {
+      setCoordinateError('Wpisz x,y');
+      return;
+    }
+    centerOnPoint(point);
   };
 
   const handleMouseDown = (e: React.MouseEvent) => {
@@ -349,6 +426,77 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
     return (left.confidence ?? 0) - (right.confidence ?? 0);
   });
 
+  const overlapGroupsByBoxId = useMemo(() => {
+    const groups = new Map<string, Box[]>();
+    const boxArea = (box: Box) => Math.max(1, box.width * box.height);
+    const highOverlap = (left: Box, right: Box) => {
+      const x1 = Math.max(left.x, right.x);
+      const y1 = Math.max(left.y, right.y);
+      const x2 = Math.min(left.x + left.width, right.x + right.width);
+      const y2 = Math.min(left.y + left.height, right.y + right.height);
+      const inter = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+      if (inter <= 0) return false;
+
+      const leftArea = boxArea(left);
+      const rightArea = boxArea(right);
+      const iou = inter / Math.max(1, leftArea + rightArea - inter);
+      const iom = inter / Math.max(1, Math.min(leftArea, rightArea));
+      const centerDistance = Math.hypot(
+        (left.x + left.width / 2) - (right.x + right.width / 2),
+        (left.y + left.height / 2) - (right.y + right.height / 2),
+      );
+      const referenceDiagonal = Math.max(
+        1,
+        Math.hypot(Math.min(left.width, right.width), Math.min(left.height, right.height)),
+      );
+      const almostSameBbox =
+        Math.abs(left.x - right.x) <= 4 &&
+        Math.abs(left.y - right.y) <= 4 &&
+        Math.abs(left.width - right.width) <= 5 &&
+        Math.abs(left.height - right.height) <= 5;
+
+      return almostSameBbox || iou >= 0.82 || (iom >= 0.92 && centerDistance / referenceDiagonal <= 0.18);
+    };
+
+    for (const box of boxes) {
+      const group = boxes
+        .filter(candidate => candidate.id === box.id || highOverlap(box, candidate))
+        .sort((left, right) => {
+          if (left.symbolName !== right.symbolName) return left.symbolName.localeCompare(right.symbolName);
+          return (right.verificationScore ?? right.confidence) - (left.verificationScore ?? left.confidence);
+        });
+      if (group.length > 1) groups.set(box.id, group);
+    }
+    return groups;
+  }, [boxes]);
+
+  const formatOverlapGroup = (group?: Box[]) =>
+    group?.length ? group.map(item => `${item.symbolName}@${item.x},${item.y},${item.width},${item.height}`).join(' + ') : '';
+
+  const inspectedNearbyBoxes = inspectedPoint
+    ? boxes
+      .map(box => {
+        const centerX = box.x + box.width / 2;
+        const centerY = box.y + box.height / 2;
+        const contains =
+          inspectedPoint.x >= box.x &&
+          inspectedPoint.x <= box.x + box.width &&
+          inspectedPoint.y >= box.y &&
+          inspectedPoint.y <= box.y + box.height;
+        return {
+          box,
+          contains,
+          distance: Math.hypot(centerX - inspectedPoint.x, centerY - inspectedPoint.y),
+        };
+      })
+      .filter(item => item.contains || item.distance <= 220)
+      .sort((left, right) => {
+        if (left.contains !== right.contains) return left.contains ? -1 : 1;
+        return left.distance - right.distance;
+      })
+      .slice(0, 8)
+    : [];
+
   const formatDebugValue = (value?: number, digits = 3) =>
     typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : 'n/a';
 
@@ -402,6 +550,7 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
       : 'Zaznacz strefe wykluczona';
 
   const buildDebugPayload = (box: Box) => {
+    const overlapGroup = overlapGroupsByBoxId.get(box.id);
     const nearbyBoxes = boxes
       .filter(candidate => {
         const centerDx = Math.abs((candidate.x + candidate.width / 2) - (box.x + box.width / 2));
@@ -456,6 +605,7 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
       `hidden_layers_repr=${hiddenLayerReprs}`,
       `frontend_boxes_count=${boxes.length}`,
       `frontend_nearby_boxes=${nearbyBoxes.join(' || ') || '(none)'}`,
+      `frontend_overlap_boxes=${formatOverlapGroup(overlapGroup) || '(none)'}`,
       `box_id=${box.id}`,
     ];
     return lines.join('\n');
@@ -492,8 +642,86 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
 
   return (
     <div className="workspace" ref={containerRef} onWheel={handleWheel}>
+      {/* Skok do koordynatow */}
+      <div style={{
+        position: 'absolute',
+        top: 16,
+        left: '50%',
+        transform: 'translateX(-50%)',
+        zIndex: 24,
+        display: 'flex',
+        justifyContent: 'center',
+        pointerEvents: 'none',
+      }} data-wheel-ui="true">
+        <form
+          onSubmit={handleCoordinateSubmit}
+          onMouseDown={e => e.stopPropagation()}
+          onClick={e => e.stopPropagation()}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+            background: 'rgba(15, 23, 42, 0.84)',
+            border: `1px solid ${coordinateError ? '#ef4444' : 'var(--border-light)'}`,
+            borderRadius: 6,
+            padding: 4,
+            boxShadow: '0 8px 20px rgba(0,0,0,0.18)',
+            pointerEvents: 'auto',
+          }}
+        >
+          <input
+            value={coordinateInput}
+            onChange={event => {
+              setCoordinateInput(event.target.value);
+              if (coordinateError) setCoordinateError(null);
+            }}
+            placeholder="x,y"
+            title="Wpisz koordynaty planu, np. 6199,3619"
+            style={{
+              width: 104,
+              height: 27,
+              background: 'rgba(2, 6, 23, 0.72)',
+              border: '1px solid rgba(148, 163, 184, 0.35)',
+              borderRadius: 4,
+              color: '#e5e7eb',
+              fontSize: 12,
+              fontWeight: 700,
+              padding: '0 8px',
+              outline: 'none',
+            }}
+          />
+          <button
+            type="submit"
+            className="btn-secondary"
+            title="Przejdz do punktu"
+            style={{
+              padding: '6px 10px',
+              fontSize: 11,
+              fontWeight: 700,
+              color: coordinateError ? '#fca5a5' : undefined,
+            }}
+          >
+            Pokaż
+          </button>
+          {inspectedPoint && (
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => {
+                setInspectedPoint(null);
+                setCoordinateError(null);
+              }}
+              title="Ukryj celownik"
+              style={{ padding: '6px 8px' }}
+            >
+              <X size={13} />
+            </button>
+          )}
+        </form>
+      </div>
+
       {/* Kontrolki */}
-      <div style={{ position: 'absolute', top: 16, right: 16, zIndex: 20, display: 'flex', gap: 6 }}>
+      <div data-wheel-ui="true" style={{ position: 'absolute', top: 16, right: 16, zIndex: 20, display: 'flex', gap: 6 }}>
         <button
           className="btn-secondary"
           onClick={() => toggleDrawMode('exclude')}
@@ -634,6 +862,85 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
         </button>
       </div>
 
+      {inspectedPoint && (
+        <div
+          data-wheel-ui="true"
+          onMouseDown={e => e.stopPropagation()}
+          onClick={e => e.stopPropagation()}
+          style={{
+            position: 'absolute',
+            top: 58,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 21,
+            width: 280,
+            maxWidth: 'calc(100% - 32px)',
+            background: 'rgba(15, 23, 42, 0.92)',
+            border: '1px solid rgba(249, 115, 22, 0.45)',
+            borderRadius: 8,
+            padding: 10,
+            color: '#e5e7eb',
+            boxShadow: '0 14px 32px rgba(0,0,0,0.28)',
+          }}
+        >
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+            <strong style={{ color: '#fb923c', fontSize: 12 }}>
+              Punkt {Math.round(inspectedPoint.x)},{Math.round(inspectedPoint.y)}
+            </strong>
+            <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>
+              {inspectedNearbyBoxes.length ? `${inspectedNearbyBoxes.length} boxów` : 'brak boxów'}
+            </span>
+          </div>
+          {inspectedNearbyBoxes.length > 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 8 }}>
+              {inspectedNearbyBoxes.map(({ box, distance, contains }) => {
+                const overlapGroup = overlapGroupsByBoxId.get(box.id);
+                const overlapSummary = formatOverlapGroup(overlapGroup);
+                return (
+                  <button
+                    key={`near-${box.analysisId ?? analysisContext?.analysisId ?? 'na'}-${box.id}`}
+                    className="btn-secondary"
+                    onClick={() => {
+                      onBoxClick?.(box.id);
+                      void copyBoxDebug(box);
+                    }}
+                    title={overlapSummary ? `Klik kopiuje debug boxa\nNakladki: ${overlapSummary}` : 'Klik kopiuje debug boxa'}
+                    style={{
+                      justifyContent: 'space-between',
+                      padding: '5px 7px',
+                      fontSize: 11,
+                      borderColor: contains ? '#fb923c' : undefined,
+                      color: contains ? '#fed7aa' : undefined,
+                    }}
+                  >
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {box.symbolName}@{box.x},{box.y},{box.width},{box.height}
+                    </span>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginLeft: 8 }}>
+                      {overlapGroup && (
+                        <span style={{
+                          background: '#7c3aed',
+                          color: '#fff',
+                          borderRadius: 999,
+                          padding: '1px 5px',
+                          fontSize: 10,
+                          fontWeight: 800,
+                        }}>
+                          {overlapGroup.length}x
+                        </span>
+                      )}
+                      <span style={{ color: contains ? '#fb923c' : 'var(--text-muted)' }}>
+                        {contains ? 'inside' : Math.round(distance)}
+                      </span>
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Hint rysowania */}
       {activeDrawMode !== 'none' && (
         <div style={{
@@ -663,7 +970,13 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
             transformOrigin: '0 0',
           }}
         >
-          <img src={imageSrc} alt="Plan view" className="plan-image" draggable={false} />
+          <img
+            src={imageSrc}
+            alt="Plan view"
+            className="plan-image"
+            draggable={false}
+            style={imageSize ? { width: imageSize.width, height: imageSize.height } : undefined}
+          />
 
           {grayDebugOverlayImage && (
             <img
@@ -703,6 +1016,52 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
               <div>zielone: zone &lt;{grayDebugInfo.zoneThreshold}, pomaranczowe: evidence &lt;{grayDebugInfo.evidenceThreshold}</div>
               <div>ROI: {grayDebugInfo.roiCount} unikalnych / {grayDebugInfo.roiRefs} lacznie, templates {grayDebugInfo.templates}</div>
               <div>piksele: zone {grayDebugInfo.zonePixels}, evidence {grayDebugInfo.evidencePixels}</div>
+            </div>
+          )}
+
+          {inspectedPoint && (
+            <div
+              style={{
+                position: 'absolute',
+                left: inspectedPoint.x,
+                top: inspectedPoint.y,
+                width: 46,
+                height: 46,
+                transform: `translate(-50%, -50%) scale(${1 / scale})`,
+                transformOrigin: 'center',
+                pointerEvents: 'none',
+                zIndex: 50,
+              }}
+            >
+              <div style={{
+                position: 'absolute',
+                left: 0,
+                top: '50%',
+                width: '100%',
+                height: 2,
+                background: '#fb923c',
+                boxShadow: '0 0 10px rgba(251,146,60,0.75)',
+              }} />
+              <div style={{
+                position: 'absolute',
+                left: '50%',
+                top: 0,
+                width: 2,
+                height: '100%',
+                background: '#fb923c',
+                boxShadow: '0 0 10px rgba(251,146,60,0.75)',
+              }} />
+              <div style={{
+                position: 'absolute',
+                left: '50%',
+                top: '50%',
+                width: 14,
+                height: 14,
+                border: '2px solid #fed7aa',
+                borderRadius: 999,
+                transform: 'translate(-50%, -50%)',
+                background: 'rgba(249, 115, 22, 0.24)',
+              }} />
             </div>
           )}
 
@@ -843,6 +1202,8 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
             const displayConfidence = box.verificationScore ?? box.confidence;
             const isLowConf = displayConfidence < 0.55;
             const color = isFocused ? BOX_FOCUS_COLOR : (isLowConf ? BOX_LOW_COLOR : box.color);
+            const overlapGroup = overlapGroupsByBoxId.get(box.id);
+            const overlapSummary = formatOverlapGroup(overlapGroup);
 
             return (
               <div
@@ -852,7 +1213,7 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
                   onBoxClick?.(box.id);
                   void copyBoxDebug(box);
                 }}
-                title={`Weryfikacja: ${(displayConfidence * 100).toFixed(0)}%\nMatch template: ${(box.confidence * 100).toFixed(0)}%\nWzorzec: ${box.symbolName}\nKlik kopiuje debug`}
+                title={`Weryfikacja: ${(displayConfidence * 100).toFixed(0)}%\nMatch template: ${(box.confidence * 100).toFixed(0)}%\nWzorzec: ${box.symbolName}${overlapSummary ? `\nNakladki: ${overlapSummary}` : ''}\nKlik kopiuje debug`}
                 style={{
                   position: 'absolute',
                   left: box.x,
@@ -885,6 +1246,29 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
                   {/* Ucinamy za długie nazwy (np. z '.png' lub długie) */}
                   {box.symbolName ? box.symbolName.split('_')[0].substring(0, 15) : 'Symbol'}
                 </div>
+                {overlapGroup && (
+                  <div style={{
+                    position: 'absolute',
+                    top: -18,
+                    right: -8,
+                    minWidth: 22,
+                    height: 16,
+                    background: '#7c3aed',
+                    color: '#fff',
+                    border: '1px solid rgba(255,255,255,0.72)',
+                    borderRadius: 999,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    fontSize: 9,
+                    fontWeight: 900,
+                    boxShadow: '0 2px 8px rgba(0,0,0,0.28)',
+                    pointerEvents: 'none',
+                    zIndex: 6,
+                  }}>
+                    {overlapGroup.length}x
+                  </div>
+                )}
                 {copiedBoxId === box.id && (
                   <div style={{
                     position: 'absolute',

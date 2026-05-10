@@ -19,6 +19,8 @@ class ValidationResult:
     validated_hits: list[CandidateHit]
     rejected_hits: list[CandidateHit]
     rejection_reasons: dict[str, int]
+    rejection_reasons_by_source: dict[str, dict[str, int]]
+    rejection_reason_by_hit_id: dict[int, str]
     promoted_targeted_hits: int
     validation_workers: int
     timing_seconds: float
@@ -83,6 +85,8 @@ def validate_template_candidates(
     validated_hits: list[CandidateHit] = []
     rejected_hits: list[CandidateHit] = []
     rejection_reasons: dict[str, int] = {}
+    rejection_reasons_by_source: dict[str, dict[str, int]] = {}
+    rejection_reason_by_hit_id: dict[int, str] = {}
     promoted_targeted_hits = 0
     validation_workers = max(1, min(len(raw_template_hits), postprocess_workers))
 
@@ -106,7 +110,13 @@ def validate_template_candidates(
                 if rejected_hit is not None:
                     rejected_hits.append(rejected_hit)
                     if reason is not None:
+                        rejection_reason_by_hit_id[id(rejected_hit)] = reason
                         rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
+                        source_reasons = rejection_reasons_by_source.setdefault(
+                            rejected_hit.source,
+                            {},
+                        )
+                        source_reasons[reason] = source_reasons.get(reason, 0) + 1
                     continue
                 if (
                     promoted_hit.template_id != original_hit.template_id
@@ -121,6 +131,8 @@ def validate_template_candidates(
         validated_hits=validated_hits,
         rejected_hits=rejected_hits,
         rejection_reasons=rejection_reasons,
+        rejection_reasons_by_source=rejection_reasons_by_source,
+        rejection_reason_by_hit_id=rejection_reason_by_hit_id,
         promoted_targeted_hits=promoted_targeted_hits,
         validation_workers=validation_workers,
         timing_seconds=time.perf_counter() - phase_start,

@@ -32,6 +32,8 @@ def aggregate_scan_profile(records: list[dict]) -> dict:
             "pixels": 0,
             "outputPixels": 0,
             "rawPeaks": 0,
+            "nearThresholdCandidates": 0,
+            "interruptedRecoveryCandidates": 0,
             "emittedHits": 0,
             "contentCalls": 0,
         }
@@ -41,6 +43,10 @@ def aggregate_scan_profile(records: list[dict]) -> dict:
         group["pixels"] += int(stats.get("pixels", 0))
         group["outputPixels"] += int(stats.get("outputPixels", 0))
         group["rawPeaks"] += int(stats.get("rawPeaks", 0))
+        group["nearThresholdCandidates"] += int(stats.get("nearThresholdCandidates", 0))
+        group["interruptedRecoveryCandidates"] += int(
+            stats.get("interruptedRecoveryCandidates", 0)
+        )
         group["emittedHits"] += int(stats.get("emittedHits", 0))
         group["contentCalls"] += int(stats.get("contentCalls", 0))
 

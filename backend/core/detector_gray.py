@@ -20,6 +20,12 @@ from core.detector_config import (
     GRAY_DARK_EVIDENCE_THRESHOLD,
     GRAY_DARK_INK_THRESHOLD,
     GRAY_DARK_ZONE_THRESHOLD,
+    GRAY_DIAGONAL_TEXT_LABEL_MAX_ASPECT,
+    GRAY_DIAGONAL_TEXT_LABEL_MIN_AREA,
+    GRAY_DIAGONAL_TEXT_LABEL_MIN_CONTEXT,
+    GRAY_DIAGONAL_TEXT_LABEL_MIN_COVERAGE,
+    GRAY_DIAGONAL_TEXT_LABEL_MIN_MATCH,
+    GRAY_DIAGONAL_TEXT_LABEL_MIN_PURITY,
     GRAY_ELONGATED_SCAN_MAX_TEMPLATE_PIXELS,
     GRAY_ELONGATED_SCAN_THRESHOLD,
     GRAY_FULLER_SYMBOL_MAX_VERIFICATION_DROP,
@@ -37,12 +43,35 @@ from core.detector_config import (
     GRAY_LEGEND_MIN_EVIDENCE_THRESHOLD,
     GRAY_LEGEND_MIN_ZONE_THRESHOLD,
     GRAY_LEGEND_ZONE_MARGIN,
+    GRAY_INTERRUPTED_LABEL_RECOVERY_MAX_ASPECT,
+    GRAY_INTERRUPTED_LABEL_RECOVERY_MAX_TEMPLATE_AREA,
+    GRAY_INTERRUPTED_LABEL_RECOVERY_MIN_CONTEXT,
+    GRAY_INTERRUPTED_LABEL_RECOVERY_MIN_COVERAGE,
+    GRAY_INTERRUPTED_LABEL_RECOVERY_MIN_MATCH,
+    GRAY_INTERRUPTED_LABEL_RECOVERY_MIN_PURITY,
+    GRAY_INTERRUPTED_LABEL_RECOVERY_MIN_TEMPLATE_AREA,
     GRAY_MID_GEOMETRY_MIN_CONTEXT,
     GRAY_MID_GEOMETRY_MIN_COVERAGE,
     GRAY_MID_GEOMETRY_MIN_MATCH,
     GRAY_MID_GEOMETRY_MIN_PURITY,
     GRAY_MID_GEOMETRY_MIN_TEMPLATE_PIXELS,
     GRAY_MID_GEOMETRY_MIN_VERIFICATION,
+    GRAY_LINE_CROSSED_LABEL_MIN_CONTEXT,
+    GRAY_LINE_CROSSED_LABEL_MIN_COVERAGE,
+    GRAY_LINE_CROSSED_LABEL_MIN_MATCH,
+    GRAY_LINE_CROSSED_LABEL_MIN_PURITY,
+    GRAY_LINE_CROSSED_LABEL_MIN_SCALE,
+    GRAY_LINE_CROSSED_LABEL_ALT_MIN_CONTEXT,
+    GRAY_LINE_CROSSED_LABEL_ALT_MIN_COVERAGE,
+    GRAY_LINE_CROSSED_LABEL_ALT_MIN_MATCH,
+    GRAY_LINE_CROSSED_LABEL_ALT_MIN_PURITY,
+    GRAY_NEAR_THRESHOLD_RECOVERY_MAX_ASPECT,
+    GRAY_NEAR_THRESHOLD_RECOVERY_MAX_TEMPLATE_AREA,
+    GRAY_NEAR_THRESHOLD_RECOVERY_MIN_CONTEXT,
+    GRAY_NEAR_THRESHOLD_RECOVERY_MIN_COVERAGE,
+    GRAY_NEAR_THRESHOLD_RECOVERY_MIN_MATCH,
+    GRAY_NEAR_THRESHOLD_RECOVERY_MIN_PURITY,
+    GRAY_NEAR_THRESHOLD_RECOVERY_MIN_TEMPLATE_AREA,
     GRAY_RAW_MAX_HITS_PER_TEMPLATE,
     GRAY_RAW_MAX_HITS_PER_VARIANT,
     GRAY_RAW_MAX_TOTAL_HITS,
@@ -695,6 +724,7 @@ def build_gray_search_rois(
     component_index: GraySearchComponentIndex | None = None,
     tile_size_override: int | None = None,
     max_tile_rois_override: int | None = None,
+    component_supplement_rois: int = 0,
 ) -> tuple[list[tuple[int, int, int, int]], bool, int, int]:
     """Build bounded ROIs for gray/ink plans."""
 
@@ -828,10 +858,41 @@ def build_gray_search_rois(
         return [], False, 0, foreground_pixels
 
     component_rects.sort(key=lambda item: (item[0], -item[1]))
+    all_component_rects = list(component_rects)
     component_rects = _limit_component_rects_spatially(
-        component_rects,
+        all_component_rects,
         GRAY_SEARCH_MAX_ROIS,
     )
+    supplement_limit = max(0, int(component_supplement_rois))
+    if supplement_limit and len(all_component_rects) > len(component_rects):
+        selected = {rect for _score, _area, rect in component_rects}
+        covered_cells = {
+            (
+                int((rect[0] + rect[2] / 2) // max(192, int(GRAY_SEARCH_FAST_TILE_SIZE))),
+                int((rect[1] + rect[3] / 2) // max(192, int(GRAY_SEARCH_FAST_TILE_SIZE))),
+            )
+            for rect in selected
+        }
+        added_cells: set[tuple[int, int]] = set()
+        for score, area, rect in all_component_rects:
+            if rect in selected or area < 24:
+                continue
+            cell = (
+                int((rect[0] + rect[2] / 2) // max(192, int(GRAY_SEARCH_FAST_TILE_SIZE))),
+                int((rect[1] + rect[3] / 2) // max(192, int(GRAY_SEARCH_FAST_TILE_SIZE))),
+            )
+            if cell in added_cells:
+                continue
+            # Text labels often split into several small disconnected glyph strokes.
+            # Keep a few extra spatial sentinels so sparse labels do not vanish behind
+            # denser neighbouring tiles before matchTemplate gets a chance to score them.
+            if cell in covered_cells and score > 2.4 and area < 80:
+                continue
+            component_rects.append((score, area, rect))
+            selected.add(rect)
+            added_cells.add(cell)
+            if len(added_cells) >= supplement_limit:
+                break
     rois = [rect for _score, _area, rect in component_rects]
     rois = _append_gray_tile_rois(
         rois,
@@ -892,6 +953,74 @@ def _gray_budget_geometry_score(
         or coverage < GRAY_STRONG_GEOMETRY_MIN_COVERAGE
         or purity < GRAY_STRONG_RESCUE_MIN_PURITY
     )
+    hit_aspect = max(hit.bbox[2] / max(1, hit.bbox[3]), hit.bbox[3] / max(1, hit.bbox[2]))
+    near_threshold_geometry = (
+        hit.source == "template_near_threshold"
+        and hit.match_score >= GRAY_NEAR_THRESHOLD_RECOVERY_MIN_MATCH
+        and GRAY_NEAR_THRESHOLD_RECOVERY_MIN_TEMPLATE_AREA
+        <= hit.bbox[2] * hit.bbox[3]
+        <= GRAY_NEAR_THRESHOLD_RECOVERY_MAX_TEMPLATE_AREA
+        and hit_aspect <= GRAY_NEAR_THRESHOLD_RECOVERY_MAX_ASPECT
+        and coverage >= GRAY_NEAR_THRESHOLD_RECOVERY_MIN_COVERAGE
+        and purity >= GRAY_NEAR_THRESHOLD_RECOVERY_MIN_PURITY
+        and _context_purity(plan_mask, hit.bbox, intersection_mask)
+        >= GRAY_NEAR_THRESHOLD_RECOVERY_MIN_CONTEXT
+    )
+    line_crossed_near_threshold_common = (
+        hit.is_text_label
+        and hit.source == "template_near_threshold"
+        and hit.scale >= GRAY_LINE_CROSSED_LABEL_MIN_SCALE
+        and GRAY_NEAR_THRESHOLD_RECOVERY_MIN_TEMPLATE_AREA
+        <= hit.bbox[2] * hit.bbox[3]
+        <= GRAY_NEAR_THRESHOLD_RECOVERY_MAX_TEMPLATE_AREA
+        and hit_aspect <= GRAY_NEAR_THRESHOLD_RECOVERY_MAX_ASPECT
+    )
+    line_crossed_context = (
+        _context_purity(plan_mask, hit.bbox, intersection_mask)
+        if line_crossed_near_threshold_common
+        else 0.0
+    )
+    line_crossed_near_threshold_geometry = (
+        line_crossed_near_threshold_common
+        and (
+            (
+                hit.match_score >= GRAY_LINE_CROSSED_LABEL_MIN_MATCH
+                and coverage >= GRAY_LINE_CROSSED_LABEL_MIN_COVERAGE
+                and purity >= GRAY_LINE_CROSSED_LABEL_MIN_PURITY
+                and line_crossed_context >= GRAY_LINE_CROSSED_LABEL_MIN_CONTEXT
+            )
+            or (
+                hit.match_score >= GRAY_LINE_CROSSED_LABEL_ALT_MIN_MATCH
+                and coverage >= GRAY_LINE_CROSSED_LABEL_ALT_MIN_COVERAGE
+                and purity >= GRAY_LINE_CROSSED_LABEL_ALT_MIN_PURITY
+                and line_crossed_context >= GRAY_LINE_CROSSED_LABEL_ALT_MIN_CONTEXT
+            )
+        )
+    )
+    diagonal_text_label_geometry = (
+        hit.is_text_label
+        and hit.rotation % 90 != 0
+        and hit.match_score >= GRAY_DIAGONAL_TEXT_LABEL_MIN_MATCH
+        and GRAY_DIAGONAL_TEXT_LABEL_MIN_AREA
+        <= hit.bbox[2] * hit.bbox[3]
+        and hit_aspect <= GRAY_DIAGONAL_TEXT_LABEL_MAX_ASPECT
+        and coverage >= GRAY_DIAGONAL_TEXT_LABEL_MIN_COVERAGE
+        and purity >= GRAY_DIAGONAL_TEXT_LABEL_MIN_PURITY
+        and _context_purity(plan_mask, hit.bbox, intersection_mask)
+        >= GRAY_DIAGONAL_TEXT_LABEL_MIN_CONTEXT
+    )
+    interrupted_label_geometry = (
+        hit.source == "template_interrupted_recovery"
+        and hit.match_score >= GRAY_INTERRUPTED_LABEL_RECOVERY_MIN_MATCH
+        and GRAY_INTERRUPTED_LABEL_RECOVERY_MIN_TEMPLATE_AREA
+        <= hit.bbox[2] * hit.bbox[3]
+        <= GRAY_INTERRUPTED_LABEL_RECOVERY_MAX_TEMPLATE_AREA
+        and hit_aspect <= GRAY_INTERRUPTED_LABEL_RECOVERY_MAX_ASPECT
+        and coverage >= GRAY_INTERRUPTED_LABEL_RECOVERY_MIN_COVERAGE
+        and purity >= GRAY_INTERRUPTED_LABEL_RECOVERY_MIN_PURITY
+        and _context_purity(plan_mask, hit.bbox, intersection_mask)
+        >= GRAY_INTERRUPTED_LABEL_RECOVERY_MIN_CONTEXT
+    )
     strong_complex_geometry = (
         hit.pixel_count >= GRAY_RAW_SCAN_MIN_TEMPLATE_PIXELS
         and hit.match_score >= GRAY_RAW_SCAN_THRESHOLD
@@ -899,7 +1028,14 @@ def _gray_budget_geometry_score(
         and purity >= GRAY_COMPLEX_GEOMETRY_MIN_PURITY
         and _context_purity(plan_mask, hit.bbox, intersection_mask) >= GRAY_COMPLEX_GEOMETRY_MIN_CONTEXT
     )
-    if standard_geometry_failed and not strong_complex_geometry:
+    if (
+        standard_geometry_failed
+        and not strong_complex_geometry
+        and not near_threshold_geometry
+        and not line_crossed_near_threshold_geometry
+        and not diagonal_text_label_geometry
+        and not interrupted_label_geometry
+    ):
         return None
 
     return coverage, purity
@@ -1211,13 +1347,110 @@ def _is_weak_gray_text_fragment(hit: CandidateHit) -> bool:
         and hit.coverage >= 0.94
         and hit.purity >= 0.48
     )
-    return (
+    strong_content_label_geometry = (
+        hit.source == "template_content"
+        and hit.scale >= 0.85
+        and hit.match_score >= 0.72
+        and hit.verification_score >= 0.74
+        and hit.coverage >= 0.95
+        and hit.content_score >= 0.82
+    )
+    full_content_label_geometry = (
+        hit.source == "template_content"
+        and hit.scale >= 0.85
+        and hit.bbox[2] * hit.bbox[3] >= 1000
+        and max(hit.bbox[2] / max(1, hit.bbox[3]), hit.bbox[3] / max(1, hit.bbox[2]))
+        >= 1.30
+        and hit.verification_score >= 0.70
+        and hit.coverage >= 0.94
+        and hit.purity >= 0.32
+        and hit.context_purity >= 0.18
+    )
+    full_template_label_geometry = (
+        hit.source == "template"
+        and hit.scale >= 0.85
+        and hit.bbox[2] * hit.bbox[3] >= 1000
+        and hit.match_score >= 0.60
+        and hit.verification_score >= 0.60
+        and hit.coverage >= 0.90
+        and hit.purity >= 0.50
+        and hit.context_purity >= 0.18
+    )
+    interrupted_content_label_geometry = (
+        hit.source == "template_content"
+        and hit.scale >= 0.85
+        and hit.bbox[2] * hit.bbox[3] >= 1000
+        and hit.match_score >= 0.69
+        and hit.verification_score >= 0.68
+        and hit.coverage >= 0.84
+        and hit.purity >= 0.28
+        and hit.context_purity >= 0.16
+        and hit.content_score >= 0.76
+    )
+    diagonal_content_label_geometry = (
+        hit.source == "template_content"
+        and hit.rotation % 90 != 0
+        and hit.scale >= 0.85
+        and hit.bbox[2] * hit.bbox[3] >= 1000
+        and hit.match_score >= 0.58
+        and hit.verification_score >= 0.66
+        and hit.coverage >= 0.95
+        and hit.content_score >= 0.74
+        and hit.context_purity >= 0.14
+    )
+    tiny_text_fragment = (
         hit.dominant_hsv is None
         and hit.is_text_label
-        and not strong_label_geometry
-        and hit.context_purity <= GRAY_WEAK_LABEL_MAX_CONTEXT
-        and hit.purity <= GRAY_WEAK_LABEL_MAX_PURITY
+        and hit.source == "template"
+        and hit.scale <= 0.55
+        and max(hit.bbox[2], hit.bbox[3]) <= 26
+        and hit.context_purity <= 0.30
+        and hit.match_score <= 0.62
+        and hit.verification_score <= 0.76
     )
+    return (
+        tiny_text_fragment
+        or (
+            hit.dominant_hsv is None
+            and hit.is_text_label
+            and not strong_content_label_geometry
+            and not full_content_label_geometry
+            and not full_template_label_geometry
+            and not interrupted_content_label_geometry
+            and not diagonal_content_label_geometry
+            and not strong_label_geometry
+            and hit.context_purity <= GRAY_WEAK_LABEL_MAX_CONTEXT
+            and hit.purity <= GRAY_WEAK_LABEL_MAX_PURITY
+        )
+    )
+
+
+def _is_full_gray_text_label_hit(hit: CandidateHit) -> bool:
+    if hit.dominant_hsv is not None or not hit.is_text_label:
+        return False
+    if hit.scale < 0.85:
+        return False
+    area = _hit_area(hit)
+    aspect = max(hit.bbox[2] / max(1, hit.bbox[3]), hit.bbox[3] / max(1, hit.bbox[2]))
+    if area < 1000 or aspect < 1.35:
+        return False
+    if hit.coverage < 0.88 or hit.purity < 0.34:
+        return False
+    if hit.content_score < 0.70 or hit.verification_score < 0.66:
+        return False
+    if hit.source == "template":
+        return hit.match_score >= 0.62
+    if hit.source == "template_content":
+        return (
+            hit.match_score >= 0.70
+            and hit.content_score >= 0.82
+        ) or (
+            hit.verification_score >= 0.70
+            and hit.coverage >= 0.94
+            and hit.purity >= 0.36
+            and hit.context_purity >= 0.18
+        )
+    return False
 
 
 def _is_gray_rect_frame_hit(hit: CandidateHit, templates: list[TemplateInfo]) -> bool:
@@ -1250,6 +1483,100 @@ def _is_same_template_duplicate_shadow(small: CandidateHit, large: CandidateHit)
         return False
 
     return large.verification_score + 0.12 >= small.verification_score
+
+
+def _deep_same_ink_overlap(fragment: CandidateHit, larger: CandidateHit) -> bool:
+    inter_area, _iou, iom, _center_distance = _bbox_metrics(fragment.bbox, larger.bbox)
+    if inter_area <= 0:
+        return False
+    return iom >= 0.72
+
+
+def _nested_gray_fragment_loses_to_stronger_hit(
+    fragment: CandidateHit,
+    stronger: CandidateHit,
+) -> bool:
+    if fragment.dominant_hsv is not None or stronger.dominant_hsv is not None:
+        return False
+    fragment_area = _hit_area(fragment)
+    stronger_area = _hit_area(stronger)
+    if stronger_area < fragment_area * 1.12:
+        return False
+    inter_area, _iou, iom, _center_distance = _bbox_metrics(fragment.bbox, stronger.bbox)
+    if inter_area <= 0 or not _deep_same_ink_overlap(fragment, stronger):
+        return False
+
+    fragment_center_nested = _center_inside_bbox(
+        _hit_center(fragment),
+        stronger.bbox,
+        margin_ratio=0.03,
+    )
+    deeply_contained_fragment = (
+        iom >= 0.90
+        and fragment_center_nested
+        and stronger_area >= fragment_area * 1.75
+    )
+    if deeply_contained_fragment:
+        fragment_has_independent_evidence = (
+            fragment.context_purity >= 0.43
+            and fragment.purity >= 0.70
+            and fragment.verification_score >= 0.66
+        )
+        stronger_is_not_weaker = (
+            stronger.verification_score + 0.07 >= fragment.verification_score
+            and stronger.match_score + 0.08 >= fragment.match_score
+            and stronger.coverage >= 0.72
+            and stronger.coverage + 0.20 >= fragment.coverage
+        )
+        if stronger_is_not_weaker and not fragment_has_independent_evidence:
+            return True
+
+    return (
+        stronger.verification_score >= fragment.verification_score + 0.07
+        and stronger.match_score >= fragment.match_score + 0.08
+        and stronger.purity >= fragment.purity + 0.06
+        and stronger.coverage >= fragment.coverage - 0.04
+    )
+
+
+def _same_template_close_shadow_loses_to_larger(
+    small: CandidateHit,
+    large: CandidateHit,
+) -> bool:
+    if small.template_id != large.template_id:
+        return False
+    if small.dominant_hsv is not None or large.dominant_hsv is not None:
+        return False
+
+    small_area = _hit_area(small)
+    large_area = _hit_area(large)
+    if small_area > 900 or large_area < small_area * 3.0:
+        return False
+
+    sx, sy, sw, sh = small.bbox
+    lx, ly, lw, lh = large.bbox
+    overlap_x = max(0, min(sx + sw, lx + lw) - max(sx, lx))
+    overlap_y = max(0, min(sy + sh, ly + lh) - max(sy, ly))
+    gap_x = max(0, max(sx, lx) - min(sx + sw, lx + lw))
+    gap_y = max(0, max(sy, ly) - min(sy + sh, ly + lh))
+    aligned_x = overlap_x / max(1, min(sw, lw)) >= 0.60 and gap_y <= max(6, min(sh, lh) * 0.35)
+    aligned_y = overlap_y / max(1, min(sh, lh)) >= 0.60 and gap_x <= max(18, min(sw, lw) * 0.80)
+    if not (aligned_x or aligned_y):
+        return False
+
+    large_diag = max(1.0, float(np.hypot(lw, lh)))
+    center_gap = float(np.hypot(_hit_center(small)[0] - _hit_center(large)[0], _hit_center(small)[1] - _hit_center(large)[1]))
+    if center_gap / large_diag > 0.90:
+        return False
+
+    if small.context_purity > 0.24 or small.verification_score > 0.62:
+        return False
+    return (
+        large.verification_score >= small.verification_score + 0.055
+        and large.match_score >= small.match_score + 0.09
+        and large.coverage >= small.coverage - 0.02
+        and large.purity >= small.purity + 0.02
+    )
 
 
 def _weak_gray_compact_fragment_loses_to_larger(
@@ -1368,6 +1695,9 @@ def _strong_compact_gray_hit_should_coexist(
     if compact_area > 4200 or large_area < compact_area * 2.0:
         return False
 
+    if _nested_gray_fragment_loses_to_stronger_hit(compact, large):
+        return False
+
     large_aspect = max(
         large.bbox[2] / max(1, large.bbox[3]),
         large.bbox[3] / max(1, large.bbox[2]),
@@ -1398,7 +1728,13 @@ def _suppress_nested_gray_core_hits(hits: list[CandidateHit]) -> list[CandidateH
         for large_idx, large in enumerate(hits):
             if small_idx == large_idx or large.dominant_hsv is not None:
                 continue
+            if _same_template_close_shadow_loses_to_larger(small, large):
+                suppressed.add(small_idx)
+                break
             if _is_same_template_duplicate_shadow(small, large):
+                suppressed.add(small_idx)
+                break
+            if _nested_gray_fragment_loses_to_stronger_hit(small, large):
                 suppressed.add(small_idx)
                 break
             if _weak_gray_compact_fragment_loses_to_larger(small, large):
@@ -1470,13 +1806,66 @@ def _dedupe_gray_overlapping_alternatives(hits: list[CandidateHit]) -> list[Cand
             0.0 if hit.mirrored else 1.0,
         )
 
+    def _near_identical_gray_bbox(left: CandidateHit, right: CandidateHit) -> bool:
+        inter_area, iou, iom, center_distance = _bbox_metrics(left.bbox, right.bbox)
+        if inter_area <= 0:
+            return False
+
+        left_area = _hit_area(left)
+        right_area = _hit_area(right)
+        area_ratio = max(left_area, right_area) / max(1, min(left_area, right_area))
+        lw, lh = left.bbox[2], left.bbox[3]
+        rw, rh = right.bbox[2], right.bbox[3]
+        width_ratio = max(lw, rw) / max(1, min(lw, rw))
+        height_ratio = max(lh, rh) / max(1, min(lh, rh))
+        return (
+            iou >= 0.88
+            and iom >= 0.94
+            and center_distance <= 0.12
+            and area_ratio <= 1.18
+            and width_ratio <= 1.15
+            and height_ratio <= 1.15
+        )
+
     def _competing_winner(
         left: CandidateHit,
         right: CandidateHit,
     ) -> CandidateHit | None:
         if left.dominant_hsv is not None or right.dominant_hsv is not None:
             return None
+        left_full_label = _is_full_gray_text_label_hit(left)
+        right_full_label = _is_full_gray_text_label_hit(right)
+        if left_full_label != right_full_label:
+            full_label = left if left_full_label else right
+            other = right if full_label is left else left
+            full_area = _hit_area(full_label)
+            other_area = _hit_area(other)
+            inter_area, _iou, iom, center_distance = _bbox_metrics(full_label.bbox, other.bbox)
+            if inter_area > 0 and full_area >= other_area * 1.15 and (
+                iom >= 0.45 or center_distance <= 0.55
+            ):
+                other_is_low_purity_content_fragment = (
+                    other.source == "template_content"
+                    and other.purity <= 0.35
+                    and other.context_purity <= 0.18
+                    and full_area >= other_area * 1.45
+                    and full_label.purity >= other.purity + 0.30
+                )
+                if other_is_low_purity_content_fragment and (
+                    full_label.verification_score + 0.14 >= other.verification_score
+                    and full_label.match_score + 0.22 >= other.match_score
+                    and full_label.coverage + 0.08 >= other.coverage
+                ):
+                    return full_label
+        if _near_identical_gray_bbox(left, right):
+            left_rank = (_score_rank(left), *candidate_quality_key(left, mode="gray"))
+            right_rank = (_score_rank(right), *candidate_quality_key(right, mode="gray"))
+            return left if left_rank >= right_rank else right
         if left.is_text_label != right.is_text_label:
+            if _nested_gray_fragment_loses_to_stronger_hit(left, right):
+                return right
+            if _nested_gray_fragment_loses_to_stronger_hit(right, left):
+                return left
             return None
         if not _same_physical_hit(left, right):
             return None
@@ -1501,7 +1890,17 @@ def _dedupe_gray_overlapping_alternatives(hits: list[CandidateHit]) -> list[Cand
             and score_margin < 0.22
         )
         if similar_size_gray_symbols:
-            return max((left, right), key=_fuller_rank)
+            fuller = max((left, right), key=_fuller_rank)
+            other = right if fuller is left else left
+            fuller_is_quality_tie = score_margin < 0.10
+            fuller_not_substantially_weaker = (
+                fuller.verification_score + 0.035 >= other.verification_score
+                and fuller.match_score + 0.055 >= other.match_score
+                and fuller.coverage + 0.050 >= other.coverage
+                and fuller.purity + 0.040 >= other.purity
+            )
+            if fuller_is_quality_tie or fuller_not_substantially_weaker:
+                return fuller
         return left if score_left >= score_right else right
 
     ordered_hits = sorted(
@@ -1770,6 +2169,13 @@ def rescue_validated_gray_frame_hits(
     _trace_stage("rescue_added", rescued)
 
     combined = final_hits + rescued
+    weak_text_fragments = [hit for hit in combined if _is_weak_gray_text_fragment(hit)]
+    if weak_text_fragments:
+        _trace_stage(
+            "post_gray_filter_weak_text_removed",
+            weak_text_fragments,
+            {id(hit): "small_text_fragment" for hit in weak_text_fragments},
+        )
     combined = _filter_weak_gray_text_fragments(combined)
     _trace_stage("post_gray_filter_weak_text", combined)
 

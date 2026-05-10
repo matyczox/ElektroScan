@@ -364,6 +364,8 @@ def _suppress_same_template_ghosts(candidates: list[CandidateHit]) -> list[Candi
         for candidate in template_hits:
             if candidate.context_purity >= 0.34:
                 continue
+            if _is_strong_full_gray_text_label(candidate):
+                continue
 
             cx, cy = _box_center(candidate.bbox)
             candidate_diag = max(1.0, float(np.hypot(candidate.bbox[2], candidate.bbox[3])))
@@ -453,6 +455,69 @@ def _maybe_prefer_fuller_text_label(
     )
 
 
+def _is_strong_full_gray_text_label(hit: CandidateHit) -> bool:
+    if hit.dominant_hsv is not None or not hit.is_text_label:
+        return False
+    if hit.scale < 0.85:
+        return False
+    area = max(1, hit.bbox[2] * hit.bbox[3])
+    aspect = max(hit.bbox[2] / max(1, hit.bbox[3]), hit.bbox[3] / max(1, hit.bbox[2]))
+    if area < 1000 or aspect < 1.35:
+        return False
+    if hit.coverage < 0.88 or hit.purity < 0.34:
+        return False
+    if hit.content_score < 0.70 or hit.verification_score < 0.66:
+        return False
+    if hit.source == "template":
+        return hit.match_score >= 0.62
+    if hit.source == "template_content":
+        return hit.match_score >= 0.70 and hit.content_score >= 0.82
+    return False
+
+
+def _maybe_prefer_full_gray_text_label(
+    group_hits: list[CandidateHit],
+    base_winner: CandidateHit,
+) -> CandidateHit:
+    """Keep complete gray labels from losing to partial local fragments."""
+
+    contenders = [hit for hit in group_hits if _is_strong_full_gray_text_label(hit)]
+    if not contenders:
+        return base_winner
+
+    best_full_label = max(
+        contenders,
+        key=lambda hit: (
+            float(hit.content_score),
+            float(hit.verification_score),
+            float(hit.match_score),
+            float(hit.coverage),
+            float(hit.purity),
+            float(max(1, hit.bbox[2] * hit.bbox[3])),
+            0.0 if hit.mirrored else 1.0,
+        ),
+    )
+    if base_winner is best_full_label:
+        return base_winner
+
+    if _is_strong_full_gray_text_label(base_winner):
+        return base_winner
+
+    best_area = max(1, best_full_label.bbox[2] * best_full_label.bbox[3])
+    base_area = max(1, base_winner.bbox[2] * base_winner.bbox[3])
+    base_is_low_purity_content_fragment = (
+        base_winner.source == "template_content"
+        and base_winner.purity <= 0.35
+        and base_winner.context_purity <= 0.18
+        and best_area >= base_area * 1.45
+        and best_full_label.purity >= base_winner.purity + 0.30
+    )
+    if base_is_low_purity_content_fragment:
+        return best_full_label
+
+    return base_winner
+
+
 def _is_strong_tiny_gray_candidate(hit: CandidateHit) -> bool:
     """Identify small gray symbols that already validate on their own geometry."""
 
@@ -529,6 +594,7 @@ def _select_cluster_winner(
     """Pick one winner per cluster, preferring promoted fuller symbols over simpler cores."""
 
     base_winner = max(group_hits, key=_candidate_rank_key)
+    base_winner = _maybe_prefer_full_gray_text_label(group_hits, base_winner)
     base_winner = _maybe_prefer_fuller_text_label(group_hits, base_winner)
     base_winner = _maybe_prefer_fuller_gray_symbol(group_hits, base_winner)
     override_candidates: list[CandidateHit] = []

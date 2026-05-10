@@ -1,4 +1,4 @@
-﻿"""
+"""
 detector.py - CPU-friendly symbol detection for electrical plans.
 
 This module now orchestrates the pipeline. The heavy helpers live in sibling
@@ -516,6 +516,7 @@ def _detect_symbols_pipeline(
                 component_index=gray_search_component_index,
                 tile_size_override=tile_size,
                 max_tile_rois_override=max_tile_rois,
+                component_supplement_rois=80 if templates[template_id].is_text_label else 0,
             )
         else:
             roi_strategy = "color"
@@ -562,6 +563,12 @@ def _detect_symbols_pipeline(
         "raw_budget_removed": 0,
         "raw_prefilter_hits": 0,
         "raw_prefilter_removed": 0,
+        "gray_near_threshold_recovery_candidates": 0,
+        "gray_near_threshold_recovery_accepted": 0,
+        "gray_near_threshold_recovery_rejected": 0,
+        "gray_interrupted_recovery_candidates": 0,
+        "gray_interrupted_recovery_accepted": 0,
+        "gray_interrupted_recovery_rejected": 0,
         "prepared_variants": sum(len(variants) for variants in variants_by_template.values()),
         "gray_text_mirror_enabled": int(detector_profile == "gray" and not disable_text_mirror),
         "color_no_hsv_templates": sum(
@@ -626,6 +633,12 @@ def _detect_symbols_pipeline(
     diagnostics["scan_task_rois"] = scan_result.scan_task_rois
     timings["scan"] = scan_result.timing_seconds
     diagnostics["raw_peaks"] = len(raw_template_hits)
+    diagnostics["gray_near_threshold_recovery_candidates"] = sum(
+        1 for hit in raw_template_hits if hit.source == "template_near_threshold"
+    )
+    diagnostics["gray_interrupted_recovery_candidates"] = sum(
+        1 for hit in raw_template_hits if hit.source == "template_interrupted_recovery"
+    )
     raw_scan_hits = raw_template_hits
     _record_candidate_trace("raw_scan", raw_template_hits)
 
@@ -706,9 +719,27 @@ def _detect_symbols_pipeline(
     rejection_reasons = validation_result.rejection_reasons
     validation_workers = validation_result.validation_workers
     diagnostics["promoted_targeted_hits"] += validation_result.promoted_targeted_hits
+    diagnostics["gray_near_threshold_recovery_accepted"] = sum(
+        1 for hit in validated_hits if hit.source == "template_near_threshold"
+    )
+    diagnostics["gray_near_threshold_recovery_rejected"] = sum(
+        1 for hit in validation_result.rejected_hits if hit.source == "template_near_threshold"
+    )
+    diagnostics["gray_interrupted_recovery_accepted"] = sum(
+        1 for hit in validated_hits if hit.source == "template_interrupted_recovery"
+    )
+    diagnostics["gray_interrupted_recovery_rejected"] = sum(
+        1
+        for hit in validation_result.rejected_hits
+        if hit.source == "template_interrupted_recovery"
+    )
     validated_candidates.extend(validated_hits)
     _record_candidate_trace("validation_accepted", validated_hits)
-    _record_candidate_trace("validation_rejected", validation_result.rejected_hits)
+    _record_candidate_trace(
+        "validation_rejected",
+        validation_result.rejected_hits,
+        validation_result.rejection_reason_by_hit_id,
+    )
 
     accepted_by_scale: dict[float, int] = {}
     if debug_profile is not None:
@@ -731,9 +762,16 @@ def _detect_symbols_pipeline(
         parent_ids_by_child,
         mode=detector_profile,
     )
+    pre_parent_ids = {id(hit) for hit in pre_parent_candidates}
+    pre_parent_suppressed = [hit for hit in prefiltered_candidates if id(hit) not in pre_parent_ids]
     diagnostics["pre_parent_clusters"] = len(pre_parent_candidates)
     timings["pre_parent_clustering"] = time.perf_counter() - phase_start
     _record_candidate_trace("pre_parent_clusters", pre_parent_candidates)
+    _record_candidate_trace(
+        "pre_parent_cluster_suppressed",
+        pre_parent_suppressed,
+        {id(hit): "cluster_suppressed" for hit in pre_parent_suppressed},
+    )
 
     parent_search_result = search_parent_candidates(
         pre_parent_candidates=pre_parent_candidates,
@@ -762,6 +800,15 @@ def _detect_symbols_pipeline(
         parent_search_candidates,
         parent_ids_by_child,
         mode=detector_profile,
+    )
+    final_cluster_ids = {id(hit) for hit in final_hits}
+    final_cluster_suppressed = [
+        hit for hit in parent_search_candidates if id(hit) not in final_cluster_ids
+    ]
+    _record_candidate_trace(
+        "final_cluster_suppressed",
+        final_cluster_suppressed,
+        {id(hit): "same_place_loser" for hit in final_cluster_suppressed},
     )
     if detector_profile == "gray":
         final_hits, rescued_gray_frames, gray_rescue_trace = gray_strategy.rescue_validated_gray_frame_hits(
@@ -864,6 +911,30 @@ def _detect_symbols_pipeline(
                 "candidateTrace": candidate_trace if candidate_trace_enabled else {},
                 "candidateStageCounts": candidate_stage_counts,
                 "scanProfile": scan_result.scan_profile,
+                "grayNearThresholdRecovery": {
+                    "candidates": int(diagnostics["gray_near_threshold_recovery_candidates"]),
+                    "accepted": int(diagnostics["gray_near_threshold_recovery_accepted"]),
+                    "rejected": int(diagnostics["gray_near_threshold_recovery_rejected"]),
+                    "rejectionReasons": {
+                        str(key): int(value)
+                        for key, value in validation_result.rejection_reasons_by_source.get(
+                            "template_near_threshold",
+                            {},
+                        ).items()
+                    },
+                },
+                "grayInterruptedRecovery": {
+                    "candidates": int(diagnostics["gray_interrupted_recovery_candidates"]),
+                    "accepted": int(diagnostics["gray_interrupted_recovery_accepted"]),
+                    "rejected": int(diagnostics["gray_interrupted_recovery_rejected"]),
+                    "rejectionReasons": {
+                        str(key): int(value)
+                        for key, value in validation_result.rejection_reasons_by_source.get(
+                            "template_interrupted_recovery",
+                            {},
+                        ).items()
+                    },
+                },
                 "hitFlowProfile": hit_flow_profile,
                 "roiStrategyProfile": roi_strategy_profile,
                 "ablation": {"noTextMirror": bool(ablation_no_text_mirror)},
@@ -940,6 +1011,12 @@ def _detect_symbols_pipeline(
             f" color_no_hsv_templates={diagnostics['color_no_hsv_templates']},"
             f" skipped_empty_color_masks={diagnostics['skipped_empty_color_masks']},"
             f" raw_peaks={diagnostics['raw_peaks']} per_scale={_fmt_scale_hist(raw_peaks_by_scale)},"
+            f" gray_near_threshold={diagnostics['gray_near_threshold_recovery_candidates']}/"
+            f"{diagnostics['gray_near_threshold_recovery_accepted']}/"
+            f"{diagnostics['gray_near_threshold_recovery_rejected']},"
+            f" gray_interrupted={diagnostics['gray_interrupted_recovery_candidates']}/"
+            f"{diagnostics['gray_interrupted_recovery_accepted']}/"
+            f"{diagnostics['gray_interrupted_recovery_rejected']},"
             f" raw_peaks_by_mask={scan_mask_summary},"
             f" raw_budget={diagnostics['raw_budget_hits']}(-{diagnostics['raw_budget_removed']}),"
             f" raw_budget_protected={int(gray_budget_profile.get('geometryProtectedKept', 0))}/{int(gray_budget_profile.get('geometryProtected', 0))},"
