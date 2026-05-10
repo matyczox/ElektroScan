@@ -22,6 +22,7 @@ from core.detector_clustering import (
     _dedupe_raw_template_hits_before_validation,
     _prefilter_candidates,
     _prefilter_raw_template_hits,
+    _suppress_color_local_fragments,
 )
 from core.detector_config import (
     DEFAULT_PDF_DPI,
@@ -166,6 +167,160 @@ def _detect_symbols_pipeline(
     trace_max_items = int(trace_input.get("maxItems") or os.getenv("ELEKTROSCAN_TRACE_MAX_ITEMS", 40))
     candidate_trace_enabled = bool(trace_symbols or trace_points)
     candidate_trace: dict[str, dict] = {}
+
+    def _filter_pdf_text_fallbacks(
+        pdf_hits: list[CandidateHit],
+        template_hits: list[CandidateHit],
+    ) -> tuple[list[CandidateHit], list[CandidateHit]]:
+        """Keep color PDF text only where the visual detector has no local hit."""
+
+        if detector_profile != "color" or not pdf_hits or not template_hits:
+            return pdf_hits, []
+
+        def _template_overlaps_pdf_text(template_hit: CandidateHit, pdf_hit: CandidateHit) -> bool:
+            tx, ty, tw, th = template_hit.bbox
+            px, py, pw, ph = pdf_hit.bbox
+            ix1 = max(tx, px)
+            iy1 = max(ty, py)
+            ix2 = min(tx + tw, px + pw)
+            iy2 = min(ty + th, py + ph)
+            iw = max(0, ix2 - ix1)
+            ih = max(0, iy2 - iy1)
+            inter = iw * ih
+            if inter <= 0:
+                return False
+
+            template_area = max(1, tw * th)
+            pdf_area = max(1, pw * ph)
+            union = template_area + pdf_area - inter
+            iou = inter / max(1, union)
+            iom = inter / min(template_area, pdf_area)
+
+            tcx = tx + tw / 2.0
+            tcy = ty + th / 2.0
+            pcx = px + pw / 2.0
+            pcy = py + ph / 2.0
+            center_distance = float(np.hypot(tcx - pcx, tcy - pcy))
+            ref_distance = max(1.0, min(float(np.hypot(tw, th)), float(np.hypot(pw, ph))))
+            normalized_center_distance = center_distance / ref_distance
+            template_center_inside_pdf = px <= tcx <= px + pw and py <= tcy <= py + ph
+
+            pdf_center_inside_template = tx <= pcx <= tx + tw and ty <= pcy <= ty + th
+
+            return (
+                iou >= 0.12
+                or (iom >= 0.32 and normalized_center_distance <= 0.80)
+                or (template_center_inside_pdf and iom >= 0.22)
+                or (pdf_center_inside_template and iom >= 0.22)
+            )
+
+        local_template_hits = [
+            hit
+            for hit in template_hits
+            if hit.source != "pdf_text"
+            and hit.dominant_hsv is not None
+            and hit.verification_score >= 0.38
+            and hit.coverage >= 0.45
+            and hit.purity >= 0.45
+        ]
+        if not local_template_hits:
+            return pdf_hits, []
+
+        kept: list[CandidateHit] = []
+        removed: list[CandidateHit] = []
+        for pdf_hit in pdf_hits:
+            has_template_fallback = any(
+                _template_overlaps_pdf_text(template_hit, pdf_hit)
+                for template_hit in local_template_hits
+            )
+            if has_template_fallback:
+                removed.append(pdf_hit)
+            else:
+                kept.append(pdf_hit)
+        return kept, removed
+
+    def _apply_color_pdf_text_class_hints(
+        template_hits: list[CandidateHit],
+        pdf_hits: list[CandidateHit],
+    ) -> int:
+        """Use PDF text only as a non-final class hint for local color ties."""
+
+        if detector_profile != "color" or not template_hits or not pdf_hits:
+            return 0
+
+        def _pdf_text_overlap(template_hit: CandidateHit, pdf_hit: CandidateHit) -> bool:
+            tx, ty, tw, th = template_hit.bbox
+            px, py, pw, ph = pdf_hit.bbox
+            ix1 = max(tx, px)
+            iy1 = max(ty, py)
+            ix2 = min(tx + tw, px + pw)
+            iy2 = min(ty + th, py + ph)
+            inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+            if inter <= 0:
+                return False
+            template_area = max(1, tw * th)
+            pdf_area = max(1, pw * ph)
+            iom = inter / min(template_area, pdf_area)
+            tcx = tx + tw / 2.0
+            tcy = ty + th / 2.0
+            pcx = px + pw / 2.0
+            pcy = py + ph / 2.0
+            center_distance = float(np.hypot(tcx - pcx, tcy - pcy))
+            ref_distance = max(1.0, min(float(np.hypot(tw, th)), float(np.hypot(pw, ph))))
+            hit_center_inside_pdf = px <= tcx <= px + pw and py <= tcy <= py + ph
+            pdf_center_inside_hit = tx <= pcx <= tx + tw and ty <= pcy <= ty + th
+            if template_hit.is_text_label and pdf_hit.is_text_label:
+                return (
+                    hit_center_inside_pdf
+                    or (pdf_center_inside_hit and iom >= 0.45)
+                    or (iom >= 0.55 and center_distance / ref_distance <= 0.45)
+                )
+            return iom >= 0.35 or center_distance / ref_distance <= 0.70
+
+        hinted = 0
+        for hit in template_hits:
+            if hit.source == "pdf_text" or hit.dominant_hsv is None:
+                continue
+            overlapping_pdf_hits = [
+                pdf_hit
+                for pdf_hit in pdf_hits
+                if pdf_hit.dominant_hsv is not None
+                and abs(int(hit.dominant_hsv[0]) - int(pdf_hit.dominant_hsv[0])) <= 18
+                and _pdf_text_overlap(hit, pdf_hit)
+            ]
+            if not overlapping_pdf_hits:
+                continue
+
+            has_same_template_hint = any(
+                pdf_hit.template_id == hit.template_id for pdf_hit in overlapping_pdf_hits
+            )
+            if has_same_template_hint:
+                hit.context_purity = round(min(1.0, float(hit.context_purity) + 0.08), 4)
+                hit.verification_score = round(
+                    min(1.0, float(hit.verification_score) + 0.12),
+                    4,
+                )
+                if hit.is_text_label:
+                    hit.content_score = round(
+                        min(1.0, float(hit.content_score) + 0.18),
+                        4,
+                    )
+                hinted += 1
+                continue
+
+            has_conflicting_text_hint = any(
+                pdf_hit.template_id != hit.template_id and pdf_hit.is_text_label and hit.is_text_label
+                for pdf_hit in overlapping_pdf_hits
+            )
+            if has_conflicting_text_hint:
+                hit.context_purity = round(max(0.0, float(hit.context_purity) - 0.04), 4)
+                hit.verification_score = round(
+                    max(0.0, float(hit.verification_score) - 0.10),
+                    4,
+                )
+                hit.content_score = round(max(0.0, float(hit.content_score) - 0.18), 4)
+                hinted += 1
+        return hinted
 
     def _trace_symbol_matches(symbol_name: str) -> bool:
         if not trace_symbols:
@@ -381,7 +536,12 @@ def _detect_symbols_pipeline(
         for variants in variants_by_template.values()
         for variant in variants
     }
-    socket_07_promotions = _build_socket_07_promotions(templates, variants_by_template)
+    socket_07_promotions = (
+        _build_socket_07_promotions(templates, variants_by_template)
+        if detector_profile in {"gray", "color"}
+        else {}
+    )
+    validation_promotions = socket_07_promotions if detector_profile == "gray" else {}
     parent_ids_by_child: dict[int, set[int]] = {}
     for rules in socket_07_promotions.values():
         for rule in rules:
@@ -569,6 +729,9 @@ def _detect_symbols_pipeline(
         "gray_interrupted_recovery_candidates": 0,
         "gray_interrupted_recovery_accepted": 0,
         "gray_interrupted_recovery_rejected": 0,
+        "color_recovery_candidates": 0,
+        "color_recovery_accepted": 0,
+        "color_recovery_rejected": 0,
         "prepared_variants": sum(len(variants) for variants in variants_by_template.values()),
         "gray_text_mirror_enabled": int(detector_profile == "gray" and not disable_text_mirror),
         "color_no_hsv_templates": sum(
@@ -639,6 +802,9 @@ def _detect_symbols_pipeline(
     diagnostics["gray_interrupted_recovery_candidates"] = sum(
         1 for hit in raw_template_hits if hit.source == "template_interrupted_recovery"
     )
+    diagnostics["color_recovery_candidates"] = sum(
+        1 for hit in raw_template_hits if hit.source == "template_color_recovery"
+    )
     raw_scan_hits = raw_template_hits
     _record_candidate_trace("raw_scan", raw_template_hits)
 
@@ -699,7 +865,7 @@ def _detect_symbols_pipeline(
         for _hit in raw_template_hits:
             candidates_by_scale[_hit.scale] = candidates_by_scale.get(_hit.scale, 0) + 1
 
-    validated_candidates: list[CandidateHit] = list(pdf_candidates)
+    validated_candidates: list[CandidateHit] = []
     postprocess_workers = max(1, DETECTOR_POSTPROCESS_MAX_WORKERS)
     validation_result = validate_template_candidates(
         raw_template_hits=raw_template_hits,
@@ -708,7 +874,7 @@ def _detect_symbols_pipeline(
         plan_masks_by_template=plan_masks_by_template,
         dilated_plan_masks_by_template=dilated_plan_masks_by_template,
         variants_lookup=variants_lookup,
-        socket_07_promotions=socket_07_promotions,
+        socket_07_promotions=validation_promotions,
         plan_hsv=plan_hsv,
         postprocess_workers=postprocess_workers,
         progress_callback=_progress,
@@ -718,6 +884,12 @@ def _detect_symbols_pipeline(
     validated_hits = validation_result.validated_hits
     rejection_reasons = validation_result.rejection_reasons
     validation_workers = validation_result.validation_workers
+    color_pdf_text_hinted = _apply_color_pdf_text_class_hints(validated_hits, pdf_candidates)
+    pdf_candidates, removed_pdf_text_fallbacks = _filter_pdf_text_fallbacks(
+        pdf_candidates,
+        validated_hits,
+    )
+    validated_candidates.extend(pdf_candidates)
     diagnostics["promoted_targeted_hits"] += validation_result.promoted_targeted_hits
     diagnostics["gray_near_threshold_recovery_accepted"] = sum(
         1 for hit in validated_hits if hit.source == "template_near_threshold"
@@ -733,6 +905,12 @@ def _detect_symbols_pipeline(
         for hit in validation_result.rejected_hits
         if hit.source == "template_interrupted_recovery"
     )
+    diagnostics["color_recovery_accepted"] = sum(
+        1 for hit in validated_hits if hit.source == "template_color_recovery"
+    )
+    diagnostics["color_recovery_rejected"] = sum(
+        1 for hit in validation_result.rejected_hits if hit.source == "template_color_recovery"
+    )
     validated_candidates.extend(validated_hits)
     _record_candidate_trace("validation_accepted", validated_hits)
     _record_candidate_trace(
@@ -747,6 +925,8 @@ def _detect_symbols_pipeline(
             accepted_by_scale[_hit.scale] = accepted_by_scale.get(_hit.scale, 0) + 1
 
     diagnostics["validated_template_hits"] = len(validated_candidates) - len(pdf_candidates)
+    diagnostics["pdf_text_fallback_removed"] = len(removed_pdf_text_fallbacks)
+    diagnostics["pdf_text_class_hints"] = color_pdf_text_hinted
     timings["validation_targeted"] = validation_result.timing_seconds
 
     phase_start = time.perf_counter()
@@ -773,8 +953,21 @@ def _detect_symbols_pipeline(
         {id(hit): "cluster_suppressed" for hit in pre_parent_suppressed},
     )
 
+    if detector_profile == "color":
+        parent_search_input = [
+            hit
+            for hit in prefiltered_candidates
+            if (hit.template_id, hit.scale, hit.rotation, hit.mirrored) in socket_07_promotions
+            and hit.dominant_hsv is not None
+            and hit.source == "template"
+            and hit.match_score >= 0.48
+            and hit.coverage >= 0.65
+            and hit.purity >= 0.55
+        ]
+    else:
+        parent_search_input = pre_parent_candidates
     parent_search_result = search_parent_candidates(
-        pre_parent_candidates=pre_parent_candidates,
+        pre_parent_candidates=parent_search_input,
         detector_profile=detector_profile,
         plan_image=plan_image,
         templates=templates,
@@ -786,7 +979,16 @@ def _detect_symbols_pipeline(
         postprocess_workers=postprocess_workers,
         progress_callback=_progress,
     )
-    parent_search_candidates = parent_search_result.candidates
+    if detector_profile == "color":
+        promoted_parent_hits = [
+            hit
+            for hit in parent_search_result.candidates
+            if hit.source.startswith("template_parent_search_")
+            or hit.source.startswith("template_promoted_")
+        ]
+        parent_search_candidates = pre_parent_candidates + promoted_parent_hits
+    else:
+        parent_search_candidates = parent_search_result.candidates
     parent_search_workers = parent_search_result.workers
     diagnostics["parent_search_input_hits"] += parent_search_result.input_hits
     diagnostics["parent_search_candidates"] += parent_search_result.attempted_candidates
@@ -828,6 +1030,12 @@ def _detect_symbols_pipeline(
             templates,
         )
     else:
+        final_hits, color_fragment_suppressed = _suppress_color_local_fragments(final_hits)
+        _record_candidate_trace(
+            "color_fragment_suppressed",
+            color_fragment_suppressed,
+            {id(hit): "color_local_fragment" for hit in color_fragment_suppressed},
+        )
         rescued_gray_frames = 0
         gray_unresolved_strong_hits = {"strongValidated": 0, "unresolved": 0, "items": []}
     diagnostics["gray_frame_final_rescued"] = rescued_gray_frames

@@ -37,9 +37,9 @@ def search_parent_candidates(
     postprocess_workers: int,
     progress_callback: Callable[[str, float, str], None],
 ) -> ParentSearchResult:
-    """Run expensive parent fallback only for gray profiles."""
+    """Run expensive parent fallback for fuller family symbols."""
 
-    if detector_profile == "color":
+    if detector_profile not in {"gray", "color"}:
         return ParentSearchResult(
             candidates=pre_parent_candidates,
             workers=0,

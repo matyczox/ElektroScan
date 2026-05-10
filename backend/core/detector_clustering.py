@@ -455,6 +455,386 @@ def _maybe_prefer_fuller_text_label(
     )
 
 
+def _color_template_score(hit: CandidateHit) -> float:
+    area_bonus = 0.0
+    if (hit.is_text_label or _is_color_label_like_shape(hit)) and hit.source != "pdf_text":
+        area_bonus = min(0.18, np.log1p(float(max(1, hit.bbox[2] * hit.bbox[3]))) * 0.018)
+    return (
+        float(hit.verification_score)
+        + float(hit.match_score)
+        + 0.12 * float(hit.content_score)
+        + 0.06 * float(hit.coverage)
+        + 0.06 * float(hit.purity)
+        + area_bonus
+    )
+
+
+def _is_color_label_like_shape(hit: CandidateHit) -> bool:
+    if hit.dominant_hsv is None or hit.source == "pdf_text":
+        return False
+    area = max(1, hit.bbox[2] * hit.bbox[3])
+    aspect = max(
+        float(hit.bbox[2]) / max(1.0, float(hit.bbox[3])),
+        float(hit.bbox[3]) / max(1.0, float(hit.bbox[2])),
+    )
+    return 900 <= area <= 3_800 and 1.15 <= aspect <= 3.35
+
+
+def _maybe_prefer_tighter_color_template(
+    group_hits: list[CandidateHit],
+    base_winner: CandidateHit,
+) -> CandidateHit:
+    """Prefer a tighter real color template over a broader local overlap."""
+
+    if base_winner.dominant_hsv is None:
+        return base_winner
+
+    base_area = max(1, base_winner.bbox[2] * base_winner.bbox[3])
+    base_score = _color_template_score(base_winner)
+    contenders: list[CandidateHit] = []
+
+    for hit in group_hits:
+        if hit.dominant_hsv is None or hit.source == "pdf_text":
+            continue
+        if _hue_distance(hit.dominant_hsv[0], base_winner.dominant_hsv[0]) > (
+            COLOR_HUE_TOLERANCE + 6
+        ):
+            continue
+
+        hit_area = max(1, hit.bbox[2] * hit.bbox[3])
+        if (
+            base_winner.is_text_label
+            and hit.is_text_label
+            and hit_area < base_area * 0.90
+        ):
+            continue
+        if hit_area > base_area * 0.90:
+            continue
+
+        inter_area, iou, iom, center_distance = _bbox_metrics(hit.bbox, base_winner.bbox)
+        stronger_tighter_label = (
+            _is_color_label_like_shape(hit)
+            and _is_color_label_like_shape(base_winner)
+            and hit_area < base_area
+            and inter_area > 0
+            and (iom >= 0.24 or center_distance <= 0.65)
+            and hit.match_score >= base_winner.match_score + 0.16
+            and hit.verification_score >= base_winner.verification_score + 0.02
+            and hit.coverage >= 0.70
+            and hit.purity >= 0.75
+        )
+        if hit is not base_winner and not (
+            inter_area > 0
+            and (iom >= 0.45 or iou >= 0.20 or center_distance <= 0.35)
+        ) and not stronger_tighter_label:
+            continue
+
+        if hit.verification_score < 0.56 or hit.coverage < 0.58 or hit.purity < 0.62:
+            continue
+
+        hit_score = _color_template_score(hit)
+        if not stronger_tighter_label and hit_score <= base_score + 0.05:
+            continue
+        if hit.match_score + hit.verification_score <= (
+            base_winner.match_score + base_winner.verification_score
+        ):
+            continue
+
+        contenders.append(hit)
+
+    if not contenders:
+        return base_winner
+
+    return max(
+        contenders + [base_winner],
+        key=lambda hit: (
+            _color_template_score(hit),
+            -float(max(1, hit.bbox[2] * hit.bbox[3])),
+            float(hit.color_similarity),
+            0.0 if hit.mirrored else 1.0,
+        ),
+    )
+
+
+def _maybe_prefer_fuller_color_candidate(
+    group_hits: list[CandidateHit],
+    base_winner: CandidateHit,
+) -> CandidateHit:
+    """Let a fuller same-color symbol survive over a smaller local core."""
+
+    if base_winner.dominant_hsv is None or base_winner.source == "pdf_text":
+        return base_winner
+
+    base_area = max(1, base_winner.bbox[2] * base_winner.bbox[3])
+    base_score = _color_template_score(base_winner)
+    contenders: list[CandidateHit] = []
+
+    for hit in group_hits:
+        if hit is base_winner or hit.dominant_hsv is None or hit.source == "pdf_text":
+            continue
+        if _hue_distance(hit.dominant_hsv[0], base_winner.dominant_hsv[0]) > (
+            COLOR_HUE_TOLERANCE + 6
+        ):
+            continue
+
+        hit_area = max(1, hit.bbox[2] * hit.bbox[3])
+        label_like_competition = (
+            hit.is_text_label
+            or base_winner.is_text_label
+            or (_is_color_label_like_shape(hit) and _is_color_label_like_shape(base_winner))
+        )
+        min_area_ratio = 1.06 if label_like_competition else 1.10
+        max_area_ratio = 1.55 if label_like_competition else 2.20
+        if hit_area < base_area * min_area_ratio or hit_area > base_area * max_area_ratio:
+            continue
+
+        inter_area, iou, iom, center_distance = _bbox_metrics(hit.bbox, base_winner.bbox)
+        if label_like_competition:
+            adds_own_ink_area = hit_area - inter_area
+            if not (
+                inter_area > 0
+                and (iom >= 0.48 or iou >= 0.18 or center_distance <= 0.70)
+                and center_distance <= 0.82
+                and adds_own_ink_area >= max(90, int(hit_area * 0.12))
+            ):
+                continue
+        else:
+            if not (
+                inter_area > 0
+                and (iom >= 0.55 or iou >= 0.25)
+                and center_distance <= 0.55
+                and (inter_area / hit_area) <= 0.92
+            ):
+                continue
+
+        fuller_color_symbol = (
+            not label_like_competition
+            and hit.match_score >= 0.68
+            and hit.verification_score >= 0.62
+            and hit.coverage >= 0.70
+            and hit.purity >= 0.75
+            and hit_area <= base_area * 1.80
+        )
+
+        if label_like_competition:
+            if hit.match_score < 0.50 or hit.coverage < 0.60 or hit.purity < 0.55:
+                continue
+            if hit.context_purity < 0.16:
+                continue
+            hit_is_fuller_label = (
+                hit_area >= base_area * 1.10
+                and hit.coverage >= 0.62
+                and hit.purity >= 0.58
+                and hit.context_purity + 0.10 >= base_winner.context_purity
+                and hit.match_score + 0.36 >= base_winner.match_score
+            )
+            hit_is_parent_recovery = (
+                hit.source.startswith("template_parent_search_")
+                or hit.source.startswith("template_promoted_")
+            )
+            base_is_strong_local_symbol = (
+                _is_color_label_like_shape(base_winner)
+                and base_winner.match_score >= 0.68
+                and base_winner.verification_score >= 0.64
+                and base_winner.coverage >= 0.74
+                and base_winner.purity >= 0.78
+            )
+            if (
+                base_is_strong_local_symbol
+                and not hit_is_parent_recovery
+                and hit.match_score + 0.12 < base_winner.match_score
+                and hit.verification_score <= base_winner.verification_score + 0.02
+            ):
+                continue
+            base_is_very_strong_label = (
+                _is_color_label_like_shape(base_winner)
+                and base_winner.match_score >= 0.82
+                and base_winner.verification_score >= 0.78
+                and base_winner.coverage >= 0.80
+                and not hit_is_fuller_label
+            )
+            if base_is_very_strong_label:
+                continue
+            hit_score = _color_template_score(hit)
+            if hit_score + (0.62 if hit_is_fuller_label else 0.36) < base_score:
+                continue
+            if (
+                not hit_is_fuller_label
+                and
+                hit.match_score
+                + hit.verification_score
+                + 0.12 * hit.coverage
+                + 0.16
+                < (
+                    base_winner.match_score
+                    + base_winner.verification_score
+                    + 0.12 * base_winner.coverage
+                )
+            ):
+                continue
+        else:
+            if hit.match_score < 0.40 or hit.coverage < 0.60 or hit.purity < 0.50:
+                continue
+            if hit.context_purity < 0.16:
+                continue
+            if not fuller_color_symbol:
+                if hit.match_score + 0.02 < base_winner.match_score:
+                    continue
+                if _color_template_score(hit) + 0.04 < base_score:
+                    continue
+
+        contenders.append(hit)
+
+    if not contenders:
+        return base_winner
+
+    return max(
+        contenders,
+        key=lambda hit: (
+            float(max(1, hit.bbox[2] * hit.bbox[3])),
+            _color_template_score(hit),
+            float(hit.match_score),
+            float(hit.coverage),
+            float(hit.purity),
+        ),
+    )
+
+
+def _axis_overlap_fraction(
+    start_a: int,
+    length_a: int,
+    start_b: int,
+    length_b: int,
+) -> float:
+    overlap = max(0, min(start_a + length_a, start_b + length_b) - max(start_a, start_b))
+    return overlap / max(1, min(length_a, length_b))
+
+
+def _axis_gap(
+    start_a: int,
+    length_a: int,
+    start_b: int,
+    length_b: int,
+) -> int:
+    return max(0, max(start_a, start_b) - min(start_a + length_a, start_b + length_b))
+
+
+def _labelish_aspect(hit: CandidateHit) -> bool:
+    aspect = max(
+        float(hit.bbox[2]) / max(1.0, float(hit.bbox[3])),
+        float(hit.bbox[3]) / max(1.0, float(hit.bbox[2])),
+    )
+    return 1.15 <= aspect <= 3.35
+
+
+def _is_weaker_adjacent_color_fragment(
+    candidate: CandidateHit,
+    stronger: CandidateHit,
+) -> bool:
+    if candidate.dominant_hsv is None or stronger.dominant_hsv is None:
+        return False
+    if candidate.source == "pdf_text" or stronger.source == "pdf_text":
+        return False
+    if candidate.template_id == stronger.template_id:
+        return False
+    if _hue_distance(candidate.dominant_hsv[0], stronger.dominant_hsv[0]) > (
+        COLOR_HUE_TOLERANCE + 6
+    ):
+        return False
+    candidate_is_strong = candidate.verification_score > 0.70 or candidate.match_score > 0.76
+    stronger_has_quality_margin = (
+        stronger.verification_score >= candidate.verification_score + 0.06
+        and stronger.match_score + 0.12 >= candidate.match_score
+    )
+
+    candidate_area = max(1, candidate.bbox[2] * candidate.bbox[3])
+    stronger_area = max(1, stronger.bbox[2] * stronger.bbox[3])
+    if candidate_area > stronger_area * 1.15:
+        return False
+
+    inter_area, _iou, iom, center_distance = _bbox_metrics(candidate.bbox, stronger.bbox)
+    cx, cy = _box_center(candidate.bbox)
+    sx, sy = _box_center(stronger.bbox)
+    x_overlap = _axis_overlap_fraction(
+        candidate.bbox[0],
+        candidate.bbox[2],
+        stronger.bbox[0],
+        stronger.bbox[2],
+    )
+    y_overlap = _axis_overlap_fraction(
+        candidate.bbox[1],
+        candidate.bbox[3],
+        stronger.bbox[1],
+        stronger.bbox[3],
+    )
+    x_distance = abs(cx - sx) / max(1.0, min(candidate.bbox[2], stronger.bbox[2]))
+    y_distance = abs(cy - sy) / max(1.0, min(candidate.bbox[3], stronger.bbox[3]))
+    x_gap = _axis_gap(candidate.bbox[0], candidate.bbox[2], stronger.bbox[0], stronger.bbox[2])
+    same_row_edge_fragment = (
+        _labelish_aspect(candidate)
+        and _labelish_aspect(stronger)
+        and
+        stronger_area >= candidate_area * 1.20
+        and stronger.match_score >= 0.40
+        and stronger.coverage >= 0.58
+        and stronger.purity >= 0.50
+        and stronger.context_purity >= 0.16
+        and y_overlap >= 0.78
+        and x_gap <= max(8, int(min(candidate.bbox[2], stronger.bbox[2]) * 0.24))
+        and candidate.match_score <= stronger.match_score + 0.34
+        and candidate.verification_score <= stronger.verification_score + 0.32
+    )
+    if same_row_edge_fragment and candidate_is_strong and inter_area <= 0:
+        return False
+    separate_stacked_labels = (
+        _labelish_aspect(candidate)
+        and _labelish_aspect(stronger)
+        and x_overlap >= 0.60
+        and y_overlap < 0.45
+    )
+    if separate_stacked_labels:
+        return False
+
+    return (
+        same_row_edge_fragment
+        or (
+            not candidate_is_strong
+            and
+            stronger_has_quality_margin
+            and (
+                (inter_area > 0 and iom >= 0.20 and center_distance <= 0.90)
+                or (x_overlap >= 0.60 and y_distance <= 0.90)
+                or (y_overlap >= 0.60 and x_distance <= 0.90)
+            )
+        )
+    )
+
+
+def _suppress_color_local_fragments(
+    candidates: list[CandidateHit],
+) -> tuple[list[CandidateHit], list[CandidateHit]]:
+    """Drop weak color fragments adjacent to a stronger local same-hue symbol."""
+
+    suppressed: set[int] = set()
+    for idx, candidate in enumerate(candidates):
+        if candidate.dominant_hsv is None:
+            continue
+        for other_idx, other in enumerate(candidates):
+            if idx == other_idx:
+                continue
+            if _is_weaker_adjacent_color_fragment(candidate, other):
+                suppressed.add(idx)
+                break
+
+    if not suppressed:
+        return candidates, []
+
+    return (
+        [candidate for idx, candidate in enumerate(candidates) if idx not in suppressed],
+        [candidate for idx, candidate in enumerate(candidates) if idx in suppressed],
+    )
+
+
 def _is_strong_full_gray_text_label(hit: CandidateHit) -> bool:
     if hit.dominant_hsv is not None or not hit.is_text_label:
         return False
@@ -594,6 +974,8 @@ def _select_cluster_winner(
     """Pick one winner per cluster, preferring promoted fuller symbols over simpler cores."""
 
     base_winner = max(group_hits, key=_candidate_rank_key)
+    base_winner = _maybe_prefer_tighter_color_template(group_hits, base_winner)
+    base_winner = _maybe_prefer_fuller_color_candidate(group_hits, base_winner)
     base_winner = _maybe_prefer_full_gray_text_label(group_hits, base_winner)
     base_winner = _maybe_prefer_fuller_text_label(group_hits, base_winner)
     base_winner = _maybe_prefer_fuller_gray_symbol(group_hits, base_winner)

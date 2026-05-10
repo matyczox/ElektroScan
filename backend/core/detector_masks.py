@@ -11,6 +11,11 @@ import numpy as np
 from core.detector_config import (
     COLOR_HUE_REJECTION_THRESHOLD,
     COLOR_HUE_TOLERANCE,
+    COLOR_NEAR_THRESHOLD_RECOVERY_MIN_MATCH,
+    COLOR_RECOVERY_MIN_COLOR_SIMILARITY,
+    COLOR_RECOVERY_MIN_CONTEXT,
+    COLOR_RECOVERY_MIN_COVERAGE,
+    COLOR_RECOVERY_MIN_PURITY,
     COLOR_SAT_TOLERANCE,
     COLOR_VAL_TOLERANCE,
     CONTEXT_MARGIN_RATIO,
@@ -1028,10 +1033,84 @@ def _validate_template_hit(
         and purity >= GRAY_INTERRUPTED_LABEL_RECOVERY_MIN_PURITY
         and context_purity >= GRAY_INTERRUPTED_LABEL_RECOVERY_MIN_CONTEXT
     )
+    early_color_similarity = 1.0
+    if hit.dominant_hsv is not None:
+        early_color_similarity = _roi_color_similarity(
+            plan_image,
+            plan_mask,
+            hit.bbox,
+            hit.dominant_hsv,
+            plan_hsv,
+        )
+    strong_color_partial_geometry = (
+        hit.dominant_hsv is not None
+        and early_color_similarity >= 0.90
+        and hit.match_score >= 0.60
+        and coverage >= 0.56
+        and purity >= 0.75
+        and context_purity >= 0.28
+    )
+    small_color_recovery_fragment = (
+        hit.dominant_hsv is not None
+        and hit.source == "template_color_recovery"
+        and hit_area < 1_000
+        and hit.match_score < 0.45
+        and coverage < 0.70
+    )
+    if small_color_recovery_fragment:
+        _record("color_recovery_tiny_fragment")
+        return False
+    color_recovery_geometry = (
+        hit.dominant_hsv is not None
+        and hit.source == "template_color_recovery"
+        and early_color_similarity >= COLOR_RECOVERY_MIN_COLOR_SIMILARITY
+        and hit.match_score >= COLOR_NEAR_THRESHOLD_RECOVERY_MIN_MATCH
+        and coverage >= COLOR_RECOVERY_MIN_COVERAGE
+        and purity >= COLOR_RECOVERY_MIN_PURITY
+        and context_purity >= COLOR_RECOVERY_MIN_CONTEXT
+    )
+    color_full_label_source = (
+        hit.source in {"template", "template_color_recovery"}
+        or hit.source.startswith("template_parent_search_")
+        or hit.source.startswith("template_promoted_")
+    )
+    color_full_label_geometry = (
+        hit.dominant_hsv is not None
+        and color_full_label_source
+        and early_color_similarity >= 0.90
+        and hit.scale >= 0.90
+        and 900 <= hit_area <= 3_800
+        and hit_aspect <= 3.20
+        and (
+            (
+                hit.match_score >= 0.50
+                and coverage >= 0.60
+                and purity >= 0.58
+                and context_purity >= 0.18
+            )
+            or (
+                hit.source == "template_color_recovery"
+                and hit.match_score >= COLOR_NEAR_THRESHOLD_RECOVERY_MIN_MATCH
+                and coverage >= COLOR_RECOVERY_MIN_COVERAGE
+                and purity >= COLOR_RECOVERY_MIN_PURITY
+                and context_purity >= COLOR_RECOVERY_MIN_CONTEXT
+            )
+            or (
+                hit.match_score >= 0.40
+                and coverage >= 0.58
+                and purity >= 0.50
+                and context_purity >= 0.16
+                and hit_area >= 1_250
+                and hit_aspect <= 2.35
+            )
+        )
+    )
     if (
         context_purity < NOISY_PARTIAL_CONTEXT_THRESHOLD
         and coverage < NOISY_PARTIAL_COVERAGE_THRESHOLD
         and purity < NOISY_PARTIAL_PURITY_THRESHOLD
+        and not strong_color_partial_geometry
+        and not color_recovery_geometry
     ):
         _record("noisy_partial")
         return False
@@ -1434,17 +1513,13 @@ def _validate_template_hit(
         hit.match_score < LOW_MATCH_STRICT_THRESHOLD
         and context_purity < MIN_CONTEXT_PURITY
         and not strong_gray_geometry
+        and not color_recovery_geometry
+        and not color_full_label_geometry
     ):
         _record("low_match_strict")
         return False
 
-    color_similarity = _roi_color_similarity(
-        plan_image,
-        plan_mask,
-        hit.bbox,
-        hit.dominant_hsv,
-        plan_hsv,
-    )
+    color_similarity = early_color_similarity
     if color_similarity <= 0.0:
         _record("color_similarity")
         return False
@@ -1474,6 +1549,8 @@ def _validate_template_hit(
                 content_threshold = LABEL_FULL_WIDTH_CONTENT_MIN_SCORE
         if line_crossed_near_threshold_label_geometry:
             content_threshold = min(content_threshold, 0.62)
+        if hit.dominant_hsv is not None and color_full_label_geometry:
+            content_threshold = min(content_threshold, 0.40)
 
         if content_score < content_threshold:
             _record("content_score")
@@ -1482,7 +1559,11 @@ def _validate_template_hit(
             1.0 - LABEL_CONTENT_SCORE_WEIGHT
         ) * verification_score + LABEL_CONTENT_SCORE_WEIGHT * content_score
 
-    if verification_score < MIN_VERIFICATION_SCORE:
+    if (
+        verification_score < MIN_VERIFICATION_SCORE
+        and not color_recovery_geometry
+        and not color_full_label_geometry
+    ):
         _record("verification")
         return False
 

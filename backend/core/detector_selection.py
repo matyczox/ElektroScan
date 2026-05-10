@@ -186,7 +186,7 @@ def candidate_quality_key(
     """Return the shared local quality rank for candidate arbitration."""
 
     not_mirrored = 0.0 if hit.mirrored else 1.0
-    pdf_bonus = 1.0 if hit.source == "pdf_text" else 0.0
+    pdf_bonus = 1.0 if mode == "gray" and hit.source == "pdf_text" else 0.0
 
     if hit.is_text_label:
         return (
@@ -269,6 +269,87 @@ def _edge_gray_dominates(winner: CandidateHit, loser: CandidateHit) -> bool:
     )
 
 
+def _axis_overlap_fraction(
+    start_a: int,
+    length_a: int,
+    start_b: int,
+    length_b: int,
+) -> float:
+    overlap = max(0, min(start_a + length_a, start_b + length_b) - max(start_a, start_b))
+    return overlap / max(1, min(length_a, length_b))
+
+
+def _axis_gap(
+    start_a: int,
+    length_a: int,
+    start_b: int,
+    length_b: int,
+) -> int:
+    return max(0, max(start_a, start_b) - min(start_a + length_a, start_b + length_b))
+
+
+def _color_fuller_label_dominates(winner: CandidateHit, loser: CandidateHit) -> bool:
+    """Let a complete color label beat a high-match partial local label."""
+
+    if winner.dominant_hsv is None or loser.dominant_hsv is None:
+        return False
+    if winner.source == "pdf_text" or loser.source == "pdf_text":
+        return False
+    if _hue_distance(winner.dominant_hsv[0], loser.dominant_hsv[0]) > (
+        COLOR_HUE_TOLERANCE + 6
+    ):
+        return False
+    if not (winner.is_text_label or loser.is_text_label):
+        return False
+
+    winner_area = _hit_area(winner)
+    loser_area = _hit_area(loser)
+    if winner_area < loser_area * 1.08 or winner_area > loser_area * 1.75:
+        return False
+
+    inter_area, iou, iom, center_distance = _bbox_metrics(winner.bbox, loser.bbox)
+    y_overlap = _axis_overlap_fraction(winner.bbox[1], winner.bbox[3], loser.bbox[1], loser.bbox[3])
+    x_gap = _axis_gap(winner.bbox[0], winner.bbox[2], loser.bbox[0], loser.bbox[2])
+    same_row_edge = (
+        y_overlap >= 0.72
+        and x_gap <= max(12, int(min(winner.bbox[2], loser.bbox[2]) * 0.38))
+    )
+    same_local_ink = (
+        inter_area > 0
+        and (iom >= 0.42 or iou >= 0.15 or center_distance <= 0.85)
+    )
+    if not (same_local_ink or same_row_edge):
+        return False
+
+    if (
+        winner.match_score < 0.40
+        or winner.coverage < 0.58
+        or winner.purity < 0.50
+        or winner.context_purity < 0.16
+        or winner.color_similarity < 0.90
+    ):
+        return False
+
+    # Preserve a genuinely strong smaller symbol unless the larger candidate
+    # is nearly as credible and covers extra same-color ink.
+    loser_very_strong = (
+        loser.match_score >= 0.84
+        and loser.verification_score >= 0.78
+        and loser.coverage >= 0.86
+        and loser.purity >= 0.86
+    )
+    if loser_very_strong and not same_row_edge:
+        return False
+
+    return (
+        winner.match_score + 0.46 >= loser.match_score
+        and winner.verification_score + 0.36 >= loser.verification_score
+        and winner.coverage + 0.18 >= loser.coverage
+        and winner.purity + 0.35 >= loser.purity
+        and winner.context_purity + 0.14 >= loser.context_purity
+    )
+
+
 def local_dominates(
     winner: CandidateHit,
     loser: CandidateHit,
@@ -292,6 +373,9 @@ def local_dominates(
         return True
 
     if mode == "gray" and _edge_gray_dominates(winner, loser):
+        return True
+
+    if mode != "gray" and _color_fuller_label_dominates(winner, loser):
         return True
 
     winner_key = candidate_quality_key(winner, mode=mode)

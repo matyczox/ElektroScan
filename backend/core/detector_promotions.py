@@ -221,6 +221,9 @@ def _maybe_promote_switch_parent_search(
         parent_prefix = _template_numeric_prefix(Path(templates[rule.parent_template_id].path).name)
         if parent_prefix not in {"10", "12"}:
             continue
+        color_parent_search = hit.dominant_hsv is not None
+        if color_parent_search and parent_prefix != "12":
+            continue
 
         parent_variant = variants_lookup.get(
             (rule.parent_template_id, rule.scale, rule.rotation, rule.mirrored)
@@ -238,15 +241,18 @@ def _maybe_promote_switch_parent_search(
             parent_plan_mask,
             dilated_plan_masks,
         )
-        base_x = int(round(child_center[0] - parent_variant.width / 2.0))
-        base_y = int(round(child_center[1] - parent_variant.height / 2.0))
+        if color_parent_search:
+            base_x = hit.bbox[0] - rule.offset_x
+            base_y = hit.bbox[1] - rule.offset_y
+        else:
+            base_x = int(round(child_center[0] - parent_variant.width / 2.0))
+            base_y = int(round(child_center[1] - parent_variant.height / 2.0))
 
-        for delta_y in range(
-            -SWITCH_PARENT_FALLBACK_SEARCH_RADIUS, SWITCH_PARENT_FALLBACK_SEARCH_RADIUS + 1
-        ):
-            for delta_x in range(
-                -SWITCH_PARENT_FALLBACK_SEARCH_RADIUS, SWITCH_PARENT_FALLBACK_SEARCH_RADIUS + 1
-            ):
+        search_radius = (
+            3 if hit.dominant_hsv is not None else SWITCH_PARENT_FALLBACK_SEARCH_RADIUS
+        )
+        for delta_y in range(-search_radius, search_radius + 1):
+            for delta_x in range(-search_radius, search_radius + 1):
                 parent_bbox = (
                     base_x + delta_x,
                     base_y + delta_y,
@@ -321,10 +327,17 @@ def _maybe_promote_switch_parent_search(
                     if parent_prefix == "12"
                     else SWITCH_10_PROMOTED_MAX_VERIFICATION_DROP
                 )
+                min_purity = SWITCH_PROMOTED_MIN_PURITY
+                min_context = SWITCH_PROMOTED_MIN_CONTEXT_PURITY
+                min_verification = SWITCH_PROMOTED_MIN_VERIFICATION
+                if color_parent_search:
+                    min_purity = 0.50
+                    min_context = 0.16
+                    min_verification = 0.50
                 if (
-                    promoted_hit.purity < SWITCH_PROMOTED_MIN_PURITY
-                    or promoted_hit.context_purity < SWITCH_PROMOTED_MIN_CONTEXT_PURITY
-                    or promoted_hit.verification_score < SWITCH_PROMOTED_MIN_VERIFICATION
+                    promoted_hit.purity < min_purity
+                    or promoted_hit.context_purity < min_context
+                    or promoted_hit.verification_score < min_verification
                     or promoted_hit.verification_score < (hit.verification_score - max_drop)
                 ):
                     continue

@@ -14,6 +14,15 @@ import numpy as np
 
 from core import detector_gray as gray_strategy
 from core.detector_config import (
+    COLOR_NEAR_THRESHOLD_RECOVERY_DELTA,
+    COLOR_NEAR_THRESHOLD_RECOVERY_ENABLED,
+    COLOR_NEAR_THRESHOLD_RECOVERY_MAX_ASPECT,
+    COLOR_NEAR_THRESHOLD_RECOVERY_MAX_PER_ROI,
+    COLOR_NEAR_THRESHOLD_RECOVERY_MAX_PER_VARIANT,
+    COLOR_NEAR_THRESHOLD_RECOVERY_MAX_ROI_AREA,
+    COLOR_NEAR_THRESHOLD_RECOVERY_MAX_TEMPLATE_AREA,
+    COLOR_NEAR_THRESHOLD_RECOVERY_MIN_MATCH,
+    COLOR_NEAR_THRESHOLD_RECOVERY_MIN_TEMPLATE_AREA,
     DETECTOR_SCAN_MAX_WORKERS,
     GRAY_COMPACT_TEXT_DIAGONAL_MAX_ROI_AREA,
     GRAY_COMPACT_TEXT_DIAGONAL_MAX_ROI_ASPECT,
@@ -55,6 +64,7 @@ from core.detector_models import CandidateHit, TemplateInfo, TemplateVariant
 
 NEAR_THRESHOLD_SOURCE = "template_near_threshold"
 INTERRUPTED_RECOVERY_SOURCE = "template_interrupted_recovery"
+COLOR_RECOVERY_SOURCE = "template_color_recovery"
 
 
 @dataclass(slots=True)
@@ -167,6 +177,54 @@ def _gray_interrupted_label_recovery_eligible(
     if aspect > float(GRAY_INTERRUPTED_LABEL_RECOVERY_MAX_ASPECT):
         return False
     return roi_foreground >= max(1, int(variant.pixel_count * 0.40))
+
+
+def _color_near_threshold_recovery_eligible(
+    *,
+    detector_profile: str,
+    template: TemplateInfo,
+    variant: TemplateVariant,
+    roi_w: int,
+    roi_h: int,
+    roi_foreground: int,
+) -> bool:
+    if detector_profile != "color" or not COLOR_NEAR_THRESHOLD_RECOVERY_ENABLED:
+        return False
+    if template.dominant_hsv is None:
+        return False
+    if variant.scale < 0.90:
+        return False
+    variant_area = int(variant.width) * int(variant.height)
+    if (
+        variant_area < int(COLOR_NEAR_THRESHOLD_RECOVERY_MIN_TEMPLATE_AREA)
+        or variant_area > int(COLOR_NEAR_THRESHOLD_RECOVERY_MAX_TEMPLATE_AREA)
+    ):
+        return False
+    if int(roi_w) * int(roi_h) > int(COLOR_NEAR_THRESHOLD_RECOVERY_MAX_ROI_AREA):
+        return False
+    aspect = max(
+        float(variant.width) / max(1.0, float(variant.height)),
+        float(variant.height) / max(1.0, float(variant.width)),
+    )
+    if aspect > float(COLOR_NEAR_THRESHOLD_RECOVERY_MAX_ASPECT):
+        return False
+    return roi_foreground >= 1
+
+
+def _color_recovery_variant_enabled(template: TemplateInfo, variant: TemplateVariant) -> bool:
+    if template.dominant_hsv is None or variant.scale < 0.90:
+        return False
+    variant_area = int(variant.width) * int(variant.height)
+    if (
+        variant_area < int(COLOR_NEAR_THRESHOLD_RECOVERY_MIN_TEMPLATE_AREA)
+        or variant_area > int(COLOR_NEAR_THRESHOLD_RECOVERY_MAX_TEMPLATE_AREA)
+    ):
+        return False
+    aspect = max(
+        float(variant.width) / max(1.0, float(variant.height)),
+        float(variant.height) / max(1.0, float(variant.width)),
+    )
+    return 1.15 <= aspect <= float(COLOR_NEAR_THRESHOLD_RECOVERY_MAX_ASPECT)
 
 
 def _is_compact_text_diagonal_variant(
@@ -328,6 +386,7 @@ def scan_template_candidates(
                 "rawPeaks": 0,
                 "nearThresholdCandidates": 0,
                 "interruptedRecoveryCandidates": 0,
+                "colorRecoveryCandidates": 0,
                 "contentCalls": 0,
                 "contentRawPeaks": 0,
                 "emittedHits": 0,
@@ -348,6 +407,7 @@ def scan_template_candidates(
         too_many_peaks = False
         near_threshold_peaks = 0
         interrupted_recovery_peaks = 0
+        color_recovery_peaks = 0
         min_roi_foreground = (
             variant.pixel_count * float(GRAY_SCAN_MIN_ROI_FOREGROUND_RATIO)
             if detector_profile == "gray"
@@ -517,6 +577,90 @@ def scan_template_candidates(
                             stats["interruptedRecoveryCandidates"] += len(recovery_candidates)
                         variant_peaks.extend(
                             (roi_x + px, roi_y + py, score, INTERRUPTED_RECOVERY_SOURCE)
+                            for px, py, score in recovery_candidates
+                        )
+            if _color_near_threshold_recovery_eligible(
+                detector_profile=detector_profile,
+                template=template,
+                variant=variant,
+                roi_w=roi_w,
+                roi_h=roi_h,
+                roi_foreground=roi_foreground,
+            ):
+                recovery_threshold = max(
+                    float(COLOR_NEAR_THRESHOLD_RECOVERY_MIN_MATCH),
+                    float(threshold) - float(COLOR_NEAR_THRESHOLD_RECOVERY_DELTA),
+                )
+                if recovery_threshold < threshold and color_recovery_peaks < int(
+                    COLOR_NEAR_THRESHOLD_RECOVERY_MAX_PER_VARIANT
+                ):
+                    recovery_candidates = [
+                        peak
+                        for peak in _find_local_maxima(
+                            match_result,
+                            threshold=recovery_threshold,
+                            template_width=variant.width,
+                            template_height=variant.height,
+                        )
+                        if peak[2] < threshold
+                    ]
+                    if len(recovery_candidates) < int(COLOR_NEAR_THRESHOLD_RECOVERY_MAX_PER_ROI):
+                        ys, xs = np.where(
+                            (match_result >= recovery_threshold) & (match_result < threshold)
+                        )
+                        if len(xs):
+                            existing_keys = {
+                                (int(px), int(py)) for px, py, _score in recovery_candidates
+                            }
+                            dense_candidates = sorted(
+                                (
+                                    (int(px), int(py), float(match_result[int(py), int(px)]))
+                                    for px, py in zip(xs, ys)
+                                    if (int(px), int(py)) not in existing_keys
+                                ),
+                                key=lambda item: item[2],
+                                reverse=True,
+                            )
+                            recovery_candidates.extend(
+                                dense_candidates[
+                                    : max(
+                                        0,
+                                        int(COLOR_NEAR_THRESHOLD_RECOVERY_MAX_PER_ROI)
+                                        - len(recovery_candidates),
+                                    )
+                                ]
+                            )
+                    if peaks and recovery_candidates:
+                        min_dx = max(1.0, float(variant.width) * 0.70)
+                        min_dy = max(1.0, float(variant.height) * 0.70)
+                        recovery_candidates = [
+                            peak
+                            for peak in recovery_candidates
+                            if all(
+                                abs(peak[0] - normal_peak[0]) >= min_dx
+                                or abs(peak[1] - normal_peak[1]) >= min_dy
+                                for normal_peak in peaks
+                            )
+                        ]
+                    if len(recovery_candidates) > int(COLOR_NEAR_THRESHOLD_RECOVERY_MAX_PER_ROI):
+                        recovery_candidates = _select_spatially_fair_peaks(
+                            recovery_candidates,
+                            limit=int(COLOR_NEAR_THRESHOLD_RECOVERY_MAX_PER_ROI),
+                            template_width=variant.width,
+                            template_height=variant.height,
+                        )
+                    remaining = max(
+                        0,
+                        int(COLOR_NEAR_THRESHOLD_RECOVERY_MAX_PER_VARIANT)
+                        - color_recovery_peaks,
+                    )
+                    recovery_candidates = recovery_candidates[:remaining]
+                    if recovery_candidates:
+                        color_recovery_peaks += len(recovery_candidates)
+                        if stats is not None:
+                            stats["colorRecoveryCandidates"] += len(recovery_candidates)
+                        variant_peaks.extend(
+                            (roi_x + px, roi_y + py, score, COLOR_RECOVERY_SOURCE)
                             for px, py, score in recovery_candidates
                         )
             if not spatial_fair_peaks and len(variant_peaks) > MAX_PEAKS_PER_VARIANT:
