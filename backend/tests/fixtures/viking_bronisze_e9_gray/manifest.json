@@ -7,9 +7,20 @@
   "pdfPath": "test_pdfs/VIKING-BRONISZE-ELE-Rzuty-E9.pdf",
   "expectedProfile": "gray",
   "analyzeProfile": "auto",
+  "detectorProfile": "gray",
   "templatesDir": "templates",
   "golden": "backend/tests/golden/viking_bronisze_e9_gray_second_pdf_idealny.json",
   "templateCount": 17,
+  "extractTemplatesFresh": true,
+  "legendMaskMode": "gray",
+  "legendZone": {
+    "x": 383,
+    "y": 205,
+    "width": 3137,
+    "height": 2524
+  },
+  "legendZoneImage": "legend_zone.png",
+  "excludeLegendFromAnalysis": false,
   "focus": "01,02,03,04,07,08,11,12,13,14,15,16,17",
   "centerTolerance": 24,
   "sizeTolerance": 0.50,
@@ -34,6 +45,8 @@
     }
   ],
   "notes": [
+    "Regression extracts templates fresh from the PDF legend zone before detection.",
+    "The committed template PNGs remain a reference fixture for extraction shape/hash tests.",
     "E9 uses forbidden zones for text/title areas that create irrelevant OCR-like false detections.",
     "Latest accepted zone run matched the committed E9 golden 219/219.",
     "Do not tune detector thresholds to remove those text areas; keep them as layout exclusions."

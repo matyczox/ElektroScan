@@ -182,14 +182,37 @@ def _run_fixture(
         )
     print(f"Profile: recommended={recommended} expected={expected or '-'}")
 
-    _clear_templates(api_url, timeout)
-    template_count = _upload_templates(api_url, templates_dir, timeout)
+    if manifest.get("extractTemplatesFresh"):
+        legend_zone = manifest.get("legendZone")
+        if not isinstance(legend_zone, dict):
+            raise RegressionError(f"{name}: extractTemplatesFresh requires legendZone")
+        extraction_body = {
+            "detector_profile": manifest.get("detectorProfile", manifest.get("expectedProfile", "auto")),
+            "hidden_layers": manifest.get("hiddenLayers", []),
+            "legend_zone": legend_zone,
+            "excluded_zones": manifest.get("legendExtractionExcludedZones", []),
+        }
+        extracted = _request_json(
+            f"{api_url}/api/extract-legend?{urllib.parse.urlencode({'session_id': session_id})}",
+            method="POST",
+            payload=extraction_body,
+            timeout=timeout,
+        )
+        template_count = len(extracted.get("patterns") or [])
+        print(
+            "Fresh extracted templates: "
+            f"{template_count} mask={extracted.get('legendMaskMode', '-')}"
+        )
+    else:
+        _clear_templates(api_url, timeout)
+        template_count = _upload_templates(api_url, templates_dir, timeout)
     expected_templates = manifest.get("templateCount")
     if expected_templates is not None and int(expected_templates) != template_count:
         raise RegressionError(
             f"{name}: expected {expected_templates} templates, uploaded {template_count}"
         )
-    print(f"Uploaded templates: {template_count}")
+    if not manifest.get("extractTemplatesFresh"):
+        print(f"Uploaded templates: {template_count}")
 
     body = {
         "detector_profile": manifest.get("analyzeProfile", "auto"),
@@ -198,7 +221,7 @@ def _run_fixture(
         "hidden_layers": manifest.get("hiddenLayers", []),
         "excluded_zones": manifest.get("excludedZones", []),
     }
-    if manifest.get("legendZone") is not None:
+    if manifest.get("excludeLegendFromAnalysis") and manifest.get("legendZone") is not None:
         body["legend_zone"] = manifest["legendZone"]
     if manifest.get("planZone") is not None:
         body["plan_zone"] = manifest["planZone"]

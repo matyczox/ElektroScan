@@ -413,7 +413,7 @@ def test_gray_classic_legend_extraction_matches_e10_fixture_geometry(tmp_path):
         plan_image,
         output_dir=str(tmp_path),
         dpi=300,
-        legend_rect_px=(8800, 500, 1100, 950),
+        legend_rect_px=(8686, 351, 1042, 1215),
         mask_mode="gray",
     )
 

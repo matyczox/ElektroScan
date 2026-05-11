@@ -7,14 +7,26 @@
   "pdfPath": "test_pdfs/VIKING-BRONISZE-ELE-Rzuty-E8.pdf",
   "expectedProfile": "gray",
   "analyzeProfile": "auto",
+  "detectorProfile": "gray",
   "templatesDir": "templates",
   "golden": "backend/tests/golden/viking_bronisze_e8_gray_first_pdf_100pct.json",
   "templateCount": 7,
+  "extractTemplatesFresh": true,
+  "legendMaskMode": "gray",
+  "legendZone": {
+    "x": 8625,
+    "y": 275,
+    "width": 1221,
+    "height": 1177
+  },
+  "legendZoneImage": "legend_zone.png",
+  "excludeLegendFromAnalysis": true,
   "focus": "01,02,03,04,05,06,07",
   "centerTolerance": 20,
   "sizeTolerance": 0.45,
   "notes": [
-    "First accepted gray Viking baseline.",
-    "Templates copied from the accepted E8 backend/templates state."
+    "Regression extracts templates fresh from the PDF legend zone before detection.",
+    "The committed template PNGs remain a reference fixture for extraction shape/hash tests.",
+    "The golden excludes the legend area selected in the UI."
   ]
 }

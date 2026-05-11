@@ -11,12 +11,31 @@
   "templatesDir": "templates",
   "golden": "backend/tests/golden/viking_bronisze_e10_gray_third_pdf_accepted_90_95.json",
   "templateCount": 11,
+  "extractTemplatesFresh": true,
+  "legendMaskMode": "gray",
+  "legendZone": {
+    "x": 8686,
+    "y": 351,
+    "width": 1042,
+    "height": 1215
+  },
+  "legendZoneImage": "legend_zone.png",
+  "excludeLegendFromAnalysis": true,
+  "excludedZones": [
+    {
+      "x": 8854,
+      "y": 4209,
+      "width": 1266,
+      "height": 3055
+    }
+  ],
   "focus": "01,02,03,04,05,06,07,08,09,10,11",
   "centerTolerance": 28,
   "sizeTolerance": 0.55,
   "notes": [
-    "Templates copied from the accepted E10 legend extraction in the running backend container.",
-    "This fixture exists so regression tests do not depend on mutable backend/templates state.",
-    "E10 is an accepted 90-95 percent baseline; use forbidden/plan zones for title-block text noise instead of overfitting detector thresholds."
+    "Regression extracts templates fresh from the PDF legend zone before detection.",
+    "The committed template PNGs remain a reference fixture for extraction shape/hash tests.",
+    "The golden excludes the legend and the accepted right-side manual zone used in the demo UI.",
+    "E10 is an accepted demo baseline; do not tune detector thresholds to count symbols inside excluded zones."
   ]
 }

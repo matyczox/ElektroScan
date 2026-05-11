@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -19,7 +20,7 @@ if str(SCRIPT_DIR) not in sys.path:
 from compare_analysis_snapshot import compare_snapshots  # noqa: E402
 from core.detector import detect_symbols  # noqa: E402
 from core.detector_templates import load_templates  # noqa: E402
-from core.legend_extractor import pdf_to_png  # noqa: E402
+from core.legend_extractor import extract_legend, pdf_to_png  # noqa: E402
 
 
 DEFAULT_FIXTURES_DIR = REPO_ROOT / "backend" / "tests" / "fixtures"
@@ -81,6 +82,15 @@ def _detections_to_boxes(results: list[Any]) -> list[dict[str, Any]]:
     return boxes
 
 
+def _zone_to_rect(zone: dict[str, Any]) -> tuple[int, int, int, int]:
+    return (
+        int(zone["x"]),
+        int(zone["y"]),
+        int(zone["width"]),
+        int(zone["height"]),
+    )
+
+
 def _run_fixture(
     manifest_path: Path,
     manifest: dict[str, Any],
@@ -112,42 +122,74 @@ def _run_fixture(
     image = pdf_to_png(str(pdf_path), dpi=300)
     render_elapsed = time.perf_counter() - started
 
-    templates_started = time.perf_counter()
-    templates = load_templates(str(templates_dir))
-    templates_elapsed = time.perf_counter() - templates_started
-    expected_templates = manifest.get("templateCount")
-    if expected_templates is not None and int(expected_templates) != len(templates):
-        raise RuntimeError(
-            f"{name}: expected {expected_templates} templates, loaded {len(templates)}"
+    template_workdir: tempfile.TemporaryDirectory[str] | None = None
+    if manifest.get("extractTemplatesFresh"):
+        legend_zone = manifest.get("legendZone")
+        if not isinstance(legend_zone, dict):
+            raise RuntimeError(f"{name}: extractTemplatesFresh requires legendZone")
+        template_workdir = tempfile.TemporaryDirectory(prefix=f"{name}_templates_")
+        extraction_started = time.perf_counter()
+        extracted = extract_legend(
+            str(pdf_path),
+            image.copy(),
+            output_dir=template_workdir.name,
+            dpi=300,
+            legend_rect_px=_zone_to_rect(legend_zone),
+            mask_mode=str(
+                manifest.get("legendMaskMode")
+                or manifest.get("detectorProfile")
+                or manifest.get("expectedProfile")
+                or "gray"
+            ),
+        )
+        templates_dir = Path(template_workdir.name)
+        print(
+            "Fresh legend extraction: "
+            f"templates={len(extracted)} elapsed={time.perf_counter() - extraction_started:.2f}s"
         )
 
-    excluded_zones = [
-        (int(zone["x"]), int(zone["y"]), int(zone["width"]), int(zone["height"]))
-        for zone in manifest.get("excludedZones", [])
-    ]
-    debug_profile: dict[str, Any] = {
-        "performanceProfile": collect_performance_profile,
-    }
-    if trace_symbols or trace_points:
-        debug_profile["trace"] = {
-            "symbols": trace_symbols,
-            "points": trace_points,
-            "radius": trace_radius,
+    templates_started = time.perf_counter()
+    try:
+        templates = load_templates(str(templates_dir))
+        templates_elapsed = time.perf_counter() - templates_started
+        expected_templates = manifest.get("templateCount")
+        if expected_templates is not None and int(expected_templates) != len(templates):
+            raise RuntimeError(
+                f"{name}: expected {expected_templates} templates, loaded {len(templates)}"
+            )
+
+        excluded_zones = [_zone_to_rect(zone) for zone in manifest.get("excludedZones", [])]
+        legend_zone = manifest.get("legendZone")
+        if manifest.get("excludeLegendFromAnalysis") and isinstance(legend_zone, dict):
+            excluded_zones.append(_zone_to_rect(legend_zone))
+        debug_profile: dict[str, Any] = {
+            "performanceProfile": collect_performance_profile,
         }
-    if ablation:
-        debug_profile["ablation"] = ablation
-    detect_started = time.perf_counter()
-    results = detect_symbols(
-        image,
-        templates,
-        exclude_rects=excluded_zones,
-        pdf_path=str(pdf_path),
-        pdf_dpi=300,
-        detector_profile=str(manifest.get("detectorProfile") or manifest.get("expectedProfile") or "gray"),
-        debug_profile=debug_profile,
-        progress_callback=lambda *_args: None,
-    )
-    detect_elapsed = time.perf_counter() - detect_started
+        if trace_symbols or trace_points:
+            debug_profile["trace"] = {
+                "symbols": trace_symbols,
+                "points": trace_points,
+                "radius": trace_radius,
+            }
+        if ablation:
+            debug_profile["ablation"] = ablation
+        detect_started = time.perf_counter()
+        results = detect_symbols(
+            image,
+            templates,
+            exclude_rects=excluded_zones,
+            pdf_path=str(pdf_path),
+            pdf_dpi=300,
+            detector_profile=str(
+                manifest.get("detectorProfile") or manifest.get("expectedProfile") or "gray"
+            ),
+            debug_profile=debug_profile,
+            progress_callback=lambda *_args: None,
+        )
+        detect_elapsed = time.perf_counter() - detect_started
+    finally:
+        if template_workdir is not None:
+            template_workdir.cleanup()
 
     boxes = _detections_to_boxes(results)
     output_dir.mkdir(parents=True, exist_ok=True)
