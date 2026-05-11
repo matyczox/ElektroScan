@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
+
 import cv2
 import numpy as np
 
@@ -12,6 +15,8 @@ from core.legend_extractor import (
     _get_classic_row_label_text,
     _gray_row_symbol_bboxes,
     _get_row_label_text,
+    extract_legend,
+    pdf_to_png,
     _read_visual_symbol_code,
     _table_symbols_need_expansion,
     _trim_selection_to_table_grid,
@@ -336,3 +341,90 @@ def test_table_extraction_quality_flags_text_column_results():
     assert _table_symbols_need_expansion(bad_symbols) is True
     assert _table_symbols_need_expansion(tiny_single_text) is True
     assert _table_symbols_need_expansion(overgrown_plan_selection) is True
+
+
+def test_gray_legend_extraction_matches_e8_fixture_geometry(tmp_path):
+    repo_root = Path(__file__).resolve().parents[3]
+    pdf_path = repo_root / "test_pdfs" / "VIKING-BRONISZE-ELE-Rzuty-E8.pdf"
+    fixture_dir = repo_root / "backend" / "tests" / "fixtures" / "viking_bronisze_e8_gray" / "templates"
+
+    plan_image = pdf_to_png(str(pdf_path), dpi=300)
+    extract_legend(
+        str(pdf_path),
+        plan_image,
+        output_dir=str(tmp_path),
+        dpi=300,
+        legend_rect_px=(8625, 275, 1221, 1177),
+        mask_mode="gray",
+    )
+
+    generated = sorted(tmp_path.glob("*.png"))
+    fixtures = sorted(fixture_dir.glob("*.png"))
+    assert len(generated) == len(fixtures) == 7
+
+    exact_hash_indexes = {0, 1, 2, 3, 4, 6}
+    for index, (generated_path, fixture_path) in enumerate(zip(generated, fixtures)):
+        generated_image = cv2.imread(str(generated_path))
+        fixture_image = cv2.imread(str(fixture_path))
+        assert generated_image.shape[:2] == fixture_image.shape[:2]
+
+        if index in exact_hash_indexes:
+            assert hashlib.md5(generated_path.read_bytes()).hexdigest() == hashlib.md5(
+                fixture_path.read_bytes()
+            ).hexdigest()
+
+
+def test_gray_table_legend_extraction_matches_e9_fixture_geometry(tmp_path):
+    repo_root = Path(__file__).resolve().parents[3]
+    pdf_path = repo_root / "test_pdfs" / "VIKING-BRONISZE-ELE-Rzuty-E9.pdf"
+    fixture_dir = repo_root / "backend" / "tests" / "fixtures" / "viking_bronisze_e9_gray" / "templates"
+
+    plan_image = pdf_to_png(str(pdf_path), dpi=300)
+    extract_legend(
+        str(pdf_path),
+        plan_image,
+        output_dir=str(tmp_path),
+        dpi=300,
+        legend_rect_px=(383, 205, 3137, 2524),
+        mask_mode="gray",
+    )
+
+    generated = sorted(tmp_path.glob("*.png"))
+    fixtures = sorted(fixture_dir.glob("*.png"))
+    assert [path.name for path in generated] == [path.name for path in fixtures]
+
+    for generated_path, fixture_path in zip(generated, fixtures):
+        generated_image = cv2.imread(str(generated_path))
+        fixture_image = cv2.imread(str(fixture_path))
+        assert generated_image.shape[:2] == fixture_image.shape[:2]
+        assert hashlib.md5(generated_path.read_bytes()).hexdigest() == hashlib.md5(
+            fixture_path.read_bytes()
+        ).hexdigest()
+
+
+def test_gray_classic_legend_extraction_matches_e10_fixture_geometry(tmp_path):
+    repo_root = Path(__file__).resolve().parents[3]
+    pdf_path = repo_root / "test_pdfs" / "VIKING-BRONISZE-ELE-Rzuty-E10.pdf"
+    fixture_dir = repo_root / "backend" / "tests" / "fixtures" / "viking_bronisze_e10_gray" / "templates"
+
+    plan_image = pdf_to_png(str(pdf_path), dpi=300)
+    extract_legend(
+        str(pdf_path),
+        plan_image,
+        output_dir=str(tmp_path),
+        dpi=300,
+        legend_rect_px=(8800, 500, 1100, 950),
+        mask_mode="gray",
+    )
+
+    generated = sorted(tmp_path.glob("*.png"))
+    fixtures = sorted(fixture_dir.glob("*.png"))
+    assert len(generated) == len(fixtures) == 11
+
+    for generated_path, fixture_path in zip(generated, fixtures):
+        generated_image = cv2.imread(str(generated_path))
+        fixture_image = cv2.imread(str(fixture_path))
+        assert generated_image.shape[:2] == fixture_image.shape[:2]
+        assert hashlib.md5(generated_path.read_bytes()).hexdigest() == hashlib.md5(
+            fixture_path.read_bytes()
+        ).hexdigest()

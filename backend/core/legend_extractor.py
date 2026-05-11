@@ -523,10 +523,14 @@ def _gray_row_symbol_bboxes(
     if not row_spans:
         return symbol_mask, []
 
-    grouped_rows = _group_gray_row_spans(row_spans)
+    grouped_rows = (
+        _group_visual_gray_row_spans(row_spans)
+        if visual_row_spans
+        else _group_gray_row_spans(row_spans)
+    )
     centers = [row[2] for row in grouped_rows]
     bands: list[tuple[int, int]] = []
-    outer_padding = 8.0 if visual_row_spans else 34.0
+    outer_padding = 18.0 if visual_row_spans else 34.0
     for idx, row in enumerate(grouped_rows):
         row_top, row_bottom, _row_center = row
         if idx == 0:
@@ -625,6 +629,39 @@ def _group_gray_row_spans(
         previous_center = sum(item[2] for item in previous) / len(previous)
         previous_height = max(item[1] - item[0] for item in previous)
         if abs(span[2] - previous_center) <= max(26.0, previous_height * 1.8):
+            previous.append(span)
+        else:
+            grouped.append([span])
+
+    rows: list[tuple[float, float, float]] = []
+    for group in grouped:
+        top = min(item[0] for item in group)
+        bottom = max(item[1] for item in group)
+        center = sum(item[2] for item in group) / len(group)
+        rows.append((top, bottom, center))
+    return rows
+
+
+def _group_visual_gray_row_spans(
+    row_spans: list[tuple[float, float, float]],
+) -> list[tuple[float, float, float]]:
+    """Group raster-detected description fragments without merging adjacent legend rows."""
+
+    if not row_spans:
+        return []
+
+    ordered = sorted(row_spans, key=lambda item: item[2])
+    grouped: list[list[tuple[float, float, float]]] = []
+    for span in ordered:
+        if not grouped:
+            grouped.append([span])
+            continue
+        previous = grouped[-1]
+        previous_center = sum(item[2] for item in previous) / len(previous)
+        previous_height = max(item[1] - item[0] for item in previous)
+        current_height = span[1] - span[0]
+        max_gap = max(18.0, min(previous_height, current_height) * 1.25)
+        if abs(span[2] - previous_center) <= max_gap:
             previous.append(span)
         else:
             grouped.append([span])
@@ -1613,6 +1650,48 @@ def _table_symbol_images_look_valid(raw_symbols: list[tuple[np.ndarray, str]]) -
     return median_area <= 18000
 
 
+def _tighten_gray_legend_symbol_crop(symbol_image: np.ndarray) -> np.ndarray:
+    """
+    Remove empty cell/row padding introduced by gray legend extraction.
+
+    Accepted gray fixtures are learned from tight symbol crops. Later row/table
+    extraction paths kept an extra blank row/column from the selected region,
+    which changes template geometry enough to create misses and ghosts.
+    """
+
+    if symbol_image.size == 0:
+        return symbol_image
+
+    result = symbol_image
+
+    gray = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
+    dark = gray < 220
+    if result.shape[0] > 4 and int(dark[0, :].sum()) == 0 and int(dark[1, :].sum()) == 0:
+        result = result[1:, :]
+
+    gray = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
+    dark = gray < 220
+    if (
+        result.shape[1] > 4
+        and (result.shape[1] < 120 or result.shape[0] <= 60)
+        and int(dark[:, 0].sum()) == 0
+        and int(dark[:, 1].sum()) == 0
+    ):
+        result = result[:, 1:]
+
+    gray = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
+    dark = gray < 220
+    if (
+        result.shape[1] > 60
+        and int(dark[:, -1].sum()) == 0
+        and int(dark[:, -2].sum()) == 0
+        and int(dark[:, -3].sum()) == 0
+    ):
+        result = result[:, :-2]
+
+    return result
+
+
 def _trim_selection_to_table_grid(legend_area: np.ndarray) -> tuple[int, int, int, int] | None:
     """Find a table grid inside a user selection that includes surrounding plan margin."""
 
@@ -1670,6 +1749,7 @@ def _extract_table_legend_raw(
     scale: float,
     allow_description_labels: bool = True,
     allow_visual_index_labels: bool = False,
+    tighten_gray_table_crops: bool = False,
 ) -> list[tuple[np.ndarray, str]]:
     """Wyciąga symbole z legendy w formacie tabelarycznym (siatka z wierszami)."""
     h, w = legend_area.shape[:2]
@@ -1763,6 +1843,8 @@ def _extract_table_legend_raw(
         crop_gray = cv2.cvtColor(symbol_crop, cv2.COLOR_BGR2GRAY)
         dark_px = crop_gray < 200
         symbol_image[dark_px] = symbol_crop[dark_px]
+        if tighten_gray_table_crops:
+            symbol_image = _tighten_gray_legend_symbol_crop(symbol_image)
 
         label_source = text_words if text_words else text_blocks
         name = _get_row_symbol_code_text(
@@ -1812,6 +1894,128 @@ def _extract_table_legend_raw(
     return results
 
 
+def _extract_gray_table_legend_raw(
+    legend_area: np.ndarray,
+    text_blocks: list,
+    x_start: int,
+    y_start: int,
+    scale: float,
+) -> list[tuple[np.ndarray, str]]:
+    """Extract gray table legend symbols using the accepted legacy geometry."""
+
+    h, w = legend_area.shape[:2]
+    gray = cv2.cvtColor(legend_area, cv2.COLOR_BGR2GRAY)
+    _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
+
+    horiz_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(10, w // 2), 1))
+    horiz_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, horiz_kernel)
+    row_sums = horiz_lines.sum(axis=1)
+    line_threshold = w * 0.4 * 255
+    line_row_indices = np.where(row_sums >= line_threshold)[0]
+    row_boundaries = _merge_close_indices(line_row_indices, gap=5)
+
+    if len(row_boundaries) < 2:
+        return []
+
+    vert_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(10, h // 3)))
+    vert_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, vert_kernel)
+    col_sums = vert_lines.sum(axis=0)
+    col_threshold = h * 0.3 * 255
+    col_indices = np.where(col_sums >= col_threshold)[0]
+    col_boundaries = _merge_close_indices(col_indices, gap=5)
+
+    first_col_right = col_boundaries[0] if col_boundaries else max(20, int(w * 0.12))
+
+    row_spans = [
+        (row_boundaries[i], row_boundaries[i + 1])
+        for i in range(len(row_boundaries) - 1)
+        if row_boundaries[i + 1] - row_boundaries[i] >= 8
+    ]
+    if not row_spans:
+        return []
+
+    row_centers = [(top + bottom) / 2.0 for top, bottom in row_spans]
+    assigned_components: list[list[tuple[int, int, int, int]]] = [[] for _ in row_spans]
+    cell_right = max(5, first_col_right - 2)
+
+    symbol_strip = legend_area[:, 0:cell_right]
+    strip_gray = cv2.cvtColor(symbol_strip, cv2.COLOR_BGR2GRAY)
+    strip_mask = (strip_gray < 200).astype(np.uint8) * 255
+    if symbol_strip.shape[1] > CELL_BORDER_TRIM * 4:
+        strip_mask[:, :CELL_BORDER_TRIM] = 0
+        strip_mask[:, -CELL_BORDER_TRIM:] = 0
+
+    component_count, _labels, stats, centroids = cv2.connectedComponentsWithStats(strip_mask, 8)
+    for component_index in range(1, component_count):
+        cx = int(stats[component_index, cv2.CC_STAT_LEFT])
+        cy = int(stats[component_index, cv2.CC_STAT_TOP])
+        cw = int(stats[component_index, cv2.CC_STAT_WIDTH])
+        ch = int(stats[component_index, cv2.CC_STAT_HEIGHT])
+        area = int(stats[component_index, cv2.CC_STAT_AREA])
+        if area < 4 or cw < 2 or ch < 2:
+            continue
+
+        component_center_y = float(centroids[component_index][1])
+        nearest_row = min(
+            range(len(row_centers)),
+            key=lambda index: abs(component_center_y - row_centers[index]),
+        )
+        row_top, row_bottom = row_spans[nearest_row]
+        row_height = row_bottom - row_top
+        if not (
+            row_top - row_height * 0.45 <= component_center_y <= row_bottom + row_height * 0.45
+        ):
+            continue
+
+        assigned_components[nearest_row].append((cx, cy, cw, ch))
+
+    results: list[tuple[np.ndarray, str]] = []
+    counter = 1
+
+    for (row_top, row_bottom), components in zip(row_spans, assigned_components):
+        if not components:
+            continue
+
+        x1 = min(cx for cx, _cy, _cw, _ch in components)
+        y1 = min(cy for _cx, cy, _cw, _ch in components)
+        x2 = max(cx + cw for cx, _cy, cw, _ch in components)
+        y2 = max(cy + ch for _cx, cy, _cw, ch in components)
+        if x2 - x1 < 3 or y2 - y1 < 3:
+            continue
+
+        pad = 4
+        sx1 = max(0, x1 - pad)
+        sy1 = max(0, y1 - pad)
+        sx2 = min(symbol_strip.shape[1], x2 + pad)
+        sy2 = min(symbol_strip.shape[0], y2 + pad)
+
+        symbol_crop = symbol_strip[sy1:sy2, sx1:sx2]
+        if symbol_crop.size == 0:
+            continue
+
+        symbol_image = np.full_like(symbol_crop, 255)
+        crop_gray = cv2.cvtColor(symbol_crop, cv2.COLOR_BGR2GRAY)
+        dark_px = crop_gray < 200
+        symbol_image[dark_px] = symbol_crop[dark_px]
+
+        name = _get_row_index_text(
+            text_blocks,
+            x_start,
+            y_start,
+            scale,
+            row_top,
+            row_bottom,
+            first_col_right,
+        )
+        if not name:
+            name = f"sym_{counter:02d}"
+
+        results.append((symbol_image, name))
+        counter += 1
+
+    return results
+
+
 def _extract_left_gutter_table_legend_raw(
     legend_area: np.ndarray,
     table_trim: tuple[int, int, int, int],
@@ -1820,6 +2024,7 @@ def _extract_left_gutter_table_legend_raw(
     x_start: int,
     y_start: int,
     scale: float,
+    tighten_gray_table_crops: bool = False,
 ) -> tuple[list[tuple[np.ndarray, str]], tuple[int, int, int, int]] | None:
     """Extract table legend symbols when the symbol column sits left of the grid."""
 
@@ -1845,6 +2050,7 @@ def _extract_left_gutter_table_legend_raw(
         scale,
         allow_description_labels=False,
         allow_visual_index_labels=True,
+        tighten_gray_table_crops=tighten_gray_table_crops,
     )
     if not _table_symbol_images_look_valid(raw_symbols):
         return None
@@ -2046,6 +2252,36 @@ def extract_legend(
     legend_format = _detect_legend_format(legend_area)
 
     if legend_format == "table":
+        _probe_mask, table_mask_used = _legend_symbol_mask(legend_area, mask_mode=mask_mode)
+        if table_mask_used == "gray":
+            raw_symbols = _extract_gray_table_legend_raw(
+                legend_area,
+                text_blocks,
+                x_start,
+                y_start,
+                scale,
+            )
+            if raw_symbols:
+                output_path = Path(output_dir)
+                output_path.mkdir(parents=True, exist_ok=True)
+                results: list[ExtractedSymbol] = []
+                start_index = _next_template_index(output_path)
+                for counter, (symbol_image, name) in enumerate(raw_symbols, start=start_index):
+                    filename = f"{counter:02d}_{name}.png"
+                    ok, buf = cv2.imencode(".png", symbol_image)
+                    if ok:
+                        (output_path / filename).write_bytes(buf.tobytes())
+                    px_count = int(np.sum(cv2.cvtColor(symbol_image, cv2.COLOR_BGR2GRAY) < 180))
+                    results.append(
+                        ExtractedSymbol(
+                            name=name,
+                            image=symbol_image,
+                            index=counter,
+                            pixel_count=px_count,
+                        )
+                    )
+                return (results, used_legend_rect_px) if return_used_rect else results
+
         original_legend_area = legend_area
         original_x_start = x_start
         original_y_start = y_start
@@ -2058,7 +2294,13 @@ def extract_legend(
             used_legend_rect_px = (x_start, y_start, tw, th)
 
         raw_symbols = _extract_table_legend_raw(
-            legend_area, text_blocks, text_words, x_start, y_start, scale
+            legend_area,
+            text_blocks,
+            text_words,
+            x_start,
+            y_start,
+            scale,
+            tighten_gray_table_crops=mask_mode == "gray",
         )
         table_needs_expansion = _table_symbols_need_expansion(raw_symbols)
         if table_needs_expansion:
@@ -2072,6 +2314,7 @@ def extract_legend(
                     original_x_start,
                     original_y_start,
                     scale,
+                    tighten_gray_table_crops=mask_mode == "gray",
                 )
                 if gutter_result is not None:
                     raw_symbols, gutter_trim = gutter_result
@@ -2113,6 +2356,7 @@ def extract_legend(
     # 2. Maska kolorowa + morphological CLOSE (klejenie symboli)
     raw_symbol_mask, _mask_used = _legend_symbol_mask(legend_area, mask_mode=mask_mode)
     row_label_hints: dict[tuple[int, int, int, int], str] = {}
+    tighten_gray_row_crops = False
     if _mask_used == "gray":
         symbol_mask, row_bboxes = _gray_row_symbol_bboxes(
             raw_symbol_mask,
@@ -2123,6 +2367,7 @@ def extract_legend(
         )
         if row_bboxes:
             contours = [_rect_to_contour(rect) for rect in row_bboxes]
+            tighten_gray_row_crops = True
         else:
             glued_mask = cv2.morphologyEx(symbol_mask, cv2.MORPH_CLOSE, GLUE_KERNEL)
             contours, _ = cv2.findContours(glued_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -2201,6 +2446,8 @@ def extract_legend(
         )
         # Kopiujemy TYLKO kolorowe piksele — reszta zostaje czarna
         symbol_image[mask_roi > 0] = color_roi[mask_roi > 0]
+        if tighten_gray_row_crops:
+            symbol_image = _tighten_gray_legend_symbol_crop(symbol_image)
 
         if symbol_image.size == 0:
             continue
