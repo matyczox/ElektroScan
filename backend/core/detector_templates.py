@@ -76,6 +76,55 @@ def _derive_text_tokens(name: str) -> list[str]:
     return [candidate]
 
 
+def _is_color_symbol_core_misread_as_label(
+    mask: np.ndarray,
+    content_mask: np.ndarray | None,
+    *,
+    foreground_pixels: int,
+) -> bool:
+    """Detect pictogram symbols whose central shape looks like label content.
+
+    Some colored legend symbols are composed of a compact core plus an attached
+    marker line. A one-pixel crop difference can make the content extractor keep
+    the core and drop the marker, turning e.g. an X-with-tail symbol into a
+    text-label-like plain X. Treat those as normal pictograms so they compete
+    against their neighboring plain symbols with the full geometry.
+    """
+
+    if content_mask is None or foreground_pixels <= 0:
+        return False
+
+    mask_bbox = _mask_bbox(mask)
+    content_bbox = _mask_bbox(content_mask)
+    if mask_bbox is None or content_bbox is None:
+        return False
+
+    _mx, _my, mask_width, mask_height = mask_bbox
+    _cx, _cy, content_width, content_height = content_bbox
+    if mask_width <= 0 or mask_height <= 0 or content_width <= 0 or content_height <= 0:
+        return False
+
+    content_aspect = max(
+        content_width / max(1, content_height),
+        content_height / max(1, content_width),
+    )
+    full_aspect = max(
+        mask_width / max(1, mask_height),
+        mask_height / max(1, mask_width),
+    )
+    content_ratio = int(cv2.countNonZero(content_mask)) / max(1, foreground_pixels)
+    content_width_ratio = content_width / max(1, mask_width)
+    content_height_ratio = content_height / max(1, mask_height)
+
+    return (
+        full_aspect >= 1.35
+        and content_aspect <= 1.30
+        and content_width_ratio >= 0.78
+        and content_height_ratio <= 0.66
+        and content_ratio >= 0.30
+    )
+
+
 def _prepare_variants(
     template_id: int,
     template: TemplateInfo,
@@ -371,6 +420,16 @@ def load_templates(folder: str) -> list[TemplateInfo]:
 
         content_mask = _extract_label_content_mask(precise_mask)
         content_pixel_count = int(cv2.countNonZero(content_mask)) if content_mask is not None else 0
+        if (
+            not is_gray_template
+            and _is_color_symbol_core_misread_as_label(
+                precise_mask,
+                content_mask,
+                foreground_pixels=int(cv2.countNonZero(precise_mask)),
+            )
+        ):
+            content_mask = None
+            content_pixel_count = 0
         if content_mask is not None:
             requires_precision = False
 

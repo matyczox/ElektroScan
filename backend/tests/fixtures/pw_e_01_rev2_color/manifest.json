@@ -3,18 +3,21 @@
   "enabled": true,
   "pdfPath": "PW-E-01 Rev2 (1).pdf",
   "templatesDir": "templates",
+  "extractTemplatesFresh": true,
+  "legendMaskMode": "color",
+  "legendZone": {
+    "x": 3369,
+    "y": 287,
+    "width": 1297,
+    "height": 1595
+  },
+  "legendZoneImage": "legend_zone.png",
+  "excludeLegendFromAnalysis": true,
   "golden": "../../golden/pw_e_01_rev2_color_demo.json",
   "detectorProfile": "color",
   "expectedProfile": "color",
   "templateCount": 22,
-  "excludedZones": [
-    {
-      "x": 3408,
-      "y": 382,
-      "width": 1404,
-      "height": 1532
-    }
-  ],
+  "excludedZones": [],
   "focus": "02,06,07,09,10,11,12,13,18,19,20",
   "centerTolerance": 18,
   "sizeTolerance": 0.4
