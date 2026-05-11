@@ -2,6 +2,33 @@
 
 Ten plik służy do logowania ważnych zmian i decyzji projektowych. Nie zastępuje git log — tu trafia kontekst, który nie jest oczywisty z kodu ani historii commitów.
 
+## 2026-05-11 — Projekty stabilne po powrocie i kompletna legenda
+
+**Dotyczy:** `backend/main.py`, `backend/core/legend_extractor.py`,
+`backend/Dockerfile`, `frontend/src/App.tsx`,
+`frontend/src/components/CanvasView.tsx`,
+`frontend/src/components/LegendReviewPanel.tsx`,
+`frontend/src/components/ResultsPanel.tsx`,
+`frontend/src/symbolLabels.ts`, OpenSpec
+
+- Powrót do istniejącego projektu przywraca podgląd PDF, warstwy, zaznaczoną
+  legendę, wzorce i ostatnią zakończoną analizę. Wyjście z projektu nie kasuje
+  ani nie anuluje trwającej analizy.
+- Projekt z już zaznaczoną i sprawdzoną legendą może od razu uruchomić analizę
+  planu po ponownym wejściu.
+- Usunięto wymóg weryfikacji e-mail z flow auth.
+- Poprawiono ekstrakcję legend gray/raster: opisy mogą być czytane przez
+  Tesseract OCR, a nazwy są normalizowane do czytelnych etykiet zamiast
+  `nieznany_symbol`.
+- Poprawiono legendy tabelaryczne i klasyczne: `C1`/`D1` trzymają właściwy
+  kwadrat, `GSW`/`MSW` nie przejmują nazw z sąsiednich wierszy, a pary typu
+  `A + kółko` oraz `B + kwadrat` nie są mieszane.
+- Dodano przyjazne etykiety i ręczną zmianę nazw w wynikach oraz panelu
+  review; stare zapisane złe wzorce mogą wymagać ponownego wyciągnięcia legendy.
+- Nie dodano żadnych reguł po koordynatach konkretnego PDF.
+- Weryfikacja po zmianach: backend unit `74 passed`, frontend vitest
+  `18 passed`, frontend build OK.
+
 ## 2026-05-10 — Nazwy wzorców z tekstu legendy i poprawka edycji projektów
 
 **Dotyczy:** `backend/core/legend_extractor.py`,

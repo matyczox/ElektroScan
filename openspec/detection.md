@@ -68,6 +68,22 @@ Przykłady symboli label: `TM`, `TAB`, `TSM`, `MSW`, `GSW`, `INT`, `TV`
 - Nie bazować na PDF text layer — produkcyjnie wejście może być skanem/zdjęciem.
 - Nie agresywnie zmieniać `content_mask` bez sprawdzenia regresji MSW/GSW.
 
+## Nazewnictwo Wzorców Legendy
+
+Nazwy wzorców po ekstrakcji legendy są częścią jakości detekcji, bo przechodzą
+do wyników analizy i panelu korekty.
+
+Aktualna kolejność źródeł nazwy:
+
+1. Opis tekstowy z tego samego wiersza legendy.
+2. OCR opisu, jeżeli tekst PDF nie jest dostępny albo legenda jest rastrowa.
+3. Krótki indeks symbolu (`A`, `B`, `D1`, `GSW`, `MSW`) jako indeks/fallback.
+4. Czytelny fallback UI/backend zamiast surowego `nieznany_symbol`.
+
+Ważne: nie tworzyć słownika pod jeden PDF. Przypadki typu `A + kółko` oraz
+`B + kwadrat` mają być rozwiązane przez grupowanie komponentów i wierszy, nie
+przez kolejność elementów na konkretnym screenie.
+
 ## Rodzinne Promocje
 
 Mechanizm w `backend/core/detector_promotions.py`. Mniejszy rdzeń (`child/core`) może zostać podniesiony do pełniejszego symbolu (`parent`), jeśli template'y są w relacji zawierania.

@@ -7,8 +7,8 @@
 | Docker | ✅ Wdrożone | `backend/Dockerfile`, `frontend/Dockerfile`, `docker-compose.yml` |
 | Linting Python | ✅ Wdrożone | black + isort + flake8, 0 błędów. mypy skonfigurowany, nie w CI (patrz niżej) |
 | Linting Frontend | ✅ Wdrożone | ESLint + TS + Prettier, `eslint-config-prettier` |
-| Testy backend | ✅ Wdrożone | 43 testy w `backend/tests/unit/`, pytest + pytest-cov |
-| Testy frontend | ✅ Wdrożone | 14 testów w `frontend/src/tests/`, vitest + testing-library |
+| Testy backend | ✅ Wdrożone | 74 testy w `backend/tests/unit/`, pytest + pytest-cov |
+| Testy frontend | ✅ Wdrożone | 18 testów w `frontend/src/tests/`, vitest + testing-library |
 | GitHub Actions | ✅ Wdrożone | `.github/workflows/ci.yml`, 5 jobów, aktywne po push na GitHub |
 
 ### Uwaga o mypy
@@ -46,6 +46,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 \
     libfontconfig1 \
     libfreetype6 \
+    tesseract-ocr \
+    tesseract-ocr-eng \
+    tesseract-ocr-pol \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -94,6 +97,7 @@ services:
       - backend_uploads:/app/uploads
       - backend_templates:/app/templates
       - backend_debug:/app/analysis_debug
+      - backend_data:/app/data
     environment:
       - ELEKTROSCAN_OPENCV_THREADS=1
     restart: unless-stopped
@@ -114,6 +118,7 @@ volumes:
   backend_uploads:
   backend_templates:
   backend_debug:
+  backend_data:
 ```
 
 ### Uruchomienie
@@ -148,7 +153,13 @@ dist/
 
 ### Uwaga o volumes
 
-`templates/` i `uploads/` są w `.gitignore` (słusznie), ale Docker potrzebuje ich persystencji między restartami — stąd named volumes. Przy pierwszym `docker compose up` volumes będą puste; wzorce trzeba załadować przez UI lub skopiować ręcznie:
+`templates/`, `uploads/`, `analysis_debug/` i `data/` są w `.gitignore`
+(słusznie), ale Docker potrzebuje ich persystencji między restartami — stąd
+named volumes. Nowy flow projektów zapisuje najważniejsze dane w
+`/app/data/projects/{project_id}/`.
+
+Przy pierwszym `docker compose up` legacy globalne volumes będą puste; wzorce
+najlepiej załadować przez UI. Ręczne kopiowanie jest tylko awaryjne:
 ```bash
 docker compose cp ./backend/templates/. backend:/app/templates/
 ```

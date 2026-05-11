@@ -1,52 +1,63 @@
 # ElektroScan - OpenSpec
 
-Katalog `openspec/` trzyma dokumentacje projektu dla ludzi i AI.
+Katalog `openspec/` trzyma dokumentację projektu dla ludzi i AI. Jeżeli dwa
+pliki mówią co innego, najpierw ufaj `current-context.md`, potem temu plikowi,
+a dopiero potem historycznym planom.
 
 ## Najpierw Czytaj
 
-1. [current-context.md](current-context.md) - aktualny stan pracy, rozdzial
-   color/gray, zasady bezpieczenstwa i kierunek dla szarych PDF.
-2. [architecture.md](architecture.md) - szersza architektura projektu.
-3. [workflow.md](workflow.md) - jak uruchamiac i testowac projekt.
-
-Jesli starsze pliki sa sprzeczne z `current-context.md`, traktuj
-`current-context.md` jako aktualniejsze zrodlo prawdy.
+1. [current-context.md](current-context.md) - aktualny stan pracy, zasady
+   bezpieczeństwa, auth/projekty, legenda i detektor.
+2. [architecture.md](architecture.md) - szersza architektura backendu,
+   frontendu i pipeline detekcji.
+3. [workflow.md](workflow.md) - jak uruchamiać, testować i debugować projekt.
+4. [api.md](api.md) - endpointy i kontrakty odpowiedzi.
 
 ## Pliki
 
-| Plik | Zawartosc |
+| Plik | Zawartość |
 | --- | --- |
 | [current-context.md](current-context.md) | Aktualny kontekst roboczy dla AI |
-| [gray-dark-ink-plan.md](gray-dark-ink-plan.md) | Plan zmiany dla szarych PDF: dark ink zones |
 | [architecture.md](architecture.md) | Struktura projektu i pipeline detektora |
-| [detection.md](detection.md) | Metryki detekcji, walidacja, promocje |
 | [api.md](api.md) | Endpointy API i formaty odpowiedzi |
-| [performance.md](performance.md) | Wydajnosc, env vars, diagnostyka |
-| [known-issues.md](known-issues.md) | Znane problemy i przypadki regresyjne |
 | [workflow.md](workflow.md) | Uruchamianie, testowanie, praca z AI |
-| [legend-manual-table-plan.md](legend-manual-table-plan.md) | Plan recznego zaznaczania legendy i obslugi legend tabelarycznych |
-| [legend-review-plan.md](legend-review-plan.md) | Plan przegladu, akceptacji i recznej korekty wzorcow legendy |
+| [detection.md](detection.md) | Metryki detekcji, walidacja, promocje |
+| [known-issues.md](known-issues.md) | Znane problemy i przypadki regresyjne |
+| [performance.md](performance.md) | Wydajność, env vars, diagnostyka |
 | [decisions.md](decisions.md) | Decyzje architektoniczne i inwarianty |
 | [devops.md](devops.md) | Docker, CI, lint, testy |
 | [changelog.md](changelog.md) | Historia zmian |
+| [gray-dark-ink-plan.md](gray-dark-ink-plan.md) | Plan historyczny dla szarych PDF: dark ink zones |
+| [legend-manual-table-plan.md](legend-manual-table-plan.md) | Plan ręcznego zaznaczania legendy i tabel |
+| [legend-review-plan.md](legend-review-plan.md) | Plan przeglądu i korekty wzorców legendy |
+
+## Aktualne Środowisko
+
+- Workspace: `/Users/jakublewosz/Code/matiprojekt`
+- Gałąź demo/produkcyjna: `main`
+- Backend: `http://127.0.0.1:8000`
+- Frontend: `http://127.0.0.1:5173`
+- Zalecane uruchomienie: `docker compose up -d --build`
 
 ## Goldeny
 
-Committed snapshoty regresyjne sa w `backend/tests/golden/`.
+Committed snapshoty regresyjne są w `backend/tests/golden/`.
 
 - `viking_bronisze_e8_gray_first_pdf_100pct.json` - pierwszy szary PDF
   zaakceptowany jako 100% dla aktualnego celu.
 
-`backend/analysis_debug/` jest tylko lokalna diagnostyka i nie powinien trafic
-do commita.
+`backend/analysis_debug/` oraz `backend/data/projects/*/analysis_debug/` są
+lokalną diagnostyką i nie powinny trafiać do commita.
 
 ## Minimalny Prompt Dla Nowego AI
 
 ```text
-Pracujesz w C:\Users\Admin\Desktop\elektroskan_claude. Najpierw przeczytaj
-openspec/current-context.md. Detektor ma rozdzielone wejscia color/gray, ale
-wciaz ma wspolny pipeline. Nie hardcoduj koordynat ani nazw symboli. Gray PDF
-tunuj tylko w gray-only sciezce. Kolorowy silnik ma zostac szybki i nietkniety.
-Do diagnozy brakow uzywaj Inspektora ROI, nie przywracaj starego panelu
-"Pokaz niepewne/brakujace".
+Pracujesz w /Users/jakublewosz/Code/matiprojekt. Najpierw przeczytaj
+openspec/current-context.md. Projekt ma auth, dashboard projektów i endpointy
+projektowe /api/projects/{project_id}/...; legacy endpointy bez project_id są
+tylko fallbackiem dev. Nie hardcoduj koordynat ani nazw symboli pod jeden PDF.
+Legenda działa przez zaznaczenie, review wzorców, OCR opisów i ręczną korektę.
+Detektor ma rozdzielone wejścia color/gray i wspólny pipeline. Do diagnozy
+używaj Inspektora ROI oraz testów, nie przywracaj starego panelu debugCandidates
+jako domyślnej funkcji UI.
 ```

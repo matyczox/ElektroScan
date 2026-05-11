@@ -4,6 +4,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 \
     libfontconfig1 \
     libfreetype6 \
+    tesseract-ocr \
+    tesseract-ocr-eng \
+    tesseract-ocr-pol \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

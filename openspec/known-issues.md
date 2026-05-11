@@ -2,6 +2,30 @@
 
 Znane problemy nie są powodem do panicznego overfitu. Podejście: zebrać dane, zrozumieć, dopiero potem zmieniać.
 
+## Aktualne Ryzyka Po Ostatnich Poprawkach
+
+- OCR opisów legendy jest best-effort. Jeżeli PDF ma bardzo słabą jakość albo
+  nietypową typografię, użytkownik nadal musi móc poprawić nazwę w
+  `LegendReviewPanel`.
+- Stare wzorce zapisane przed poprawkami mogą dalej mieć złą nazwę. Nie
+  migrujemy ich magicznie; zalecane jest ponowne wyciągnięcie legendy albo
+  ręczna zmiana nazwy.
+- Nie dodawać wyjątków po koordynatach. Ostatnie poprawki dla `C1/D1`,
+  `GSW/MSW` oraz `A/B` zostały zrobione przez ogólne grupowanie wierszy,
+  komponentów i tekstu.
+- Powrót do projektu musi odtwarzać canvas, wzorce i analizę. Czarny ekran po
+  powrocie albo zablokowana analiza przy sprawdzonej legendzie to regresja.
+
+## Legendy — Przypadki Do Pilnowania
+
+| PDF / typ | Oczekiwane zachowanie | Ryzyko regresji |
+| --- | --- | --- |
+| Viking gray / raster | Wzorce dostają czytelne nazwy z OCR/opisu, nie `nieznany_symbol` | Brak Tesseract albo za agresywne czyszczenie OCR |
+| Viking tabela C1/D1 | Kwadrat i indeks `C1`/`D1` są w tym samym cropie i mają właściwą nazwę | Crop brany z granic komórki zamiast komponentów |
+| PW-E-02 kolor | `GSW` i `MSW` mają własne opisy, bez przejęcia sąsiedniego wiersza | Tekst przypisany po najbliższym x zamiast po wierszu |
+| PW-E-02 kolor | `A + kółko` oraz `B + kwadrat` są osobnymi wzorcami | Litera `B` wpada do cropu `A` albo odwrotnie |
+| Kolorowe klasyczne legendy | Symbol tekstowy i grafika z jednego wiersza są grupowane razem | Zbyt szerokie merge komponentów |
+
 ## Złote Przypadki Regresyjne
 
 Te przypadki są ważniejsze niż "średnie wrażenie z UI". Jeżeli któryś się zmienia, trzeba rozumieć dlaczego.
@@ -109,3 +133,13 @@ Sprawdzać:
 - Golden: `backend/tests/golden/viking_bronisze_e8_gray_first_pdf_100pct.json`.
 - Oczekiwany rozklad goldena: `01:7, 02:8, 03:11, 04:12, 05:13, 06:14, 07:16`.
 - Ten baseline nie oznacza, ze inne szare PDF sa gotowe.
+
+### `PW-E-02 Rev2.pdf` — kolorowa legenda klasyczna
+
+- Ekstrakcja legendy powinna zwrócić około `22` wzorce dla aktualnego znanego
+  przykładu.
+- `GSW` i `MSW` muszą dostać właściwe opisy z własnych wierszy.
+- Element `A + kółko` nie może zawierać fragmentu `B`.
+- Element `B + kwadrat` musi zawierać literę `B` i zielony kwadrat razem.
+- Jeśli nazwy wyglądają jak OCR-owy bełkot, najpierw sprawdzić przypisanie
+  tekstu do wierszy, nie dopisywać mapy po kolejności.

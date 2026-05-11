@@ -11,7 +11,11 @@ import {
 import { Sidebar } from './components/Sidebar';
 import { CanvasView } from './components/CanvasView';
 import { ResultsPanel } from './components/ResultsPanel';
-import { LegendReviewPanel, type LegendReviewItem } from './components/LegendReviewPanel';
+import {
+  LegendReviewPanel,
+  type LegendReviewItem,
+  type LegendReviewStatus,
+} from './components/LegendReviewPanel';
 import './index.css';
 
 const getPatternKey = (pattern: Pick<Pattern, 'id' | 'name'>) => pattern.id ?? pattern.name;
@@ -238,8 +242,12 @@ function App() {
   };
 
   const resetWorkspaceState = () => {
+    previewRenderSeqRef.current += 1;
+    setIsProcessing(false);
+    setProgressText('');
     setFile(null);
     setPdfPreview(null);
+    setPreviewMeta(null);
     setPatterns([]);
     setLegendReviewItems([]);
     setIsLegendReviewOpen(false);
@@ -371,38 +379,62 @@ function App() {
 
   const restoreProjectWorkspace = async (project: ProjectSummary) => {
     if (!project.latestSessionId) return;
+    const renderSeq = ++previewRenderSeqRef.current;
     setIsProcessing(true);
     setProgressText('Ładowanie ostatniego podglądu...');
     try {
-      setSessionId(project.latestSessionId);
+      const latestSessionId = project.latestSessionId;
+      setSessionId(latestSessionId);
+      setPreviewMeta(null);
       const [previewResponse, layersResponse] = await Promise.all([
-        apiFetch(projectApiPath(project.id, `/render-preview?session_id=${project.latestSessionId}`), {
+        apiFetch(projectApiPath(project.id, `/render-preview?session_id=${latestSessionId}`), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ hidden_layers: [] }),
+          body: JSON.stringify({ hidden_layers: [], preview: true }),
         }),
-        apiFetch(projectApiPath(project.id, `/layers?session_id=${project.latestSessionId}`)),
+        apiFetch(projectApiPath(project.id, `/layers?session_id=${latestSessionId}`)),
       ]);
 
+      if (renderSeq !== previewRenderSeqRef.current) return;
       if (previewResponse.ok) {
         const previewData = await previewResponse.json();
         setPdfPreview(previewData.planPreview || null);
+        setPreviewMeta(readPreviewMeta(previewData));
         setPdfDiagnostics(previewData.pdfDiagnostics || null);
       }
       if (layersResponse.ok) {
         const layersData = await layersResponse.json();
         setLayers(layersData.layers || []);
       }
-      await restoreLatestProjectAnalysis(project.id, project.latestSessionId);
+      void apiFetch(projectApiPath(project.id, `/render-preview?session_id=${latestSessionId}`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hidden_layers: [] }),
+      })
+        .then(response => response.ok ? response.json() : null)
+        .then(fullData => {
+          if (!fullData || renderSeq !== previewRenderSeqRef.current) return;
+          setPdfPreview(fullData.planPreview || null);
+          setPreviewMeta(readPreviewMeta(fullData));
+          setPdfDiagnostics(fullData.pdfDiagnostics || null);
+        })
+        .catch(err => console.error('Full project preview warmup error', err));
+      await restoreLatestProjectAnalysis(project.id, latestSessionId, renderSeq);
     } catch (error) {
       console.error('Nie udało się odtworzyć ostatniego podglądu projektu', error);
     } finally {
-      setIsProcessing(false);
-      setProgressText('');
+      if (renderSeq === previewRenderSeqRef.current) {
+        setIsProcessing(false);
+        setProgressText('');
+      }
     }
   };
 
-  const restoreLatestProjectAnalysis = async (projectId: string, currentSessionId: string) => {
+  const restoreLatestProjectAnalysis = async (
+    projectId: string,
+    currentSessionId: string,
+    renderSeq?: number,
+  ) => {
     try {
       const runsResponse = await apiFetch(projectApiPath(projectId, '/analysis-runs'));
       if (!runsResponse.ok) return;
@@ -419,6 +451,7 @@ function App() {
       const snapshotPayload = (await snapshotResponse.json()) as { snapshot?: AnalysisSnapshot | null };
       const snapshot = snapshotPayload.snapshot;
       if (!snapshot?.analysisContext) return;
+      if (renderSeq !== undefined && renderSeq !== previewRenderSeqRef.current) return;
 
       setResults(snapshot.results || []);
       setBoxes(snapshot.boxes || []);
@@ -734,34 +767,31 @@ function App() {
         })
       });
       if (!response.ok) throw new Error('Błąd serwera');
-      const data = await response.json() as { patterns?: Pattern[]; pdfDiagnostics?: PdfDiagnostics };
+      const data = await response.json() as { patterns?: Pattern[]; legendZoneUsed?: [number, number, number, number]; pdfDiagnostics?: PdfDiagnostics };
       const nextPatterns = data.patterns || [];
-      setPatterns(prev => {
-        const merged = new Map<string, Pattern>();
-        for (const pattern of prev) merged.set(getPatternKey(pattern), pattern);
-        for (const pattern of nextPatterns) merged.set(getPatternKey(pattern), pattern);
-        return Array.from(merged.values());
-      });
-      setLegendReviewItems(prev => {
-        const previousById = new Map(prev.map(item => [item.id, item]));
-        const merged = new Map<string, LegendReviewItem>();
-
-        for (const item of prev) merged.set(item.id, item);
-        for (const pattern of nextPatterns) {
+      if (nextPatterns.length === 0) {
+        setLegendCorrectionTarget(null);
+        setPatterns([]);
+        setLegendReviewItems([]);
+        setIsLegendReviewOpen(false);
+        setPdfDiagnostics(data.pdfDiagnostics || pdfDiagnostics);
+        alert('Nie znaleziono poprawnych wzorców w zaznaczonej legendzie. Zaznacz wyłącznie tabelę legendy z lewą kolumną symboli i spróbuj ponownie.');
+        return;
+      }
+      setPatterns(nextPatterns);
+      setLegendReviewItems(
+        nextPatterns.map(pattern => {
           const id = getPatternKey(pattern);
-          const previous = previousById.get(id);
-          merged.set(id, {
+          return {
             id,
             name: pattern.name,
             imgBase64: pattern.imgBase64,
-            status: previous?.status ?? 'pending',
-            correctedBBoxPx: pattern.correctedBBoxPx ?? previous?.correctedBBoxPx,
-          });
-        }
-
-        return Array.from(merged.values());
-      });
-      setIsLegendReviewOpen(prev => prev || nextPatterns.length > 0 || legendReviewItems.length > 0);
+            status: (pattern.status as LegendReviewStatus | undefined) ?? 'pending',
+            correctedBBoxPx: pattern.correctedBBoxPx,
+          };
+        })
+      );
+      setIsLegendReviewOpen(true);
       setLegendCorrectionTarget(null);
       setPdfDiagnostics(data.pdfDiagnostics || pdfDiagnostics);
     } catch (error) {
@@ -1103,6 +1133,50 @@ function App() {
     }
   };
 
+  const handleRenameResultSymbol = async (currentName: string, name: string) => {
+    if (!name.trim()) {
+      throw new Error('Nazwa symbolu nie może być pusta.');
+    }
+
+    const response = await apiFetch(projectPath(`/templates/${encodeURIComponent(currentName)}`), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name.trim() }),
+    });
+    if (!response.ok) {
+      throw new Error(await readApiError(response, 'Nie udało się zmienić nazwy symbolu.'));
+    }
+
+    const data = await response.json() as { pattern?: Pattern };
+    const pattern = data.pattern;
+    if (!pattern) throw new Error('Backend nie zwrócił wzorca po zmianie nazwy.');
+
+    const nextName = pattern.id ?? pattern.name;
+    replacePattern(currentName, pattern);
+    setLegendReviewItems(prev =>
+      prev.map(item =>
+        item.id === currentName
+          ? { ...item, id: nextName, name: pattern.name, imgBase64: pattern.imgBase64 }
+          : item
+      )
+    );
+    setLegendCorrectionTarget(current =>
+      current?.id === currentName ? { id: nextName, name: pattern.name } : current
+    );
+    setBoxes(prev =>
+      prev.map(box =>
+        box.symbolName === currentName ? { ...box, symbolName: nextName } : box
+      )
+    );
+    setResults(prev =>
+      prev.map(result =>
+        result.name === currentName ? { ...result, name: nextName } : result
+      )
+    );
+
+    return nextName;
+  };
+
   const handleStartLegendCrop = (item: LegendReviewItem) => {
     setIsLegendReviewOpen(true);
     setLegendCorrectionTarget({ id: item.id, name: item.name });
@@ -1255,6 +1329,8 @@ function App() {
     );
   }
 
+  const workspaceFileName = file?.name || (sessionId ? activeProject.latestSourcePdf || null : null);
+
   return (
     <div className="workspace-shell">
       <div className="project-workspace-bar">
@@ -1262,6 +1338,9 @@ function App() {
           className="btn-secondary"
           style={{ width: 'auto' }}
           onClick={() => {
+            previewRenderSeqRef.current += 1;
+            setIsProcessing(false);
+            setProgressText('');
             setActiveProject(null);
             loadProjects();
           }}
@@ -1271,14 +1350,14 @@ function App() {
         </button>
         <div>
           <b>{activeProject.name}</b>
-          <span>{activeProject.latestSourcePdf || file?.name || 'brak wgranego PDF'}</span>
+          <span>{workspaceFileName || 'brak wgranego PDF'}</span>
         </div>
       </div>
 
       <div className="app-container">
       {/* Lewy panel */}
       <Sidebar
-        fileName={file?.name || null}
+        fileName={workspaceFileName}
         onFileSelect={handleFileSelect}
         onExtractLegend={handleExtractLegend}
         onDetect={handleDetect}
@@ -1324,7 +1403,7 @@ function App() {
         onClearLegendZone={() => setLegendZone(null)}
         onSetPlanZone={(x, y, w, h) => setPlanZone({ x, y, width: w, height: h })}
         onClearPlanZone={() => setPlanZone(null)}
-        symbolNames={patterns.map(p => p.name)}
+        symbolNames={patterns.map(p => p.id ?? p.name)}
         onAddManualBox={handleAddManualBox}
         onRejectBox={handleRejectBox}
         onInspectZone={handleInspectRoi}
@@ -1444,7 +1523,8 @@ function App() {
           onFocusBox={id => setFocusedBoxId(prev => prev === id ? null : id)}
           onRejectBox={handleRejectBox}
           onChangeBoxSymbol={handleChangeBoxSymbol}
-          symbolNames={patterns.map(p => p.name)}
+          onRenameSymbol={handleRenameResultSymbol}
+          symbolNames={patterns.map(p => p.id ?? p.name)}
           projectId={activeProject.id}
           onTemplateUploaded={() => fetchTemplates(activeProject.id)}
         />

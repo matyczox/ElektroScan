@@ -4,6 +4,7 @@ import math
 import os
 import re
 import shutil
+import tempfile
 import time
 import uuid
 from collections import OrderedDict
@@ -51,7 +52,13 @@ from core.detector_masks import _ink_mask
 from core.detector_templates import _prepare_variants
 
 # Importujemy nasze core'owe moduły
-from core.legend_extractor import _normalize_layer_name, extract_legend, get_pdf_layers, pdf_to_png
+from core.legend_extractor import (
+    _clean_ocr_label_text,
+    _normalize_layer_name,
+    extract_legend,
+    get_pdf_layers,
+    pdf_to_png,
+)
 from core.roi_inspector import inspect_roi
 
 
@@ -382,6 +389,35 @@ def _preview_response_meta(
     }
 
 
+def _render_preview_response_for_session(
+    session_id: str,
+    file_path: Path,
+    body: Optional["RenderRequest"] = None,
+) -> dict:
+    hidden_layers = body.hidden_layers if body else []
+    render_dpi = PREVIEW_DPI if body and body.preview else ANALYSIS_DPI
+    plan_img, cache_hit = _render_pdf_for_session(
+        session_id,
+        str(file_path),
+        dpi=render_dpi,
+        hidden_layers=hidden_layers,
+    )
+    analysis_size = _pdf_page_size_at_dpi(str(file_path), dpi=ANALYSIS_DPI)
+    pdf_diagnostics = _build_pdf_diagnostics(str(file_path), plan_img)
+    _, buffer_plan = cv2.imencode(".jpg", plan_img, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    plan_base64 = base64.b64encode(buffer_plan).decode("utf-8")
+    return {
+        "planPreview": f"data:image/jpeg;base64,{plan_base64}",
+        "pdfDiagnostics": pdf_diagnostics,
+        **_preview_response_meta(
+            plan_img,
+            preview_dpi=render_dpi,
+            analysis_size=analysis_size,
+            cache_hit=cache_hit,
+        ),
+    }
+
+
 def _analysis_snapshot_path(analysis_id: str, analysis_dir: Path = ANALYSIS_DIR) -> Path:
     return analysis_dir / f"{analysis_id}.json"
 
@@ -422,10 +458,23 @@ def _safe_template_stem(raw_name: str) -> str:
     return value[:120]
 
 
+def _renamed_template_stem(current_stem: str, raw_name: str) -> str:
+    """Build a renamed template stem, preserving extractor numeric prefixes."""
+
+    new_stem = _safe_template_stem(raw_name)
+    current_match = re.match(r"^(\d+)_", _safe_template_stem(current_stem))
+    if current_match and not re.match(r"^\d+_", new_stem):
+        return f"{current_match.group(1)}_{new_stem}"
+    return new_stem
+
+
 def _display_template_name(stem: str) -> str:
     """Strip extraction ordering prefixes in UI labels."""
 
-    return re.sub(r"^\d+_+", "", stem)
+    label = re.sub(r"^\d+_+", "", stem)
+    label = re.sub(r"_+", " ", label).strip()
+    cleaned = _clean_ocr_label_text(label)
+    return cleaned or label
 
 
 def _template_path_for_id(template_id: str, templates_dir: Path = TEMPLATES_DIR) -> Path | None:
@@ -962,6 +1011,7 @@ class ExtractRequest(BaseModel):
 
 class RenderRequest(BaseModel):
     hidden_layers: Optional[List[str]] = []
+    preview: Optional[bool] = False
 
 
 @app.post("/api/preview")
@@ -1021,26 +1071,7 @@ async def api_project_pdf_diagnostics(
 async def api_render_preview(session_id: str, body: RenderRequest = None):
     file_path = _session_file_or_404(session_id, UPLOAD_DIR)
     try:
-        hidden_layers = body.hidden_layers if body else []
-        plan_img, cache_hit = _render_pdf_for_session(
-            session_id,
-            str(file_path),
-            dpi=ANALYSIS_DPI,
-            hidden_layers=hidden_layers,
-        )
-        pdf_diagnostics = _build_pdf_diagnostics(str(file_path), plan_img)
-        _, buffer_plan = cv2.imencode(".jpg", plan_img, [cv2.IMWRITE_JPEG_QUALITY, 80])
-        plan_base64 = base64.b64encode(buffer_plan).decode("utf-8")
-        return {
-            "planPreview": f"data:image/jpeg;base64,{plan_base64}",
-            "pdfDiagnostics": pdf_diagnostics,
-            **_preview_response_meta(
-                plan_img,
-                preview_dpi=ANALYSIS_DPI,
-                analysis_size={"width": int(plan_img.shape[1]), "height": int(plan_img.shape[0])},
-                cache_hit=cache_hit,
-            ),
-        }
+        return _render_preview_response_for_session(session_id, file_path, body)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1056,15 +1087,7 @@ async def api_project_render_preview(
     _require_project_session(project_id, session_id)
     file_path = _session_file_or_404(session_id, _project_upload_dir(project_id))
     try:
-        hidden_layers = body.hidden_layers if body else []
-        plan_img = pdf_to_png(str(file_path), dpi=300, hidden_layers=hidden_layers)
-        pdf_diagnostics = _build_pdf_diagnostics(str(file_path), plan_img)
-        _, buffer_plan = cv2.imencode(".jpg", plan_img, [cv2.IMWRITE_JPEG_QUALITY, 80])
-        plan_base64 = base64.b64encode(buffer_plan).decode("utf-8")
-        return {
-            "planPreview": f"data:image/jpeg;base64,{plan_base64}",
-            "pdfDiagnostics": pdf_diagnostics,
-        }
+        return _render_preview_response_for_session(session_id, file_path, body)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1123,17 +1146,36 @@ async def _extract_legend_response(
             )
 
         _log("Ekstrakcja legendy...")
-        symbols = extract_legend(
-            str(file_path),
-            plan_img,
-            output_dir=str(templates_dir),
-            dpi=ANALYSIS_DPI,
-            exclude_rects=exclude_rects,
-            legend_rect_px=legend_rect_px,
-            mask_mode=mask_mode,
-        )
+        templates_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=templates_dir.parent) as extraction_dir:
+            symbols, legend_rect_px = extract_legend(
+                str(file_path),
+                plan_img,
+                output_dir=extraction_dir,
+                dpi=ANALYSIS_DPI,
+                exclude_rects=exclude_rects,
+                legend_rect_px=legend_rect_px,
+                mask_mode=mask_mode,
+                return_used_rect=True,
+            )
+
+            if symbols:
+                _clear_directory_contents(templates_dir)
+                for template_path in sorted(Path(extraction_dir).glob("*.png")):
+                    shutil.move(str(template_path), templates_dir / template_path.name)
 
         extracted_ids = {f"{s.index:02d}_{s.name}" for s in symbols}
+        if not symbols:
+            _clear_directory_contents(templates_dir)
+            return {
+                "patterns": [],
+                "legendZoneUsed": legend_rect_px,
+                "legendMaskMode": mask_mode,
+                "detectorProfileRequested": requested_profile,
+                "detectorProfileUsed": resolved_profile,
+                "pdfDiagnostics": pdf_diagnostics,
+            }
+
         patterns_list = []
         for template_path in sorted(templates_dir.glob("*.png")):
             payload = _template_payload_from_path(template_path)
@@ -1925,7 +1967,10 @@ async def _crop_template_response(
 
         old_path = _template_path_for_id(template_name, templates_dir)
         if body.name:
-            target_stem = _safe_template_stem(body.name)
+            target_stem = _renamed_template_stem(
+                old_path.stem if old_path is not None else template_name,
+                body.name,
+            )
         elif old_path is not None:
             target_stem = old_path.stem
         else:
@@ -1994,7 +2039,7 @@ def _update_template_response(
         payload = _template_payload_from_path(target)
         return {"message": "Brak zmian.", "pattern": payload}
 
-    new_stem = _safe_template_stem(body.name)
+    new_stem = _renamed_template_stem(target.stem, body.name)
     new_path = templates_dir / f"{new_stem}.png"
     if new_path != target and new_path.exists():
         raise HTTPException(status_code=409, detail=f"Wzorzec '{new_stem}' już istnieje.")

@@ -7,6 +7,8 @@
 - **Nie usuwać reguł rodzinnych 06/07 i 10/11/12** bez gotowego mechanizmu ogólnego i testów regresji.
 - **Nie bazować produkcyjnie na PDF text layer.** Wejście może być skanem/zdjęciem.
 - **Nie commitować `backend/analysis_debug/`.** To lokalna diagnostyka.
+- **Nie commitować `backend/data/` ani projektowych snapshotów debug.** To dane
+  robocze użytkownika/kontenera.
 - **Nie robić agresywnego cache schematu/PDF/wyników** między analizami.
 - **Nie obniżać DPI poniżej 300** bez twardego testu jakości.
 - **Nie uznawać jednego PDF-a za całą specyfikację świata.**
@@ -16,6 +18,8 @@
 
 - Debug-only kandydaci i HITL.
 - Narzędzia korekty w UI.
+- Projektową persystencję PDF, wzorców i historii analiz.
+- OCR opisów legendy jako fallback, jeżeli PDF text layer nie wystarcza.
 - Uniwersalne relacje obrazowe `core -> fuller parent`.
 - Image-content matching dla labeli.
 - Profilowanie etapów (`summarize_analysis_performance.py`).
@@ -30,6 +34,10 @@ Prawie jak testy jednostkowe architektury:
 - Każda analiza jest świeża dla aktualnego wejścia.
 - Cache globalny schematu jest zakazany na tym etapie.
 - `analysis_debug` jest lokalną diagnostyką, nie częścią produktu.
+- Dane projektów są izolowane po `project_id`; projektowe wzorce jednego
+  projektu nie mogą mieszać się z innym.
+- Powrót do projektu ma przywracać preview PDF, warstwy, legendę, wzorce i
+  ostatnią analizę, jeśli istnieje.
 - Warstwa PDF może pomagać przy renderze/warstwach, ale nie może być jedynym źródłem prawdy o symbolach.
 - Template matching musi być obrazowy i odporny na PDF jako skan/zdjęcie.
 - HITL poprawia wynik analizy, ale nie tworzy ukrytego globalnego uczenia pod jeden rzut.
@@ -38,6 +46,21 @@ Prawie jak testy jednostkowe architektury:
 - Text labels są uniwersalną ścieżką "czytania z obrazu", nie słownikiem nazw.
 - Lepiej pokazać `Brak?` w debug niż cicho zgubić symbol.
 - Lepiej zostawić jeden przypadek do HITL niż zepsuć pięć innych przez agresywny próg.
+
+## Decyzja 2026-05-11: Projekty I Legenda Są Częścią Produktu, Nie Debugiem
+
+Auth, dashboard projektów, sesje, historia analiz i review legendy są teraz
+podstawowym flow produktu. Nowe funkcje po zalogowaniu powinny używać endpointów
+`/api/projects/{project_id}/...`, a legacy endpointy bez `project_id` traktować
+jako fallback developerski.
+
+Legenda jest bramką jakości analizy. Analiza planu ma być zablokowana, dopóki
+wzorce nie są sprawdzone. Nazwy symboli mają być możliwie czytelne już po
+ekstrakcji, ale użytkownik musi móc je poprawić ręcznie.
+
+Nie rozwiązujemy problemów legend przez mapy typu "czwarty element zawsze jest
+B" ani przez współrzędne konkretnego planu. Poprawki mają wynikać z geometrii
+tabel, grupowania komponentów, OCR/PDF text i relacji wierszy.
 
 ## Decyzja 2026-04-30: Inspektor ROI Jest Lokalna Prawda Dla Gray
 

@@ -32,11 +32,11 @@ Zmienne środowiskowe dla `backend/core/detector_config.py`:
 | `ELEKTROSCAN_DETECTOR_POSTPROCESS_WORKERS` | liczba CPU | Workerzy postprocessingu |
 | `ELEKTROSCAN_OPENCV_THREADS` | `1` | Wątki OpenCV (niska wartość unika konfliktu z Python MP) |
 
-Przykład:
-```powershell
-$env:ELEKTROSCAN_DETECTOR_SCAN_WORKERS = "8"
-$env:ELEKTROSCAN_OPENCV_THREADS = "2"
-py -3 main.py
+Przykład lokalny:
+
+```bash
+ELEKTROSCAN_DETECTOR_SCAN_WORKERS=8 ELEKTROSCAN_OPENCV_THREADS=2 \
+  backend/venv/bin/python backend/main.py
 ```
 
 ## Narzędzia Diagnostyczne (backend/tools/)
@@ -48,8 +48,8 @@ Skrypty CLI uruchamiane ręcznie, poza normalnym flow backendu.
 Porównuje dwa snapshoty JSON z `analysis_debug/` — golden (wzorcowy) vs candidate (nowy run).
 
 ```bash
-py -3 backend/tools/compare_analysis_snapshot.py golden.json candidate.json
-py -3 backend/tools/compare_analysis_snapshot.py golden.json candidate.json \
+backend/venv/bin/python backend/tools/compare_analysis_snapshot.py golden.json candidate.json
+backend/venv/bin/python backend/tools/compare_analysis_snapshot.py golden.json candidate.json \
   --focus 06,07,10,11,12 \
   --center-tolerance 18 \
   --size-tolerance 0.35
@@ -70,9 +70,9 @@ Wypisuje:
 Podsumowuje czasy etapów i countery z jednego lub wielu snapshotów.
 
 ```bash
-py -3 backend/tools/summarize_analysis_performance.py backend/analysis_debug/
-py -3 backend/tools/summarize_analysis_performance.py backend/analysis_debug/ --latest 3 --top 8
-py -3 backend/tools/summarize_analysis_performance.py moj_snapshot.json
+backend/venv/bin/python backend/tools/summarize_analysis_performance.py backend/analysis_debug/
+backend/venv/bin/python backend/tools/summarize_analysis_performance.py backend/analysis_debug/ --latest 3 --top 8
+backend/venv/bin/python backend/tools/summarize_analysis_performance.py moj_snapshot.json
 ```
 
 Wypisuje:
@@ -84,12 +84,21 @@ Wypisuje:
 
 ## Snapshot — Format i Lokalizacja
 
-Przy `include_debug=true` backend zapisuje snapshot JSON do `backend/analysis_debug/`. Plik zawiera:
+Przy `include_debug=true` backend zapisuje snapshot JSON do katalogu debug
+aktualnego trybu:
+
+- legacy/dev: `backend/analysis_debug/`
+- projekt lokalny: `backend/data/projects/{project_id}/analysis_debug/`
+- projekt Docker: `/app/data/projects/{project_id}/analysis_debug/`
+
+Plik zawiera:
+
 - `boxes` — finalne wykrycia
 - `analysisContext` z `performance.backendTimingsMs`, `performance.detector.timingsMs`, `performance.backendCounters`
 - `debugCandidates`
 
-**Nie commitować `backend/analysis_debug/`** — to lokalna diagnostyka. Jest w `.gitignore`.
+**Nie commitować `backend/analysis_debug/` ani `backend/data/`** — to lokalna
+diagnostyka i dane robocze. Są w `.gitignore`.
 
 ## Committed Golden Snapshots
 
@@ -99,19 +108,19 @@ Committed goldeny regresyjne trzymamy osobno:
 
 Porownanie aktualnego runu z goldenem:
 
-```powershell
-py -3 backend/tools/compare_analysis_snapshot.py `
-  backend/tests/golden/viking_bronisze_e8_gray_first_pdf_100pct.json `
-  backend/analysis_debug/<analysis_id>.json `
-  --focus 01,02,03,04,05,06,07 `
-  --center-tolerance 20 `
+```bash
+backend/venv/bin/python backend/tools/compare_analysis_snapshot.py \
+  backend/tests/golden/viking_bronisze_e8_gray_first_pdf_100pct.json \
+  backend/analysis_debug/<analysis_id>.json \
+  --focus 01,02,03,04,05,06,07 \
+  --center-tolerance 20 \
   --size-tolerance 0.45
 ```
 
 Smoke test po zmianach:
 
-```powershell
-py -3 -m compileall -q backend
-cd frontend
-npm run build
+```bash
+PYTHONPATH=backend backend/venv/bin/python -m pytest backend/tests/unit
+cd frontend && npm run test -- --run
+cd frontend && npm run build
 ```

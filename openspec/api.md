@@ -63,6 +63,8 @@ backend/data/projects/{project_id}/templates
 backend/data/projects/{project_id}/analysis_debug
 ```
 
+W Dockerze ten sam układ żyje pod `/app/data/projects/{project_id}/`.
+
 Nowy upload PDF w projekcie czyści tylko `templates` tego projektu. Nie czyści
 wzorców innych projektów ani globalnych legacy katalogów.
 
@@ -80,9 +82,9 @@ przez `GET /api/projects/{project_id}/analysis-runs/{analysis_id}`.
 ```
 POST /api/preview
 ```
-Upload pliku PDF. Renderuje podglad 300 DPI, tworzy `sessionId` i zwraca
-diagnostyke PDF. Ten endpoint czysci `backend/templates/`, wiec nowy plan
-zawsze startuje z pusta baza wzorcow.
+Legacy/dev upload pliku PDF. Renderuje podglad 300 DPI, tworzy `sessionId` i
+zwraca diagnostyke PDF. Ten endpoint czysci `backend/templates/`, wiec nowy plan
+zawsze startuje z pusta globalna baza wzorcow.
 
 ```
 GET /api/layers?session_id=...
@@ -109,7 +111,17 @@ Ekstrahuje wzorce z recznie zaznaczonej strefy legendy PDF. Wymaga
 `hidden_layers`, `excluded_zones` i `detector_profile`.
 
 **Response:** lista `patterns` ma `id`, `name`, `imgBase64` oraz poczatkowy
-status `pending`. Frontend otwiera po tym review wzorcow.
+status `pending`. `id` jest stabilnym identyfikatorem/plikiem wzorca, a `name`
+jest etykietą pokazową. Frontend otwiera po tym review wzorcow.
+
+Nazewnictwo legendy jest best-effort:
+
+- opis z tego samego wiersza ma pierwszeństwo,
+- krótki indeks typu `A`, `B`, `D1`, `GSW`, `MSW` jest używany jako indeks albo
+  fallback,
+- dla szarych/rastrowych legend backend może użyć OCR Tesseract,
+- fallbacki typu `nieznany_symbol` powinny być humanizowane w backendzie i UI,
+  ale użytkownik nadal może poprawić nazwę ręcznie.
 
 ```
 POST /api/analyze?session_id=...
@@ -198,14 +210,19 @@ pomocniczym widokiem bazy.
 Projektowe odpowiedniki obecnego workflow mają prefix:
 
 ```text
-/api/projects/{project_id}/preview
-/api/projects/{project_id}/layers
-/api/projects/{project_id}/render-preview
-/api/projects/{project_id}/extract-legend
-/api/projects/{project_id}/analyze
-/api/projects/{project_id}/inspect-roi
-/api/projects/{project_id}/gray-debug-zones
-/api/projects/{project_id}/templates
+POST   /api/projects/{project_id}/preview
+GET    /api/projects/{project_id}/layers
+POST   /api/projects/{project_id}/render-preview
+POST   /api/projects/{project_id}/extract-legend
+POST   /api/projects/{project_id}/analyze
+POST   /api/projects/{project_id}/inspect-roi
+POST   /api/projects/{project_id}/gray-debug-zones
+GET    /api/projects/{project_id}/templates
+POST   /api/projects/{project_id}/templates/upload
+POST   /api/projects/{project_id}/templates/{template_name}/crop
+PATCH  /api/projects/{project_id}/templates/{template_name}
+DELETE /api/projects/{project_id}/templates
+DELETE /api/projects/{project_id}/templates/{template_name}
 ```
 
 Frontend po zalogowaniu powinien używać wyłącznie endpointów projektowych.
@@ -250,17 +267,17 @@ Kliknięcie boxa w CanvasView kopiuje payload do schowka. Zawiera:
 - Kliknąć box → skopiować debug payload.
 - Usunąć fałszywy finalny box.
 - Zmienić klasę finalnego boxa.
-- Dodać debug-kandydata jako ręczny box.
-- Dodać ręczny box z toolbaru (rysowanie na canvas).
-- Ukryć debug-kandydata.
+- Zmienić nazwę grupy wyników w prawym panelu.
+- Dodać ręczny box z toolbaru/trybu dodawania, jeżeli flow UI to udostępnia.
+- Użyć Inspektora ROI do diagnostyki lokalnego obszaru.
 
 ## Zarządzanie Wzorcami (UI)
 
 - Sidebar wyświetla wzorce z miniaturą i nazwą.
-- Nowy PDF startuje z pusta baza wzorcow; stare wzorce nie sa ladowane
-  automatycznie przy starcie frontendu.
+- Nowy PDF w projekcie startuje z pustą bazą wzorców tego projektu.
 - Przycisk edycji otwiera `PatternModal` (zmiana nazwy lub usunięcie).
-- Przycisk "Wyczyść całą bazę wiedzy" w Sidebar → `DELETE /api/templates`.
+- Przycisk czyszczenia wzorców używa endpointu projektowego albo legacy
+  `DELETE /api/templates`, zależnie od trybu.
 
 ## Kosztorys Wykonawczy (CostPanel)
 

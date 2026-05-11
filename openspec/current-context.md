@@ -6,9 +6,11 @@ plikiem, ten plik opisuje aktualniejszy stan.
 
 ## Workspace
 
-- Aktywny folder projektu: `C:\Users\Admin\Desktop\elektroskanNOWYSWIEZYSTART\ElektroScan`
-- Nie pracowac w `C:\Users\Admin\Desktop\elektroskan_claude`, chyba ze
-  uzytkownik jawnie o to poprosi.
+- Aktywny folder projektu: `/Users/jakublewosz/Code/matiprojekt`.
+- Gałąź demo/produkcyjna: `main`.
+- Backend zwykle działa na `http://127.0.0.1:8000`, frontend na
+  `http://127.0.0.1:5173`.
+- Preferowane uruchomienie całości: `docker compose up -d --build`.
 - Przed zmianami uruchomic `git status --short`.
 - Nie ruszac przypadkowych zmian w `.claude/skills`, `.agents/skills`,
   `skills-lock.json` bez wyraznej prosby.
@@ -52,12 +54,12 @@ Strategie i pomocnicy:
 - Zmiany dla gray powinny isc przez `detector_gray.py`, `detector_gray_engine.py`
   albo jasno oznaczony warunek `detector_profile == "gray"`.
 - `parent_search` ma pozostac w praktyce gray-only.
-- Po zmianach uruchomic:
+- Po zmianach funkcjonalnych uruchomic:
 
-```powershell
-py -3 -m compileall -q backend
-cd frontend
-npm run build
+```bash
+PYTHONPATH=backend backend/venv/bin/python -m pytest backend/tests/unit
+cd frontend && npm run test -- --run
+cd frontend && npm run build
 ```
 
 ## Status UI
@@ -71,6 +73,8 @@ npm run build
 - Auth ma MVP resetu hasła. Lokalny/dev backend może zwrócić token resetu w
   odpowiedzi API, żeby dało się testować bez wysyłki maili; produkcja musi
   wyłączyć `ELEKTROSCAN_AUTH_DEV_TOKENS` i podpiąć dostawcę e-mail.
+- Rejestracja nie wymaga weryfikacji e-mail. Nie przywracać email verification
+  bez wyraźnej decyzji produktowej.
 - Dane projektu są izolowane w `backend/data/projects/{project_id}/`:
   `uploads/`, `templates/`, `analysis_debug/`. Globalne endpointy bez
   `project_id` są legacy/dev fallbackiem.
@@ -86,6 +90,9 @@ npm run build
 - Po powrocie do projektu po pracy w innym projekcie frontend odtwarza ostatnią
   zakończoną analizę dla aktualnej sesji PDF ze snapshotu
   `/api/projects/{project_id}/analysis-runs/{analysis_id}`.
+- Powrót do projektu z zaznaczoną legendą ma pozwalać od razu analizować plan,
+  jeżeli wzorce legendy są już sprawdzone. Czarny canvas po powrocie do projektu
+  był regresją i powinien być traktowany jako blocker.
 - Role, zaproszenia i współdzielenie projektów nie są jeszcze wdrożone. Obecny
   model uprawnień to owner-only; przyszły moduł powinien dodać membership table
   zamiast rozluźniać `owner_user_id` w istniejących query.
@@ -95,14 +102,17 @@ npm run build
 - Inspektor ROI pokazuje lokalnie, co silnik widzi w zaznaczonym boxie:
   raw mask, scan mask, dark scan mask, peaki per scale, PASS/odrzuty.
 - Aktualny flow legendy jest human-in-the-loop:
-  - nowy PDF startuje z pusta baza wzorcow; `POST /api/preview` czysci
-    `backend/templates/`, a frontend nie laduje starych wzorcow przy starcie,
+  - nowy PDF w projekcie startuje z pustą bazą wzorców tego projektu; legacy
+    `POST /api/preview` czyści `backend/templates/`,
   - uzytkownik musi zaznaczyc strefe legendy i wyciagnac wzorce,
   - po ekstrakcji otwiera sie `LegendReviewPanel`,
   - analiza jest zablokowana, dopoki kazdy wzorzec nie ma statusu innego niz
     `pending`,
   - wzorzec mozna zaakceptowac, odrzucic, zmienic nazwe, poprawic crop na
     canvasie albo dodac brakujacy wzorzec recznie.
+- Ekstrakcja legendy nie może bazować na twardych współrzędnych konkretnych
+  PDF. Kluczowe są ogólne heurystyki: geometria tabeli, komponenty symboli,
+  tekst z PDF/OCR i relacje wierszy.
 - Dla legend tabelarycznych poprawiono wycinanie znakow typu `C1`/`D1`: znaki
   sa przypisywane do najblizszego srodka wiersza na podstawie ciemnych
   komponentow w kolumnie symboli, zamiast prostego cropa miedzy liniami tabeli.
@@ -113,6 +123,16 @@ npm run build
   `page.get_text("words")`, pomija wiodace kody/liczniki typu `A1`/`01`, a gdy
   nie znajdzie opisu, wraca do starego `_get_row_index_text` i dopiero potem do
   `sym_XX`.
+- Dla szarych/rastrowych legend opis może być czytany przez OCR Tesseract, jeżeli
+  tekst PDF nie wystarcza. Docker backend instaluje `tesseract-ocr`,
+  `tesseract-ocr-eng` i `tesseract-ocr-pol`.
+- Dla kolorowych klasycznych legend ekstraktor rozbija symbole po wierszach i
+  komponentach, żeby indeks tekstowy i grafika tego samego symbolu zostały razem,
+  a sąsiednie wiersze nie podkradały sobie nazw. Przypadki kontrolne:
+  `GSW`/`MSW` mają poprawne opisy, `A + kółko` jest osobno od `B + kwadrat`.
+- Nazwy typu `nieznany_symbol` są traktowane jako fallback/legacy. Backend i
+  frontend próbują je humanizować, ale stare zapisane wzorce mogą wymagać
+  ponownego wyciągnięcia legendy albo ręcznej zmiany nazwy.
 - Widoczne teksty UI po ostatnich zmianach powinny byc zapisane jako UTF-8.
   Nie zostawiac mojibake typu `Brak podglÄ...du`.
 
@@ -231,20 +251,25 @@ Szczegolowy plan review legendy jest w:
 
 ## Kolorowe PDF - Inwariant
 
-Kolorowe PDF dzialaly dobrze i szybko przed praca nad gray. Przy zmianach gray:
+Kolorowe PDF dzialaly dobrze i szybko przed praca nad gray. Przy zmianach gray
+oraz legend:
 
 - Nie zmieniac globalnych `SCALES` dla color.
 - Nie wlaczac gray raw budget, dark ink, text suppression ani parent fallback dla color.
+- Zmiany w `legend_extractor.py` dla kolorowych legend muszą pozostać ogólne:
+  row/component grouping, OCR/PDF text i normalizacja nazw, bez współrzędnych
+  pod konkretny rysunek.
 - Po wiekszej zmianie przetestowac przynajmniej jeden stary kolorowy PDF i
   sprawdzic czas oraz liczbe boxow.
 
 ## Minimalny Prompt Dla Nowego AI
 
 ```text
-Pracujesz w C:\Users\Admin\Desktop\elektroskanNOWYSWIEZYSTART\ElektroScan. Najpierw przeczytaj
-openspec/current-context.md. Detektor ma rozdzielone wejscia color/gray, ale
-wciaz ma wspolny pipeline. Nie hardcoduj koordynat ani nazw symboli. Gray PDF
-tunuj tylko w gray-only sciezce. Kolorowy silnik ma zostac szybki i nietkniety.
-Do diagnozy brakow uzywaj Inspektora ROI, nie przywracaj starego panelu
-"Pokaz niepewne/brakujace".
+Pracujesz w /Users/jakublewosz/Code/matiprojekt. Najpierw przeczytaj
+openspec/current-context.md. Projekt ma auth, dashboard projektów i endpointy
+projektowe. Detektor ma rozdzielone wejścia color/gray, ale wciąż ma wspólny
+pipeline. Nie hardcoduj koordynat ani nazw symboli. Gray PDF tunuj tylko w
+gray-only ścieżce. Legendę poprawiaj przez ogólne reguły tabel/wierszy/OCR i
+review wzorców. Do diagnozy braków używaj Inspektora ROI, nie przywracaj starego
+panelu "Pokaż niepewne/brakujące".
 ```

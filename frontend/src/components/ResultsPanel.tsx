@@ -1,6 +1,7 @@
 ﻿import React, { useState, useEffect, useRef } from 'react';
-import { Layers, ChevronDown, ChevronRight, X, Calculator, Upload } from 'lucide-react';
+import { Layers, ChevronDown, ChevronRight, X, Calculator, Upload, Edit3, Save } from 'lucide-react';
 import { apiFetch, projectApiPath } from '../api';
+import { formatSymbolLabel } from '../symbolLabels';
 
 interface Box {
   id: string;
@@ -41,6 +42,7 @@ interface ResultsPanelProps {
   onFocusBox?: (id: string) => void;
   onRejectBox: (id: string) => void;
   onChangeBoxSymbol?: (id: string, symbolName: string) => void;
+  onRenameSymbol?: (currentName: string, nextName: string) => Promise<string | void> | string | void;
   symbolNames?: string[];
   projectId?: string;
   onTemplateUploaded?: () => void;
@@ -53,6 +55,7 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
   onFocusBox,
   onRejectBox,
   onChangeBoxSymbol,
+  onRenameSymbol,
   symbolNames = [],
   projectId,
   onTemplateUploaded,
@@ -62,6 +65,9 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
   const [prices, setPrices] = useState<Record<string, number>>({});
   const uploadRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
+  const [renamingGroup, setRenamingGroup] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState('');
+  const [renameBusyGroup, setRenameBusyGroup] = useState<string | null>(null);
 
   // Init prices for new results
   useEffect(() => {
@@ -120,6 +126,32 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
     } finally {
       setUploading(false);
       if (uploadRef.current) uploadRef.current.value = '';
+    }
+  };
+
+  const beginRename = (name: string) => {
+    setRenamingGroup(name);
+    setRenameDraft(formatSymbolLabel(name));
+  };
+
+  const saveRename = async (currentName: string) => {
+    const nextName = renameDraft.trim();
+    if (!nextName || !onRenameSymbol) return;
+    setRenameBusyGroup(currentName);
+    try {
+      const renamedName = await onRenameSymbol(currentName, nextName);
+      const priceKey = typeof renamedName === 'string' && renamedName ? renamedName : nextName;
+      setPrices(prev => {
+        const next = { ...prev, [priceKey]: prev[currentName] ?? prev[priceKey] ?? 0 };
+        delete next[currentName];
+        return next;
+      });
+      setRenamingGroup(null);
+      setRenameDraft('');
+    } catch (error) {
+      alert((error as Error).message || 'Nie udało się zmienić nazwy symbolu.');
+    } finally {
+      setRenameBusyGroup(null);
     }
   };
 
@@ -204,11 +236,23 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
               {results.map(group => {
                 const groupBoxes = boxesBySymbol[group.name] || [];
                 const isOpen = expandedGroups.has(group.name);
+                const isRenaming = renamingGroup === group.name;
+                const isRenameBusy = renameBusyGroup === group.name;
                 return (
                   <div key={group.name} className="card" style={{ padding: 0, overflow: 'hidden' }}>
                     {/* Nagłówek grupy */}
-                    <button
-                      onClick={() => toggleGroup(group.name)}
+                    <div
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => {
+                        if (!isRenaming) toggleGroup(group.name);
+                      }}
+                      onKeyDown={event => {
+                        if (!isRenaming && (event.key === 'Enter' || event.key === ' ')) {
+                          event.preventDefault();
+                          toggleGroup(group.name);
+                        }
+                      }}
                       style={{
                         width: '100%',
                         display: 'flex',
@@ -223,18 +267,86 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
                       }}
                     >
                       {isOpen ? <ChevronDown size={14} color="var(--text-muted)" /> : <ChevronRight size={14} color="var(--text-muted)" />}
-                      <span
-                        className="text-xs"
-                        style={{
-                          flex: 1,
-                          fontWeight: 700,
-                          color: 'var(--text-primary)',
-                          wordBreak: 'break-all',
-                          lineHeight: 1.3,
-                        }}
-                      >
-                        {group.name}
-                      </span>
+                      {isRenaming ? (
+                        <input
+                          value={renameDraft}
+                          onClick={event => event.stopPropagation()}
+                          onChange={event => setRenameDraft(event.target.value)}
+                          onKeyDown={event => {
+                            if (event.key === 'Enter') void saveRename(group.name);
+                            if (event.key === 'Escape') setRenamingGroup(null);
+                          }}
+                          autoFocus
+                          disabled={isRenameBusy}
+                          style={{
+                            flex: 1,
+                            minWidth: 0,
+                            background: 'var(--bg-main)',
+                            color: 'var(--text-primary)',
+                            border: '1px solid var(--border-light)',
+                            borderRadius: 4,
+                            padding: '5px 7px',
+                            fontSize: 12,
+                            fontWeight: 700,
+                          }}
+                        />
+                      ) : (
+                        <span
+                          className="text-xs"
+                          title={group.name}
+                          style={{
+                            flex: 1,
+                            fontWeight: 700,
+                            color: 'var(--text-primary)',
+                            wordBreak: 'break-word',
+                            lineHeight: 1.3,
+                          }}
+                        >
+                          {formatSymbolLabel(group.name)}
+                        </span>
+                      )}
+                      {onRenameSymbol && (
+                        isRenaming ? (
+                          <>
+                            <button
+                              type="button"
+                              className="btn-icon"
+                              title="Zapisz nazwę"
+                              disabled={isRenameBusy}
+                              onClick={event => {
+                                event.stopPropagation();
+                                void saveRename(group.name);
+                              }}
+                            >
+                              <Save size={14} />
+                            </button>
+                            <button
+                              type="button"
+                              className="btn-icon"
+                              title="Anuluj zmianę nazwy"
+                              disabled={isRenameBusy}
+                              onClick={event => {
+                                event.stopPropagation();
+                                setRenamingGroup(null);
+                              }}
+                            >
+                              <X size={14} />
+                            </button>
+                          </>
+                        ) : (
+                          <button
+                            type="button"
+                            className="btn-icon"
+                            title="Zmień nazwę symbolu"
+                            onClick={event => {
+                              event.stopPropagation();
+                              beginRename(group.name);
+                            }}
+                          >
+                            <Edit3 size={14} />
+                          </button>
+                        )
+                      )}
                       <span
                         style={{
                           background: group.color + '33',
@@ -249,7 +361,7 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
                       >
                         {groupBoxes.length}
                       </span>
-                    </button>
+                    </div>
 
                     {/* Rozwinięta lista detekcji */}
                     {isOpen && (
@@ -310,7 +422,7 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
                                   }}
                                 >
                                   {allSymbolNames.map(name => (
-                                    <option key={name} value={name}>{name.split('_')[0]}</option>
+                                    <option key={name} value={name}>{formatSymbolLabel(name)}</option>
                                   ))}
                                 </select>
                               )}
@@ -355,7 +467,9 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
                     <div key={group.name} className="estimate-card">
                       <div className="estimate-card-stripe" style={{ backgroundColor: group.color }} />
                       <div className="estimate-card-content">
-                        <div className="estimate-card-title">{group.name}</div>
+                        <div className="estimate-card-title" title={group.name}>
+                          {formatSymbolLabel(group.name)}
+                        </div>
                         <div className="estimate-inputs">
                           <div className="estimate-input-group">
                             <label className="estimate-input-label">ILOŚĆ</label>

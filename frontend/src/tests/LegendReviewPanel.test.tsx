@@ -61,4 +61,17 @@ describe('LegendReviewPanel', () => {
 
     expect(screen.getByTitle('Akceptuj')).toBeDisabled();
   });
+
+  it('shows readable OCR names instead of file-safe underscores', () => {
+    renderPanel([
+      {
+        id: '02_GNIAZDO_1-F_Z_BOLCEM_OCHRONNYM_16A_IP20',
+        name: 'GNIAZDO_1-F_Z_BOLCEM_OCHRONNYM_16A_IP20',
+        imgBase64: 'data:image/png;base64,abc123',
+        status: 'pending',
+      },
+    ]);
+
+    expect(screen.getByRole('textbox')).toHaveValue('GNIAZDO 1-F Z BOLCEM OCHRONNYM 16A IP20');
+  });
 });

@@ -1,5 +1,6 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Check, Crop, Plus, Save, Trash2, X } from 'lucide-react';
+import { formatSymbolLabel } from '../symbolLabels';
 
 export type LegendReviewStatus = 'pending' | 'accepted' | 'fixed' | 'rejected';
 
@@ -50,8 +51,13 @@ const LegendReviewNameInput: React.FC<LegendReviewNameInputProps> = ({
   isProcessing,
   onRename,
 }) => {
-  const [draftName, setDraftName] = useState(item.name);
-  const isRenamed = draftName.trim() !== item.name;
+  const displayName = formatSymbolLabel(item.name);
+  const [draftName, setDraftName] = useState(displayName);
+  const isRenamed = draftName.trim() !== displayName;
+
+  useEffect(() => {
+    setDraftName(formatSymbolLabel(item.name));
+  }, [item.name]);
 
   return (
     <div className="legend-review-name-row">
@@ -120,7 +126,7 @@ export const LegendReviewPanel: React.FC<LegendReviewPanelProps> = ({
       {activeItem && (
         <div className="legend-review-active">
           <div>
-            <strong>{activeItem.name}</strong>
+            <strong>{formatSymbolLabel(activeItem.name)}</strong>
             <span className="text-xs text-muted">Zaznacz poprawny obszar na legendzie</span>
           </div>
           <button className="btn-secondary" onClick={onCancelCrop} disabled={isProcessing}>

@@ -1,6 +1,7 @@
 ﻿import React, { useRef, useState, useEffect } from 'react';
 import { AlertTriangle, Layers, Plus, Trash2, ZoomIn, ZoomOut, Maximize, Move, Slash, X } from 'lucide-react';
 import { useMemo } from 'react';
+import { formatSymbolLabel } from '../symbolLabels';
 
 interface Box {
   id: string;
@@ -365,30 +366,6 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
     setIsDragging(false);
   };
 
-  if (!imageSrc) {
-    return (
-      <div className="workspace" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        <div style={{ textAlign: 'center', color: 'var(--text-muted)' }}>
-          <Move size={48} style={{ opacity: 0.2, marginBottom: 16 }} />
-          <h2>Brak podglądu</h2>
-          <p className="text-sm text-muted" style={{ marginTop: 8 }}>
-            Wgraj plan PDF i uruchom ekstrakcję legendy.
-          </p>
-        </div>
-      </div>
-    );
-  }
-
-  const BOX_FOCUS_COLOR = '#f97316';
-  const BOX_LOW_COLOR = '#f59e0b';
-  const focusedBox = focusedBoxId ? boxes.find(box => box.id === focusedBoxId) : null;
-  const drawableBoxes = [...boxes].sort((left, right) => {
-    const rightArea = right.width * right.height;
-    const leftArea = left.width * left.height;
-    if (rightArea !== leftArea) return rightArea - leftArea;
-    return (left.confidence ?? 0) - (right.confidence ?? 0);
-  });
-
   const overlapGroupsByBoxId = useMemo(() => {
     const groups = new Map<string, Box[]>();
     const boxArea = (box: Box) => Math.max(1, box.width * box.height);
@@ -432,6 +409,30 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
     }
     return groups;
   }, [boxes]);
+
+  if (!imageSrc) {
+    return (
+      <div className="workspace" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div style={{ textAlign: 'center', color: 'var(--text-muted)' }}>
+          <Move size={48} style={{ opacity: 0.2, marginBottom: 16 }} />
+          <h2>Brak podglądu</h2>
+          <p className="text-sm text-muted" style={{ marginTop: 8 }}>
+            Wgraj plan PDF i uruchom ekstrakcję legendy.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  const BOX_FOCUS_COLOR = '#f97316';
+  const BOX_LOW_COLOR = '#f59e0b';
+  const focusedBox = focusedBoxId ? boxes.find(box => box.id === focusedBoxId) : null;
+  const drawableBoxes = [...boxes].sort((left, right) => {
+    const rightArea = right.width * right.height;
+    const leftArea = left.width * left.height;
+    if (rightArea !== leftArea) return rightArea - leftArea;
+    return (left.confidence ?? 0) - (right.confidence ?? 0);
+  });
 
   const formatOverlapGroup = (group?: Box[]) =>
     group?.length ? group.map(item => `${item.symbolName}@${item.x},${item.y},${item.width},${item.height}`).join(' + ') : '';
@@ -1070,7 +1071,7 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
                 onChange={e => setManualSymbol(e.target.value)}
                 style={{ width: '100%', padding: '4px', background: 'var(--bg-primary)', color: 'white', border: '1px solid var(--border-light)', borderRadius: 4 }}
               >
-                {symbolNames.map(s => <option key={s} value={s}>{s}</option>)}
+                {symbolNames.map(s => <option key={s} value={s}>{formatSymbolLabel(s)}</option>)}
               </select>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Rozmiar:</span>

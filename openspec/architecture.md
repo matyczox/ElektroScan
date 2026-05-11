@@ -37,7 +37,7 @@ Aktualny cel jakościowy:
 
 ```text
 backend/
-  main.py                        # FastAPI, upload, render, ekstrakcja legendy, analiza
+  main.py                        # FastAPI, auth, projekty, upload, legenda, analiza
   auth_store.py                  # SQLite, użytkownicy, sesje auth, projekty
   requirements.txt
   data/
@@ -48,7 +48,13 @@ backend/
   analysis_debug/                # snapshoty JSON — NIE commitować
   core/
     __init__.py
-    detector.py                  # główny pipeline detekcji (~988 linii)
+    detector.py                  # publiczny router detekcji
+    detector_color_engine.py     # entrypoint dla kolorowych PDF
+    detector_gray_engine.py      # entrypoint dla szarych PDF
+    detector_pipeline.py         # wspólna orkiestracja faz detekcji
+    detector_scanning.py         # matchTemplate, skale, rotacje, raw peaki
+    detector_validation.py       # walidacja kandydatów
+    detector_parent_search.py    # droższy fallback, praktycznie gray-only
     detector_config.py           # progi, skale, env vars (~171 linii)
     detector_models.py           # dataclassy: TemplateInfo, CandidateHit, Detection itd.
     detector_masks.py            # maski HSV, walidacja kandydata, ROI, content mask
@@ -56,19 +62,21 @@ backend/
     detector_clustering.py       # prefiltering, clustering, metryki overlap
     detector_promotions.py       # promocje rodzinne: core -> fuller parent
     detector_pdf.py              # pomocnicze PDF text i legend exclude (nie OCR prod)
-    legend_extractor.py          # render PDF do obrazu, obsługa warstw, ekstrakcja legendy
+    legend_extractor.py          # ekstrakcja legendy: tabela, klasyczna, OCR, nazwy
   tools/
     compare_analysis_snapshot.py     # porównanie dwóch snapshotów JSON
     summarize_analysis_performance.py # profil wydajnościowy snapshotów
 
 frontend/
   src/
-    App.tsx                      # stan, requesty API, HITL state, ręczne boxy
+    App.tsx                      # auth, projekty, requesty API, stan workspace
+    symbolLabels.ts              # przyjazne nazwy symboli i fallbacki UI
     components/
       AuthScreen.tsx             # logowanie, rejestracja, reset hasła
       ProjectDashboard.tsx       # projekty, historia analiz, konto, sesje
-      CanvasView.tsx             # render planu, finalne boxy, debug boxy, ręczny box
-      ResultsPanel.tsx           # lista wyników, zmiana klasy, debug lista
+      CanvasView.tsx             # render planu, strefy, zoom, overlay wyników
+      LegendReviewPanel.tsx      # review wzorców, crop, rename, reject/accept
+      ResultsPanel.tsx           # lista wyników, rename, korekta klas i boxów
       Sidebar.tsx                # upload, legenda, analiza, lista wzorców
       PatternModal.tsx           # modal edycji/usunięcia pojedynczego wzorca
       CostPanel.tsx              # kosztorys wykonawczy (ilość × cena PLN)
@@ -82,7 +90,8 @@ FastAPI. Obsługuje: upload PDF, render preview, ekstrakcję legendy, analizę, 
 Po dodaniu logowania nowe endpointy projektowe są preferowaną ścieżką pracy:
 `/api/projects/{project_id}/...`. Legacy endpointy bez `project_id` zostają jako
 fallback developerski, ale UI po zalogowaniu izoluje uploady, wzorce i snapshoty
-w `backend/data/projects/{project_id}/`.
+w `backend/data/projects/{project_id}/` lokalnie albo
+`/app/data/projects/{project_id}/` w Dockerze.
 
 ### auth_store.py
 Lekka warstwa persystencji SQLite bez ORM. Trzyma użytkowników, hashe haseł,
@@ -97,10 +106,25 @@ Obecny model uprawnień jest owner-only. Współdzielenie projektów powinno wej
 przez osobną tabelę membership/roles, nie przez pomijanie sprawdzenia właściciela.
 
 ### core/legend_extractor.py
-Renderowanie PDF do obrazu 300 DPI przez pymupdf/fitz. Obsługa warstw PDF (ukrywanie przed renderem). Ekstrakcja legendy z obrazu lub bezpośrednio z PDF.
+Renderowanie PDF do obrazu 300 DPI przez pymupdf/fitz. Obsługa warstw PDF
+(ukrywanie przed renderem). Ekstrakcja legendy z obrazu lub bezpośrednio z PDF.
+
+Aktualnie obsługuje kilka typów legend:
+
+- tabele z lewą kolumną symboli i opisem po prawej,
+- klasyczne legendy bez pełnej siatki tabeli,
+- kolorowe legendy z krótkimi indeksami i opisami tekstowymi,
+- szare/rastrowe legendy z OCR Tesseract jako fallbackiem.
+
+Ekstraktor próbuje trzymać w jednym wzorcu grafikę symbolu i jego indeks, a
+nazwę brać z opisu w tym samym wierszu. Nie powinien zawierać hardcodowanych
+współrzędnych pod konkretny PDF.
 
 ### core/detector.py
-Główna funkcja `detect_symbols()`. Ładuje template'y, buduje warianty, maskuje HSV, skanuje ROI przez `cv2.matchTemplate`, waliduje kandydatów, klastruje, generuje finalne `Detection`. Przy `include_debug=True` generuje `debugCandidates` dla HITL.
+Publiczny router `detect_symbols()`. Wybiera profil color/gray i przekazuje
+pracę do odpowiedniego entrypointu. Wspólny pipeline ładuje template'y, buduje
+warianty, skanuje ROI przez `cv2.matchTemplate`, waliduje kandydatów, klastruje
+i generuje finalne `Detection`.
 
 ### core/detector_config.py
 Wszystkie progi, skale, rotacje, limity. Konfigurowalny przez zmienne środowiskowe:
@@ -115,7 +139,9 @@ Dataclassy: `TemplateInfo`, `TemplateVariant`, `CandidateHit`, `Detection`, `Det
 Maski HSV, maski kolorów z template'u, walidacja kandydata (coverage, purity, context_purity, color_similarity), ROI na komponentach kolorowych, `content_mask` dla labeli tekstowych.
 
 ### core/detector_templates.py
-Ładowanie plików z `backend/templates/`. Budowanie wariantów: scale × rotation × mirror. Rozpoznawanie label-like template'ów po geometrii i treści.
+Ładowanie plików z katalogu wzorców aktywnej sesji/projektu albo legacy
+`backend/templates/`. Budowanie wariantów: scale × rotation × mirror.
+Rozpoznawanie label-like template'ów po geometrii i treści.
 
 ### core/detector_clustering.py
 Prefiltering raw peaków, clustering kandydatów przez IoU/overlap, metryki do deduplicacji.
@@ -129,8 +155,10 @@ Pomocnicze: wyciąganie tekstu z warstwy PDF, wykluczanie strefy legendy. Nie u�
 ## Opis Komponentów Frontendu
 
 ### App.tsx
-Zarządza stanem: auth, projekty, historia analiz, wyniki, HITL boxy, ręczne
-boxy, wzorce. Komunikacja z API. Przekazuje props do wszystkich komponentów.
+Zarządza stanem: auth, projekty, sesje, upload PDF, warstwy, legenda, review
+wzorców, analiza, wyniki i historia. Komunikacja z API używa endpointów
+projektowych po zalogowaniu. Przy powrocie do projektu odtwarza ostatni preview
+i snapshot analizy.
 
 ### AuthScreen.tsx
 Ekran wejściowy: logowanie, rejestracja oraz reset hasła. W dev może od razu
@@ -142,10 +170,19 @@ sortowaniem, edycja/archiwizacja projektu, historia analiz, profil użytkownika
 i lista aktywnych sesji.
 
 ### CanvasView.tsx
-Renderuje obraz planu (base64) na canvas. Rysuje zielone finalne boxy, czerwone/pomarańczowe debug boxy. Kliknięcie boxa kopiuje debug payload do schowka. Tryb ręcznego rysowania boxa.
+Renderuje obraz planu (base64) na canvas. Obsługuje zoom, przesuwanie,
+zaznaczanie strefy legendy/planu, ręczne cropy wzorców i overlay wyników.
+Kliknięcie boxa może skopiować payload diagnostyczny.
+
+### LegendReviewPanel.tsx
+Panel obowiązkowego sprawdzenia wzorców po ekstrakcji legendy. Pozwala
+zaakceptować, odrzucić, przyciąć, dodać brakujący wzorzec albo zmienić nazwę.
+Analiza planu jest blokowana, dopóki są wzorce `pending`.
 
 ### ResultsPanel.tsx
-Lista finalnych wyników (pogrupowanych). Zmiana klasy boxa, usuwanie boxa. Lista HITL/debug kandydatów z przyciskami "Dodaj" / "Ukryj".
+Lista finalnych wyników pogrupowanych po symbolu. Pozwala rozwijać grupy,
+zmieniać nazwę/klasę, usuwać fałszywe detekcje i korzystać z przyjaznych nazw
+z `symbolLabels.ts`.
 
 ### Sidebar.tsx
 Upload PDF, ekstrakcja legendy, uruchomienie analizy, wybór warstw. Lista załadowanych wzorców z miniaturą i przyciskiem edycji (otwiera PatternModal). Przycisk czyszczenia całej bazy wzorców.
@@ -160,7 +197,7 @@ Panel kosztorysu. Dla każdego symbolu z wyników: ilość (readonly) + pole cen
 
 1. PDF renderowany do obrazu 300 DPI.
 2. Warstwy PDF mogą być ukryte przed renderem; projekt musi działać też bez idealnych warstw.
-3. Template'y ładowane z `backend/templates/`.
+3. Template'y ładowane z katalogu projektu albo legacy `backend/templates/`.
 4. Budowanie wariantów dla każdego template'u:
    - skale: `0.90`, `1.00`, `1.10`
    - rotacje: `0°`, `90°`, `180°`, `270°`
@@ -173,7 +210,8 @@ Panel kosztorysu. Dla każdego symbolu z wyników: ilość (readonly) + pole cen
    - `match_score`, `coverage`, `purity`, `context_purity`, `color_similarity`, `verification_score`
 10. Promocje rodzinne (patrz `detection.md`).
 11. Clustering → finalne `Detection`.
-12. Przy `include_debug=True`: generowanie `debugCandidates` dla HITL.
+12. Przy `include_debug=True`: zapis snapshotu diagnostycznego i payloadu do
+    Inspektora ROI/debugowania.
 
 ## Warstwy PDF
 
