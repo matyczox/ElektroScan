@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import {
   ArrowDownAZ,
@@ -48,6 +48,13 @@ export interface ProjectAnalysisRun {
 }
 
 type ProjectSort = 'updated' | 'created' | 'name' | 'analysis';
+
+const PROJECT_SORT_OPTIONS: Array<{ value: ProjectSort; label: string }> = [
+  { value: 'updated', label: 'Ostatnia aktywność' },
+  { value: 'analysis', label: 'Ostatnia analiza' },
+  { value: 'created', label: 'Data utworzenia' },
+  { value: 'name', label: 'Nazwa' },
+];
 
 interface ProjectDashboardProps {
   user: AuthUser;
@@ -111,11 +118,34 @@ export const ProjectDashboard = ({
   const [isLogoutAllBusy, setIsLogoutAllBusy] = useState(false);
   const [search, setSearch] = useState('');
   const [sort, setSort] = useState<ProjectSort>('updated');
+  const [isSortMenuOpen, setIsSortMenuOpen] = useState(false);
+  const sortMenuRef = useRef<HTMLSpanElement | null>(null);
   const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
   const [editName, setEditName] = useState('');
   const [editDescription, setEditDescription] = useState('');
 
   const historyProject = projects.find(project => project.id === historyProjectId) || null;
+  const sortLabel = PROJECT_SORT_OPTIONS.find(option => option.value === sort)?.label || PROJECT_SORT_OPTIONS[0].label;
+
+  useEffect(() => {
+    if (!isSortMenuOpen) return;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (target && sortMenuRef.current?.contains(target)) return;
+      setIsSortMenuOpen(false);
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setIsSortMenuOpen(false);
+    };
+
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isSortMenuOpen]);
 
   const visibleProjects = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -344,14 +374,37 @@ export const ProjectDashboard = ({
             </label>
             <label className="form-field project-sort">
               Sortuj
-              <span>
+              <span className="project-sort-control" ref={sortMenuRef}>
                 <ArrowDownAZ size={15} />
-                <select value={sort} onChange={event => setSort(event.target.value as ProjectSort)}>
-                  <option value="updated">Ostatnia aktywność</option>
-                  <option value="analysis">Ostatnia analiza</option>
-                  <option value="created">Data utworzenia</option>
-                  <option value="name">Nazwa</option>
-                </select>
+                <button
+                  type="button"
+                  className="project-sort-trigger"
+                  aria-haspopup="listbox"
+                  aria-expanded={isSortMenuOpen}
+                  onClick={() => setIsSortMenuOpen(open => !open)}
+                >
+                  <span>{sortLabel}</span>
+                  <span className="project-sort-caret" aria-hidden="true">⌄</span>
+                </button>
+                {isSortMenuOpen && (
+                  <div className="project-sort-menu" role="listbox" aria-label="Sortuj projekty">
+                    {PROJECT_SORT_OPTIONS.map(option => (
+                      <button
+                        key={option.value}
+                        type="button"
+                        role="option"
+                        aria-selected={sort === option.value}
+                        className={sort === option.value ? 'is-active' : ''}
+                        onClick={() => {
+                          setSort(option.value);
+                          setIsSortMenuOpen(false);
+                        }}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </span>
             </label>
           </div>

@@ -282,7 +282,7 @@ h1, h2, h3 {
 }
 
 .project-search span,
-.project-sort span {
+.project-sort-control {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -293,7 +293,7 @@ h1, h2, h3 {
 }
 
 .project-search input,
-.project-sort select {
+.project-sort-trigger {
   border: 0;
   background: transparent;
   color: var(--text-primary);
@@ -303,8 +303,56 @@ h1, h2, h3 {
   outline: none;
 }
 
-.project-sort select {
-  color-scheme: dark;
+.project-sort-control {
+  position: relative;
+}
+
+.project-sort-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.project-sort-caret {
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1;
+}
+
+.project-sort-menu {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 6px);
+  right: 0;
+  left: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid rgba(197, 163, 105, 0.3);
+  border-radius: var(--radius-sm);
+  background: #111827;
+  box-shadow: 0 16px 30px rgba(0, 0, 0, 0.35);
+}
+
+.project-sort-menu button {
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  padding: 9px 10px;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.project-sort-menu button:hover,
+.project-sort-menu button:focus-visible,
+.project-sort-menu button.is-active {
+  background: rgba(197, 163, 105, 0.18);
+  color: #fff;
+  outline: none;
 }
 
 .project-list {

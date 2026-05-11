@@ -1105,6 +1105,23 @@ def _validate_template_hit(
             )
         )
     )
+    color_low_content_text_fragment = False
+    if hit.dominant_hsv is not None and hit.is_text_label and hit.content_pixel_count > 0:
+        content_ink_ratio = hit.content_pixel_count / max(1, hit.pixel_count)
+        low_content_symbol_label = content_ink_ratio <= 0.18
+        sideways_weak_fragment = hit.rotation % 180 == 90 and hit.match_score < 0.60
+        weak_local_fragment = (
+            hit.match_score < 0.50
+            and coverage < 0.78
+            and context_purity < 0.45
+        )
+        color_low_content_text_fragment = low_content_symbol_label and (
+            sideways_weak_fragment or weak_local_fragment
+        )
+    if color_low_content_text_fragment:
+        _record("color_text_fragment")
+        return False
+
     if (
         context_purity < NOISY_PARTIAL_CONTEXT_THRESHOLD
         and coverage < NOISY_PARTIAL_COVERAGE_THRESHOLD

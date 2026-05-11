@@ -20,6 +20,14 @@
     "height": 1177
   },
   "legendZoneImage": "legend_zone.png",
+  "excludedZones": [
+    {
+      "x": 8500,
+      "y": 1452,
+      "width": 1600,
+      "height": 6000
+    }
+  ],
   "excludeLegendFromAnalysis": true,
   "focus": "01,02,03,04,05,06,07",
   "centerTolerance": 20,
@@ -27,6 +35,7 @@
   "notes": [
     "Regression extracts templates fresh from the PDF legend zone before detection.",
     "The committed template PNGs remain a reference fixture for extraction shape/hash tests.",
-    "The golden excludes the legend area selected in the UI."
+    "The golden excludes the legend area selected in the UI.",
+    "The right-side title/notes block is excluded from analysis because it is not plan content."
   ]
 }
