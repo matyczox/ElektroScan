@@ -7,6 +7,14 @@
   "detectorProfile": "color",
   "expectedProfile": "color",
   "templateCount": 22,
+  "extractTemplatesFresh": true,
+  "legendMaskMode": "color",
+  "legendZone": {
+    "x": 3369,
+    "y": 287,
+    "width": 1297,
+    "height": 1595
+  },
   "excludedZones": [
     {
       "x": 3408,

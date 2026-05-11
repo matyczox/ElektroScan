@@ -2067,6 +2067,30 @@ class ExtractedSymbol:
     index: int
     pixel_count: int = 0  # liczba kolorowych pikseli — przydatna do sortowania
 
+def _is_spurious_color_legend_fragment(
+    *,
+    safe_name: str,
+    symbol_image: np.ndarray,
+    pixel_count: int,
+    previous: ExtractedSymbol | None,
+) -> bool:
+    """Drop tiny duplicate color crops while preserving the legend index gap."""
+
+    if previous is None:
+        return False
+    if _sanitize_filename(previous.name).casefold() != _sanitize_filename(safe_name).casefold():
+        return False
+    prev_h, prev_w = previous.image.shape[:2]
+    cur_h, cur_w = symbol_image.shape[:2]
+    if prev_w <= 0 or prev_h <= 0 or cur_w <= 0 or cur_h <= 0:
+        return False
+
+    return (
+        pixel_count < max(260, int(previous.pixel_count * 0.36))
+        and cur_w <= max(24, int(prev_w * 0.72))
+        and cur_h <= max(28, int(prev_h * 0.72))
+    )
+
 
 def get_pdf_layers(pdf_path: str) -> list[dict]:
     """
@@ -2373,18 +2397,9 @@ def extract_legend(
             contours, _ = cv2.findContours(glued_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             contours = _filter_gray_legend_symbol_contours(contours, legend_area.shape)
     else:
-        symbol_mask, row_bboxes, row_label_hints = _color_classic_row_symbol_bboxes(
-            raw_symbol_mask,
-            text_words,
-            x_start=x_start,
-            y_start=y_start,
-            scale=scale,
-        )
-        if row_bboxes:
-            contours = [_rect_to_contour(rect) for rect in row_bboxes]
-        else:
-            glued_mask = cv2.morphologyEx(symbol_mask, cv2.MORPH_CLOSE, GLUE_KERNEL)
-            contours, _ = cv2.findContours(glued_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        symbol_mask = raw_symbol_mask
+        glued_mask = cv2.morphologyEx(symbol_mask, cv2.MORPH_CLOSE, GLUE_KERNEL)
+        contours, _ = cv2.findContours(glued_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     contours = sorted(contours, key=lambda c: cv2.boundingRect(c)[1])
 
     # 4. Ekstrakcja symboli
@@ -2495,9 +2510,19 @@ def extract_legend(
             if dy < TEXT_TOLERANCE_Y and TEXT_MIN_OVERLAP_X < dx < TEXT_MAX_DISTANCE_X:
                 found_texts.append((dx, block[4].strip()))
 
+        if found_texts:
+            found_texts.sort(key=lambda t: t[0])
+            full_name = "_".join(t[1] for t in found_texts)
+            found_safe_name = _sanitize_filename(full_name)
+        else:
+            found_safe_name = ""
+
         # Łączymy wszystkie fragmenty tekstu (posortowane od lewej do prawej)
         if symbol_text:
             safe_name = symbol_text
+            filename = f"{counter:02d}_{safe_name}.png"
+        elif _mask_used != "gray" and found_safe_name:
+            safe_name = found_safe_name
             filename = f"{counter:02d}_{safe_name}.png"
         elif row_label_hint:
             safe_name = row_label_hint
@@ -2508,14 +2533,21 @@ def extract_legend(
         elif row_label_ocr:
             safe_name = row_label_ocr
             filename = f"{counter:02d}_{safe_name}.png"
-        elif found_texts:
-            found_texts.sort(key=lambda t: t[0])
-            full_name = "_".join(t[1] for t in found_texts)
-            safe_name = _sanitize_filename(full_name)
+        elif found_safe_name:
+            safe_name = found_safe_name
             filename = f"{counter:02d}_{safe_name}.png"
         else:
             safe_name = f"symbol_{counter:02d}"
             filename = f"{counter:02d}_{safe_name}.png"
+
+        if _mask_used != "gray" and _is_spurious_color_legend_fragment(
+            safe_name=safe_name,
+            symbol_image=symbol_image,
+            pixel_count=pixel_count,
+            previous=results[-1] if results else None,
+        ):
+            counter += 1
+            continue
 
         # ── Zapis (cv2.imencode + write_bytes zamiast imwrite dla Unicode) ──
         file_path = output_path / filename
