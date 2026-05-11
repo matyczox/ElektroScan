@@ -10,6 +10,7 @@ services:
       - backend_uploads:/app/uploads
       - backend_templates:/app/templates
       - backend_debug:/app/analysis_debug
+      - backend_data:/app/data
     environment:
       - ELEKTROSCAN_OPENCV_THREADS=1
     restart: unless-stopped
@@ -30,3 +31,4 @@ volumes:
   backend_uploads:
   backend_templates:
   backend_debug:
+  backend_data:

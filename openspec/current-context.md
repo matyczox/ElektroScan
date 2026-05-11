@@ -62,6 +62,33 @@ npm run build
 
 ## Status UI
 
+- Dodano fundament logowania i projektów. Frontend startuje od logowania,
+  potem pokazuje listę projektów; właściwy workspace detekcji działa dopiero po
+  wyborze projektu. Nowy flow używa endpointów `/api/projects/{project_id}/...`.
+- Aktualny dashboard projektów ma wyszukiwarkę, sortowanie, edycję nazwy/opisu,
+  archiwizację projektu, historię analiz, ustawienia profilu oraz listę
+  aktywnych sesji.
+- Auth ma MVP resetu hasła. Lokalny/dev backend może zwrócić token resetu w
+  odpowiedzi API, żeby dało się testować bez wysyłki maili; produkcja musi
+  wyłączyć `ELEKTROSCAN_AUTH_DEV_TOKENS` i podpiąć dostawcę e-mail.
+- Dane projektu są izolowane w `backend/data/projects/{project_id}/`:
+  `uploads/`, `templates/`, `analysis_debug/`. Globalne endpointy bez
+  `project_id` są legacy/dev fallbackiem.
+- Lista projektów zwraca `latestSessionId`. Frontend przy ponownym wejściu do
+  projektu odtwarza ostatni podgląd PDF i warstwy z tej sesji zamiast pokazywać
+  pusty workspace.
+- Wyjście z projektu do listy projektów nie czyści już lokalnego workspace.
+  Dzięki temu trwająca analiza i jej progress nie są gubione przy powrocie do
+  tego samego projektu. Reset następuje dopiero przy wyborze innego projektu,
+  wylogowaniu albo czyszczeniu projektu.
+- Analizy projektowe są rejestrowane w SQLite i widoczne przez
+  `/api/projects/{project_id}/analysis-runs`.
+- Po powrocie do projektu po pracy w innym projekcie frontend odtwarza ostatnią
+  zakończoną analizę dla aktualnej sesji PDF ze snapshotu
+  `/api/projects/{project_id}/analysis-runs/{analysis_id}`.
+- Role, zaproszenia i współdzielenie projektów nie są jeszcze wdrożone. Obecny
+  model uprawnień to owner-only; przyszły moduł powinien dodać membership table
+  zamiast rozluźniać `owner_user_id` w istniejących query.
 - Usunieto stary panel `Pokaz niepewne/brakujace` i debugCandidates z glownego
   UI. Nie przywracac tego jako domyslnej funkcji.
 - Narzedziem diagnostycznym jest teraz Inspektor ROI.
@@ -81,6 +108,11 @@ npm run build
   komponentow w kolumnie symboli, zamiast prostego cropa miedzy liniami tabeli.
   To chroni przed ucieciem etykiety z gory i dobraniem fragmentu kolejnego
   wiersza z dolu.
+- Dla legend tabelarycznych nazwa wzorca jest teraz brana z tekstu/opisu w tym
+  samym wierszu tabeli, a nie tylko z fallbacku `sym_XX`. Ekstraktor uzywa
+  `page.get_text("words")`, pomija wiodace kody/liczniki typu `A1`/`01`, a gdy
+  nie znajdzie opisu, wraca do starego `_get_row_index_text` i dopiero potem do
+  `sym_XX`.
 - Widoczne teksty UI po ostatnich zmianach powinny byc zapisane jako UTF-8.
   Nie zostawiac mojibake typu `Brak podglÄ...du`.
 

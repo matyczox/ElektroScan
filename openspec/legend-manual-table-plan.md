@@ -128,7 +128,7 @@ Parametr wyjście: `"table"` lub `"classic"`.
 
 #### 3b. Ekstrakcja tabelaryczna — `_extract_table_legend`
 
-Nowa funkcja `_extract_table_legend(legend_area_bgr, text_blocks, x_start, y_start, scale) -> list[ExtractedSymbol]`.
+Nowa funkcja `_extract_table_legend(legend_area_bgr, text_blocks, text_words, x_start, y_start, scale) -> list[ExtractedSymbol]`.
 
 **Krok 1 — znajdź wiersze tabeli**
 
@@ -153,7 +153,9 @@ row_boundaries = _merge_close_indices(line_rows, gap=5)
 **Krok 2 — znajdź kolumny (pionowe linie)**
 
 Analogicznie z pionowym kernelem `(1 × h//2)`.
-Wynikowe `col_boundaries` to lista `x` podziałów kolumn.
+Wynikowe `col_boundaries` to lista `x` podziałów kolumn. Separator symboli
+trzeba wybierać po odrzuceniu zewnętrznych ramek tabeli; lewa ramka zaznaczonej
+strefy nie może zostać potraktowana jako prawa krawędź kolumny symbolu.
 
 Jeśli brak wyraźnych pionowych linii — użyj heurystyki: pierwsza kolumna to
 lewe `15%` szerokości strefy (symbole są wąskie).
@@ -174,8 +176,11 @@ for i in range(len(row_boundaries) - 1):
     # Sprawdź czy komórka zawiera coś poza białym tłem
     if _cell_has_content(cell_inner):
         symbol_img = _tight_crop_symbol(cell_inner)
-        name = _get_row_index_text(text_blocks, x_start, y_start, scale,
-                                   row_top, row_bottom, col_right)
+        name = _get_row_label_text(text_words, x_start, y_start, scale,
+                                   row_top, row_bottom, col_right, w)
+        if not name:
+            name = _get_row_index_text(text_blocks, x_start, y_start, scale,
+                                       row_top, row_bottom, col_right)
         yield ExtractedSymbol(image=symbol_img, name=name or f"sym_{i+1:02d}")
 ```
 
@@ -195,7 +200,15 @@ Maska dla symboli tabelarycznych: piksele `< 160` w szarości (czarne linie symb
 Margines `SYMBOL_PADDING = 4px` (nieco więcej niż klasyczny 2px, bo komórki bywają
 ciaśniejsze).
 
-**Krok 6 — `_get_row_index_text`**
+**Krok 6 — `_get_row_label_text`, potem `_get_row_index_text`**
+
+Najpierw używamy `text_words` z fitz (`page.get_text("words")`), żeby znaleźć
+tekst/opis w tym samym wierszu tabeli i na prawo od kolumny symbolu. To jest
+preferowana nazwa wzorca pokazywana potem w UI zamiast `sym_01`.
+
+Wiodące liczniki albo kody techniczne (`01`, `A1`, `AW2`) są pomijane, jeśli za
+nimi znajduje się czytelny opis, np. `Oprawa LED`. Dopiero gdy opis nie zostanie
+znaleziony, używamy starszego fallbacku `_get_row_index_text`.
 
 Używa `text_blocks` z fitz (PDF text layer) do znalezienia krótkiego tekstu
 (kodu indeksu, np. `A1`, `AW2`) w komórce drugiej kolumny tego samego wiersza.
@@ -217,7 +230,8 @@ for block in text_blocks:
 return None
 ```
 
-Fallback: jeśli text layer jest pusty lub brak match → `sym_01`, `sym_02`, …
+Fallback: jeśli text layer jest pusty lub brak match → `_get_row_index_text` →
+`sym_01`, `sym_02`, …
 
 #### 3c. Integracja w `extract_legend`
 
@@ -226,7 +240,7 @@ legend_format = _detect_legend_format(legend_area)
 
 if legend_format == "table":
     results = list(_extract_table_legend(
-        legend_area, text_blocks, x_start, y_start, scale
+        legend_area, text_blocks, text_words, x_start, y_start, scale
     ))
 else:
     # istniejąca ścieżka color / gray
@@ -245,7 +259,7 @@ Parametr `mask_mode` (color/gray/auto) zostaje — klasyczna ścieżka nadal go 
 | Symbol wystaje poza lewą krawędź tabeli | Poszerzamy `col_left` o `10px` w lewo od lewego marginesu strefy (clamp do 0) |
 | Wiersz nagłówka (tekst "Indeks", "Producent") | `_cell_has_content` zwraca False (tylko tekst, brak ciemnego symbolu graficznego) |
 | Pusty wiersz / separator | `_cell_has_content` zwraca False |
-| Brak text layer (skan) | `_get_row_index_text` zwraca None → fallback `sym_01`, `sym_02` |
+| Brak text layer (skan) | `_get_row_label_text` i `_get_row_index_text` zwracaja None → fallback `sym_01`, `sym_02` |
 | Kilka symboli w jednej komórce (stacked) | Rare; ciasne wycinanie zwraca cały content — użytkownik może ręcznie usunąć/podzielić przez PatternModal |
 | Format mieszany (część klasyczna, część tabelaryczna) | Nie obsługujemy w pierwszej iteracji. Użytkownik zaznacza osobno każdą strefę. |
 

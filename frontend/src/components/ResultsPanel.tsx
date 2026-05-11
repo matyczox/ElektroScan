@@ -1,8 +1,6 @@
 ﻿import React, { useState, useEffect, useRef } from 'react';
 import { Layers, ChevronDown, ChevronRight, X, Calculator, Upload } from 'lucide-react';
-
-const API_BASE = 'http://127.0.0.1:8000';
-const withNoCache = (path: string) => `${API_BASE}${path}${path.includes('?') ? '&' : '?'}_ts=${Date.now()}`;
+import { apiFetch, projectApiPath } from '../api';
 
 interface Box {
   id: string;
@@ -44,6 +42,7 @@ interface ResultsPanelProps {
   onRejectBox: (id: string) => void;
   onChangeBoxSymbol?: (id: string, symbolName: string) => void;
   symbolNames?: string[];
+  projectId?: string;
   onTemplateUploaded?: () => void;
 }
 
@@ -55,6 +54,7 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
   onRejectBox,
   onChangeBoxSymbol,
   symbolNames = [],
+  projectId,
   onTemplateUploaded,
 }) => {
   const [activeTab, setActiveTab] = useState<'correction' | 'cost'>('correction');
@@ -100,15 +100,15 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files || e.target.files.length === 0) return;
+    if (!projectId) return;
     const file = e.target.files[0];
     setUploading(true);
     try {
       const formData = new FormData();
       formData.append('file', file);
-      const res = await fetch(withNoCache('/api/templates/upload'), {
+      const res = await apiFetch(projectApiPath(projectId, '/templates/upload'), {
         method: 'POST',
         body: formData,
-        cache: 'no-store',
       });
       if (res.ok) {
         onTemplateUploaded?.();

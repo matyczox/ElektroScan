@@ -1,12 +1,19 @@
-import { useState, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { ArrowLeft } from 'lucide-react';
+import { apiFetch, projectApiPath, readApiError } from './api';
+import { AuthScreen, type AuthUser } from './components/AuthScreen';
+import {
+  ProjectDashboard,
+  type AuthSession,
+  type ProjectAnalysisRun,
+  type ProjectSummary,
+} from './components/ProjectDashboard';
 import { Sidebar } from './components/Sidebar';
 import { CanvasView } from './components/CanvasView';
 import { ResultsPanel } from './components/ResultsPanel';
 import { LegendReviewPanel, type LegendReviewItem } from './components/LegendReviewPanel';
 import './index.css';
 
-const API_BASE = 'http://127.0.0.1:8000';
-const withNoCache = (path: string) => `${API_BASE}${path}${path.includes('?') ? '&' : '?'}_ts=${Date.now()}`;
 const getPatternKey = (pattern: Pick<Pattern, 'id' | 'name'>) => pattern.id ?? pattern.name;
 
 type DetectorProfile = 'auto' | 'color' | 'gray';
@@ -75,6 +82,12 @@ interface AnalysisProgress {
   done?: boolean;
   error?: string | null;
   updatedAtUtc?: string | null;
+}
+
+interface AnalysisSnapshot {
+  analysisContext?: AnalysisContext;
+  results?: ResultGroup[];
+  boxes?: DetectionBox[];
 }
 
 interface DetectionBox {
@@ -199,6 +212,17 @@ function App() {
   const [isInspectingRoi, setIsInspectingRoi] = useState(false);
   const [grayDebugZones, setGrayDebugZones] = useState<GrayDebugZones | null>(null);
   const [isLoadingGrayZones, setIsLoadingGrayZones] = useState(false);
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [isAuthLoading, setIsAuthLoading] = useState(true);
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [isProjectsLoading, setIsProjectsLoading] = useState(false);
+  const [activeProject, setActiveProject] = useState<ProjectSummary | null>(null);
+  const [authSessions, setAuthSessions] = useState<AuthSession[]>([]);
+  const [isSessionsLoading, setIsSessionsLoading] = useState(false);
+  const [analysisRuns, setAnalysisRuns] = useState<ProjectAnalysisRun[]>([]);
+  const [historyProjectId, setHistoryProjectId] = useState<string | null>(null);
+  const [isHistoryLoading, setIsHistoryLoading] = useState(false);
+  const [workspaceProjectId, setWorkspaceProjectId] = useState<string | null>(null);
   const detectRequestSeqRef = useRef(0);
   const detectAbortRef = useRef<AbortController | null>(null);
   const previewRenderSeqRef = useRef(0);
@@ -206,6 +230,318 @@ function App() {
   const legendReviewCompleted = legendReviewItems.filter(item => item.status !== 'pending').length;
   const hasLegendReview = legendReviewItems.length > 0;
   const isLegendReviewComplete = !hasLegendReview || legendReviewCompleted === legendReviewItems.length;
+  const activeProjectId = activeProject?.id ?? null;
+
+  const projectPath = (path: string) => {
+    if (!activeProjectId) throw new Error('Nie wybrano projektu.');
+    return projectApiPath(activeProjectId, path);
+  };
+
+  const resetWorkspaceState = () => {
+    setFile(null);
+    setPdfPreview(null);
+    setPatterns([]);
+    setLegendReviewItems([]);
+    setIsLegendReviewOpen(false);
+    setLegendCorrectionTarget(null);
+    setResults([]);
+    setBoxes([]);
+    setLayers([]);
+    setSessionId(null);
+    setExcludedZones([]);
+    setLegendZone(null);
+    setPlanZone(null);
+    setFocusedBoxId(null);
+    setAnalysisContext(null);
+    setPdfDiagnostics(null);
+    setAnalysisProgress(null);
+    setRoiInspection(null);
+    setGrayDebugZones(null);
+  };
+
+  const cancelActiveAnalysisRequest = () => {
+    detectRequestSeqRef.current += 1;
+    detectAbortRef.current?.abort();
+    detectAbortRef.current = null;
+  };
+
+  const clearWorkspaceProject = () => {
+    cancelActiveAnalysisRequest();
+    setWorkspaceProjectId(null);
+    resetWorkspaceState();
+  };
+
+  const loadProjects = async () => {
+    setIsProjectsLoading(true);
+    try {
+      const response = await apiFetch('/api/projects');
+      if (!response.ok) throw new Error(await readApiError(response, 'Nie udało się pobrać projektów.'));
+      const payload = (await response.json()) as { projects?: ProjectSummary[] };
+      setProjects(payload.projects || []);
+    } finally {
+      setIsProjectsLoading(false);
+    }
+  };
+
+  const loadAuthSessions = async () => {
+    setIsSessionsLoading(true);
+    try {
+      const response = await apiFetch('/api/auth/sessions');
+      if (!response.ok) throw new Error(await readApiError(response, 'Nie udało się pobrać sesji.'));
+      const payload = (await response.json()) as { sessions?: AuthSession[] };
+      setAuthSessions(payload.sessions || []);
+    } finally {
+      setIsSessionsLoading(false);
+    }
+  };
+
+  const loadAnalysisRuns = async (project: ProjectSummary) => {
+    setHistoryProjectId(project.id);
+    setIsHistoryLoading(true);
+    try {
+      const response = await apiFetch(projectApiPath(project.id, '/analysis-runs'));
+      if (!response.ok) throw new Error(await readApiError(response, 'Nie udało się pobrać historii analiz.'));
+      const payload = (await response.json()) as { analysisRuns?: ProjectAnalysisRun[] };
+      setAnalysisRuns(payload.analysisRuns || []);
+    } finally {
+      setIsHistoryLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const loadSession = async () => {
+      try {
+        const response = await apiFetch('/api/auth/me');
+        if (!isMounted) return;
+        if (!response.ok) {
+          setAuthUser(null);
+          setProjects([]);
+          setAuthSessions([]);
+          return;
+        }
+        const payload = (await response.json()) as { user?: AuthUser };
+        if (!payload.user) {
+          setAuthUser(null);
+          setProjects([]);
+          setAuthSessions([]);
+          return;
+        }
+        setAuthUser(payload.user);
+        await Promise.all([loadProjects(), loadAuthSessions()]);
+      } catch {
+        if (isMounted) {
+          setAuthUser(null);
+          setAuthSessions([]);
+        }
+      } finally {
+        if (isMounted) setIsAuthLoading(false);
+      }
+    };
+
+    loadSession();
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  const handleAuthenticated = async (user: AuthUser) => {
+    setAuthUser(user);
+    await Promise.all([loadProjects(), loadAuthSessions()]);
+  };
+
+  const handleCreateProject = async (name: string, description: string) => {
+    const response = await apiFetch('/api/projects', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, description }),
+    });
+    if (!response.ok) {
+      throw new Error(await readApiError(response, 'Nie udało się utworzyć projektu.'));
+    }
+    const payload = (await response.json()) as { project?: ProjectSummary };
+    if (!payload.project) throw new Error('Backend nie zwrócił projektu.');
+    setProjects(prev => [payload.project!, ...prev.filter(project => project.id !== payload.project!.id)]);
+    cancelActiveAnalysisRequest();
+    setWorkspaceProjectId(payload.project.id);
+    setActiveProject(payload.project);
+    resetWorkspaceState();
+  };
+
+  const restoreProjectWorkspace = async (project: ProjectSummary) => {
+    if (!project.latestSessionId) return;
+    setIsProcessing(true);
+    setProgressText('Ładowanie ostatniego podglądu...');
+    try {
+      setSessionId(project.latestSessionId);
+      const [previewResponse, layersResponse] = await Promise.all([
+        apiFetch(projectApiPath(project.id, `/render-preview?session_id=${project.latestSessionId}`), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ hidden_layers: [] }),
+        }),
+        apiFetch(projectApiPath(project.id, `/layers?session_id=${project.latestSessionId}`)),
+      ]);
+
+      if (previewResponse.ok) {
+        const previewData = await previewResponse.json();
+        setPdfPreview(previewData.planPreview || null);
+        setPdfDiagnostics(previewData.pdfDiagnostics || null);
+      }
+      if (layersResponse.ok) {
+        const layersData = await layersResponse.json();
+        setLayers(layersData.layers || []);
+      }
+      await restoreLatestProjectAnalysis(project.id, project.latestSessionId);
+    } catch (error) {
+      console.error('Nie udało się odtworzyć ostatniego podglądu projektu', error);
+    } finally {
+      setIsProcessing(false);
+      setProgressText('');
+    }
+  };
+
+  const restoreLatestProjectAnalysis = async (projectId: string, currentSessionId: string) => {
+    try {
+      const runsResponse = await apiFetch(projectApiPath(projectId, '/analysis-runs'));
+      if (!runsResponse.ok) return;
+      const runsPayload = (await runsResponse.json()) as { analysisRuns?: ProjectAnalysisRun[] };
+      const latestRun = (runsPayload.analysisRuns || []).find(
+        run => run.sessionId === currentSessionId
+      );
+      if (!latestRun) return;
+
+      const snapshotResponse = await apiFetch(
+        projectApiPath(projectId, `/analysis-runs/${encodeURIComponent(latestRun.id)}`)
+      );
+      if (!snapshotResponse.ok) return;
+      const snapshotPayload = (await snapshotResponse.json()) as { snapshot?: AnalysisSnapshot | null };
+      const snapshot = snapshotPayload.snapshot;
+      if (!snapshot?.analysisContext) return;
+
+      setResults(snapshot.results || []);
+      setBoxes(snapshot.boxes || []);
+      setAnalysisContext(snapshot.analysisContext);
+      setPdfDiagnostics(snapshot.analysisContext.pdfDiagnostics || null);
+      setAnalysisProgress({
+        sessionId: snapshot.analysisContext.sessionId,
+        analysisId: snapshot.analysisContext.analysisId,
+        stage: 'done',
+        percent: 100,
+        detail: 'Analiza zakonczona',
+        done: true,
+        updatedAtUtc: snapshot.analysisContext.generatedAtUtc,
+      });
+    } catch (error) {
+      console.error('Nie udało się odtworzyć ostatniej analizy projektu', error);
+    }
+  };
+
+  const handleUpdateProject = async (projectId: string, name: string, description: string) => {
+    const response = await apiFetch(projectApiPath(projectId, ''), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, description }),
+    });
+    if (!response.ok) {
+      throw new Error(await readApiError(response, 'Nie udało się zapisać projektu.'));
+    }
+    const payload = (await response.json()) as { project?: ProjectSummary };
+    if (!payload.project) throw new Error('Backend nie zwrócił projektu.');
+    setProjects(prev =>
+      prev.map(project => project.id === projectId ? payload.project! : project)
+    );
+    setActiveProject(current => current?.id === projectId ? payload.project! : current);
+    return payload.project;
+  };
+
+  const handleArchiveProject = async (projectId: string) => {
+    const response = await apiFetch(projectApiPath(projectId, ''), { method: 'DELETE' });
+    if (!response.ok) {
+      throw new Error(await readApiError(response, 'Nie udało się zarchiwizować projektu.'));
+    }
+    setProjects(prev => prev.filter(project => project.id !== projectId));
+    if (historyProjectId === projectId) {
+      setHistoryProjectId(null);
+      setAnalysisRuns([]);
+    }
+    if (activeProject?.id === projectId) {
+      setActiveProject(null);
+      clearWorkspaceProject();
+    }
+    if (workspaceProjectId === projectId) clearWorkspaceProject();
+  };
+
+  const handleSelectProject = (project: ProjectSummary) => {
+    setActiveProject(project);
+    if (workspaceProjectId !== project.id) {
+      cancelActiveAnalysisRequest();
+      resetWorkspaceState();
+      setWorkspaceProjectId(project.id);
+    }
+    fetchTemplates(project.id);
+    if (workspaceProjectId !== project.id || (!pdfPreview && project.latestSessionId)) {
+      void restoreProjectWorkspace(project);
+    }
+  };
+
+  const handleUpdateProfile = async (name: string) => {
+    const response = await apiFetch('/api/auth/me', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    if (!response.ok) {
+      throw new Error(await readApiError(response, 'Nie udało się zapisać profilu.'));
+    }
+    const payload = (await response.json()) as { user?: AuthUser };
+    if (!payload.user) throw new Error('Backend nie zwrócił użytkownika.');
+    setAuthUser(payload.user);
+  };
+
+  const handleDeleteSession = async (sessionIdToDelete: string) => {
+    const response = await apiFetch(`/api/auth/sessions/${encodeURIComponent(sessionIdToDelete)}`, {
+      method: 'DELETE',
+    });
+    if (!response.ok) {
+      throw new Error(await readApiError(response, 'Nie udało się zamknąć sesji.'));
+    }
+    const payload = (await response.json()) as { deletedCurrentSession?: boolean };
+    if (payload.deletedCurrentSession) {
+      setAuthUser(null);
+      setProjects([]);
+      setAuthSessions([]);
+      setActiveProject(null);
+      clearWorkspaceProject();
+      return;
+    }
+    await loadAuthSessions();
+  };
+
+  const handleLogoutAll = async () => {
+    await apiFetch('/api/auth/logout-all', { method: 'POST' });
+    setAuthUser(null);
+    setProjects([]);
+    setAuthSessions([]);
+    setActiveProject(null);
+    clearWorkspaceProject();
+  };
+
+  const handleLogout = async () => {
+    try {
+      await apiFetch('/api/auth/logout', { method: 'POST' });
+    } catch {
+      // Local state reset is authoritative for the UI.
+    }
+    setAuthUser(null);
+    setProjects([]);
+    setAuthSessions([]);
+    setHistoryProjectId(null);
+    setAnalysisRuns([]);
+    setActiveProject(null);
+    clearWorkspaceProject();
+  };
 
   const replacePattern = (oldId: string, pattern: Pattern) => {
     setPatterns(prev => {
@@ -228,9 +564,10 @@ function App() {
     };
   };
 
-  const fetchTemplates = async () => {
+  const fetchTemplates = async (projectId = activeProjectId) => {
+    if (!projectId) return;
     try {
-      const response = await fetch(withNoCache('/api/templates'), { cache: 'no-store' });
+      const response = await apiFetch(projectApiPath(projectId, '/templates'));
       if (response.ok) {
         const data = await response.json() as { patterns?: Pattern[] };
         setPatterns(data.patterns || []);
@@ -243,6 +580,8 @@ function App() {
   // ── Handlery ────────────────────────────────────────────
 
   const handleFileSelect = async (selectedFile: File) => {
+    if (!activeProjectId) return;
+    const currentProjectId = activeProjectId;
     previewRenderSeqRef.current += 1;
     setFile(selectedFile);
     setPdfPreview(null);
@@ -269,10 +608,9 @@ function App() {
     try {
       const formData = new FormData();
       formData.append('file', selectedFile);
-      const res = await fetch(withNoCache('/api/preview'), {
+      const res = await apiFetch(projectApiPath(currentProjectId, '/preview'), {
         method: 'POST',
         body: formData,
-        cache: 'no-store',
       });
       if (!res.ok) throw new Error('Błąd podglądu');
       const data = await res.json();
@@ -283,10 +621,9 @@ function App() {
 
       const renderSeq = ++previewRenderSeqRef.current;
       const loadedSessionId = data.sessionId;
-      void fetch(withNoCache(`/api/render-preview?session_id=${loadedSessionId}`), {
+      void apiFetch(projectApiPath(currentProjectId, `/render-preview?session_id=${loadedSessionId}`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        cache: 'no-store',
         body: JSON.stringify({ hidden_layers: [] }),
       })
         .then(response => response.ok ? response.json() : null)
@@ -297,9 +634,34 @@ function App() {
           setPdfDiagnostics(fullData.pdfDiagnostics || null);
         })
         .catch(err => console.error('Full preview warmup error', err));
+      const uploadAtUtc = new Date().toISOString();
+      setActiveProject(current =>
+        current
+          ? {
+              ...current,
+              latestSessionId: data.sessionId,
+              latestSourcePdf: data.sourcePdf || selectedFile.name,
+              latestUploadAtUtc: uploadAtUtc,
+              updatedAtUtc: uploadAtUtc,
+            }
+          : current
+      );
+      setProjects(prev =>
+        prev.map(project =>
+          project.id === currentProjectId
+            ? {
+                ...project,
+                latestSessionId: data.sessionId,
+                latestSourcePdf: data.sourcePdf || selectedFile.name,
+                latestUploadAtUtc: uploadAtUtc,
+                updatedAtUtc: uploadAtUtc,
+              }
+            : project
+        )
+      );
       
       // Fetch layers
-      fetch(withNoCache(`/api/layers?session_id=${data.sessionId}`), { cache: 'no-store' })
+      apiFetch(projectApiPath(currentProjectId, `/layers?session_id=${data.sessionId}`))
         .then(r => r.json())
         .then(d => setLayers(d.layers || []))
         .catch(err => console.error("Layers fetch error", err));
@@ -313,7 +675,7 @@ function App() {
   };
 
   const handleToggleLayer = async (layerName: string) => {
-    if (!sessionId) return;
+    if (!sessionId || !activeProjectId) return;
     const newLayers = layers.map(l => l.name === layerName ? { ...l, visible: !l.visible } : l);
     setLayers(newLayers);
     const renderSeq = ++previewRenderSeqRef.current;
@@ -322,10 +684,9 @@ function App() {
     setProgressText('Przeliczanie warstw...');
     try {
       const hiddenLayers = newLayers.filter(l => !l.visible).map(l => l.name);
-      const res = await fetch(withNoCache(`/api/render-preview?session_id=${sessionId}`), {
+      const res = await apiFetch(projectPath(`/render-preview?session_id=${sessionId}`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        cache: 'no-store',
         body: JSON.stringify({ hidden_layers: hiddenLayers })
       });
       if (!res.ok) throw new Error('Błąd odświeżania podglądu');
@@ -343,7 +704,7 @@ function App() {
   };
 
   const handleExtractLegend = async () => {
-    if (!sessionId) return;
+    if (!sessionId || !activeProjectId) return;
     if (!legendZone) {
       alert('Zaznacz strefę legendy na planie przed ekstrakcją (tryb Legenda na canvasie).');
       return;
@@ -351,10 +712,9 @@ function App() {
     setIsProcessing(true);
     setProgressText('Ekstrakcja legendy (300 DPI)...');
     try {
-      const response = await fetch(withNoCache(`/api/extract-legend?session_id=${sessionId}`), {
+      const response = await apiFetch(projectPath(`/extract-legend?session_id=${sessionId}`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        cache: 'no-store',
         body: JSON.stringify({
           excluded_zones: excludedZones.map(z => ({
             x: Math.round(z.x),
@@ -414,7 +774,7 @@ function App() {
   };
 
   const handleDetect = async () => {
-    if (!sessionId) return;
+    if (!sessionId || !activeProjectId) return;
     if (!isLegendReviewComplete) {
       setIsLegendReviewOpen(true);
       alert('Sprawdź wszystkie wzorce legendy przed analizą.');
@@ -438,10 +798,7 @@ function App() {
     try {
       progressTimer = window.setInterval(async () => {
         try {
-          const progressResponse = await fetch(
-            withNoCache(`/api/analysis-progress?session_id=${sessionId}`),
-            { cache: 'no-store' },
-          );
+          const progressResponse = await apiFetch(`/api/analysis-progress?session_id=${sessionId}`);
           if (!progressResponse.ok || requestSeq !== detectRequestSeqRef.current) return;
           const progressData = await progressResponse.json();
           const progress = progressData.progress as AnalysisProgress | undefined;
@@ -458,11 +815,10 @@ function App() {
       }, 700);
 
       const fetchStartedAt = performance.now();
-      const response = await fetch(withNoCache(`/api/analyze?session_id=${sessionId}`), {
+      const response = await apiFetch(projectPath(`/analyze?session_id=${sessionId}`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: controller.signal,
-        cache: 'no-store',
         body: JSON.stringify({
           excluded_zones: excludedZones.map(z => ({
             x: Math.round(z.x),
@@ -537,7 +893,7 @@ function App() {
   const handleClear = async () => {
     previewRenderSeqRef.current += 1;
     try {
-      await fetch(withNoCache('/api/clear'), { method: 'POST', cache: 'no-store' });
+      if (activeProjectId) await apiFetch(projectPath('/clear'), { method: 'POST' });
     } catch { /* ignore */ }
     setFile(null);
     setPdfPreview(null);
@@ -566,14 +922,13 @@ function App() {
       setGrayDebugZones(null);
       return;
     }
-    if (!sessionId) return;
+    if (!sessionId || !activeProjectId) return;
     setIsLoadingGrayZones(true);
     setProgressText('Liczenie czarnych stref...');
     try {
-      const response = await fetch(withNoCache(`/api/gray-debug-zones?session_id=${sessionId}`), {
+      const response = await apiFetch(projectPath(`/gray-debug-zones?session_id=${sessionId}`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        cache: 'no-store',
         body: JSON.stringify({
           hidden_layers: layers.filter(l => !l.visible).map(l => l.name),
           detector_profile: detectorProfile,
@@ -595,14 +950,13 @@ function App() {
   };
 
   const handleInspectRoi = async (x: number, y: number, width: number, height: number) => {
-    if (!sessionId) return;
+    if (!sessionId || !activeProjectId) return;
     setIsInspectingRoi(true);
     setProgressText('Inspektor ROI liczy dopasowania...');
     try {
-      const response = await fetch(withNoCache(`/api/inspect-roi?session_id=${sessionId}`), {
+      const response = await apiFetch(projectPath(`/inspect-roi?session_id=${sessionId}`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        cache: 'no-store',
         body: JSON.stringify({
           hidden_layers: layers.filter(l => !l.visible).map(l => l.name),
           detector_profile: detectorProfile,
@@ -631,7 +985,8 @@ function App() {
 
   const handleClearTemplates = async () => {
     try {
-      await fetch(withNoCache('/api/templates'), { method: 'DELETE', cache: 'no-store' });
+      if (!activeProjectId) return;
+      await apiFetch(projectPath('/templates'), { method: 'DELETE' });
       setPatterns([]);
       setLegendReviewItems([]);
       setIsLegendReviewOpen(false);
@@ -653,9 +1008,8 @@ function App() {
 
     try {
       const templateId = pattern.id ?? pattern.name;
-      const response = await fetch(withNoCache(`/api/templates/${encodeURIComponent(templateId)}`), {
+      const response = await apiFetch(projectPath(`/templates/${encodeURIComponent(templateId)}`), {
         method: 'DELETE',
-        cache: 'no-store',
       });
 
       if (!response.ok) {
@@ -699,9 +1053,8 @@ function App() {
     }
 
     try {
-      const response = await fetch(withNoCache(`/api/templates/${encodeURIComponent(id)}`), {
+      const response = await apiFetch(projectPath(`/templates/${encodeURIComponent(id)}`), {
         method: 'DELETE',
-        cache: 'no-store',
       });
       if (!response.ok) throw new Error('Nie udało się odrzucić wzorca');
 
@@ -723,10 +1076,9 @@ function App() {
     }
 
     try {
-      const response = await fetch(withNoCache(`/api/templates/${encodeURIComponent(id)}`), {
+      const response = await apiFetch(projectPath(`/templates/${encodeURIComponent(id)}`), {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        cache: 'no-store',
         body: JSON.stringify({ name: name.trim() }),
       });
       if (!response.ok) throw new Error('Nie udało się zmienić nazwy wzorca');
@@ -773,16 +1125,15 @@ function App() {
   };
 
   const handleLegendTemplateCrop = async (x: number, y: number, width: number, height: number) => {
-    if (!sessionId || !legendCorrectionTarget) return;
+    if (!sessionId || !activeProjectId || !legendCorrectionTarget) return;
 
     const target = legendCorrectionTarget;
     setIsProcessing(true);
     setProgressText(`Zapisywanie wzorca ${target.name}...`);
     try {
-      const response = await fetch(withNoCache(`/api/templates/${encodeURIComponent(target.id)}/crop`), {
+      const response = await apiFetch(projectPath(`/templates/${encodeURIComponent(target.id)}/crop`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        cache: 'no-store',
         body: JSON.stringify({
           session_id: sessionId,
           x: Math.round(x),
@@ -864,8 +1215,67 @@ function App() {
 
   // ── Render ──────────────────────────────────────────────
 
+  if (isAuthLoading) {
+    return (
+      <div className="auth-shell">
+        <div className="auth-panel">
+          <div className="auth-brand">ElektroScan AI</div>
+          <div className="text-sm text-muted">Ładowanie sesji...</div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!authUser) {
+    return <AuthScreen onAuthenticated={handleAuthenticated} />;
+  }
+
+  if (!activeProject) {
+    return (
+      <ProjectDashboard
+        user={authUser}
+        projects={projects}
+        sessions={authSessions}
+        analysisRuns={analysisRuns}
+        historyProjectId={historyProjectId}
+        isLoading={isProjectsLoading}
+        isSessionsLoading={isSessionsLoading}
+        isHistoryLoading={isHistoryLoading}
+        onCreateProject={handleCreateProject}
+        onUpdateProject={handleUpdateProject}
+        onArchiveProject={handleArchiveProject}
+        onSelectProject={handleSelectProject}
+        onOpenHistory={loadAnalysisRuns}
+        onUpdateProfile={handleUpdateProfile}
+        onRefreshSessions={loadAuthSessions}
+        onDeleteSession={handleDeleteSession}
+        onLogoutAll={handleLogoutAll}
+        onLogout={handleLogout}
+      />
+    );
+  }
+
   return (
-    <div className="app-container">
+    <div className="workspace-shell">
+      <div className="project-workspace-bar">
+        <button
+          className="btn-secondary"
+          style={{ width: 'auto' }}
+          onClick={() => {
+            setActiveProject(null);
+            loadProjects();
+          }}
+        >
+          <ArrowLeft size={16} />
+          Projekty
+        </button>
+        <div>
+          <b>{activeProject.name}</b>
+          <span>{activeProject.latestSourcePdf || file?.name || 'brak wgranego PDF'}</span>
+        </div>
+      </div>
+
+      <div className="app-container">
       {/* Lewy panel */}
       <Sidebar
         fileName={file?.name || null}
@@ -1035,9 +1445,11 @@ function App() {
           onRejectBox={handleRejectBox}
           onChangeBoxSymbol={handleChangeBoxSymbol}
           symbolNames={patterns.map(p => p.name)}
-          onTemplateUploaded={fetchTemplates}
+          projectId={activeProject.id}
+          onTemplateUploaded={() => fetchTemplates(activeProject.id)}
         />
       )}
+      </div>
     </div>
   );
 }

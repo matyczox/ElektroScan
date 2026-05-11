@@ -4,6 +4,77 @@ Backend: FastAPI, port `8000`. Wszystkie odpowiedzi mają nagłówek `Cache-Cont
 
 ## Endpointy
 
+### Logowanie
+
+```
+POST /api/auth/register
+POST /api/auth/login
+GET /api/auth/me
+PATCH /api/auth/me
+POST /api/auth/password-reset/request
+POST /api/auth/password-reset/confirm
+GET /api/auth/sessions
+DELETE /api/auth/sessions/{session_id}
+POST /api/auth/logout-all
+POST /api/auth/logout
+```
+
+Auth używa losowej sesji zapisanej w `HttpOnly` cookie
+`elektroscan_session`. Hasła są hashowane po stronie backendu. Endpointy
+projektowe wymagają zalogowanego użytkownika.
+
+Rejestracja tworzy konto i sesję. Nie ma wymogu weryfikacji e-maila.
+W lokalnym/dev trybie backend może zwrócić `resetToken` w odpowiedzi resetu
+hasła, żeby dało się testować flow bez integracji mailowej. W produkcji należy
+ustawić `ELEKTROSCAN_AUTH_DEV_TOKENS=false` i wysyłać token resetu kanałem
+e-mail.
+
+Reset hasła:
+
+- `POST /api/auth/password-reset/request` zawsze zwraca neutralny komunikat,
+  żeby nie ujawniać, czy konto istnieje.
+- `POST /api/auth/password-reset/confirm` zużywa token jednorazowo, ustawia nowe
+  hasło i usuwa aktywne sesje użytkownika.
+
+Sesje:
+
+- `GET /api/auth/sessions` zwraca aktywne sesje z flagą `isCurrent`.
+- `DELETE /api/auth/sessions/{session_id}` usuwa jedną sesję.
+- `POST /api/auth/logout-all` usuwa wszystkie sesje użytkownika.
+
+### Projekty
+
+```
+GET /api/projects
+POST /api/projects
+GET /api/projects/{project_id}
+PATCH /api/projects/{project_id}
+DELETE /api/projects/{project_id}
+GET /api/projects/{project_id}/analysis-runs
+GET /api/projects/{project_id}/analysis-runs/{analysis_id}
+```
+
+Projekt jest właścicielskim workspace użytkownika. Dane robocze projektu żyją
+w osobnych katalogach:
+
+```text
+backend/data/projects/{project_id}/uploads
+backend/data/projects/{project_id}/templates
+backend/data/projects/{project_id}/analysis_debug
+```
+
+Nowy upload PDF w projekcie czyści tylko `templates` tego projektu. Nie czyści
+wzorców innych projektów ani globalnych legacy katalogów.
+
+Dashboard projektu używa `latestSessionId`, `latestSourcePdf`,
+`latestUploadAtUtc`, `latestAnalysisAtUtc` oraz `analysisCount` z listy
+projektów. Po ponownym wejściu do projektu frontend używa `latestSessionId`, aby
+odtworzyć ostatni podgląd PDF przez projektowe `render-preview` i `layers`.
+Historia analiz jest zapisywana po udanym
+`POST /api/projects/{project_id}/analyze` i dostępna przez `/analysis-runs`.
+Frontend odtwarza ostatnią zakończoną analizę dla aktualnego `latestSessionId`
+przez `GET /api/projects/{project_id}/analysis-runs/{analysis_id}`.
+
 ### Upload i Sesja
 
 ```
@@ -123,6 +194,22 @@ Usuwa jeden wzorzec po nazwie pliku.
 **Uwaga:** aktualny review legendy uzywa `PATCH` do zmiany nazwy oraz
 `POST /crop` do recznej korekty wzorca. Starszy `PatternModal` jest tylko
 pomocniczym widokiem bazy.
+
+Projektowe odpowiedniki obecnego workflow mają prefix:
+
+```text
+/api/projects/{project_id}/preview
+/api/projects/{project_id}/layers
+/api/projects/{project_id}/render-preview
+/api/projects/{project_id}/extract-legend
+/api/projects/{project_id}/analyze
+/api/projects/{project_id}/inspect-roi
+/api/projects/{project_id}/gray-debug-zones
+/api/projects/{project_id}/templates
+```
+
+Frontend po zalogowaniu powinien używać wyłącznie endpointów projektowych.
+Endpointy bez `project_id` zostają jako legacy/dev fallback.
 
 ## Debug Payload Boxa
 

@@ -2,6 +2,48 @@
 
 Ten plik służy do logowania ważnych zmian i decyzji projektowych. Nie zastępuje git log — tu trafia kontekst, który nie jest oczywisty z kodu ani historii commitów.
 
+## 2026-05-10 — Nazwy wzorców z tekstu legendy i poprawka edycji projektów
+
+**Dotyczy:** `backend/core/legend_extractor.py`,
+`frontend/src/components/ProjectDashboard.tsx`, `frontend/src/index.css`, OpenSpec
+
+- Formularz edycji projektu w dashboardzie nie trzyma już pól i przycisków w
+  jednym rzędzie; akcje zapisu/anulowania przechodzą pod pola i zawijają się,
+  więc długi opis nie rozlewa layoutu poza kartę projektu.
+- Ekstrakcja legend tabelarycznych próbuje nazwać wzorzec opisem z tego samego
+  wiersza tabeli na podstawie `page.get_text("words")`.
+- Wiodące liczniki/kody typu `01` albo `A1` są pomijane, jeżeli za nimi jest
+  właściwy opis. Fallback pozostaje: `_get_row_index_text`, potem `sym_XX`.
+- Dodano unit testy dla mapowania opisu wiersza i tabeli z lewą ramką.
+
+## 2026-05-09 — Rozszerzenie auth, sesji i dashboardu projektów
+
+**Dotyczy:** `backend/auth_store.py`, `backend/main.py`, frontend dashboard, OpenSpec
+
+- Dodano tokeny jednorazowe `password_reset`.
+- Dodano endpointy profilu, resetu hasła, listy sesji, usuwania sesji i
+  wylogowania ze wszystkich sesji.
+- Reset hasła usuwa aktywne sesje użytkownika.
+- Dodano historię analiz projektu przez `/api/projects/{project_id}/analysis-runs`.
+- Dashboard projektów dostał wyszukiwanie, sortowanie, edycję/archiwizację,
+  panel konta, aktywne sesje i historię analiz.
+- Role/współdzielenie projektów pozostają następnym modułem; obecny model jest
+  owner-only.
+
+## 2026-05-09 — Logowanie i projekty MVP
+
+**Dotyczy:** backend auth/storage, frontend flow, API
+
+- Dodano `backend/auth_store.py`: SQLite, użytkownicy, PBKDF2 password hash,
+  sesje `HttpOnly` cookie, projekty, sesje uploadu i rejestr analiz.
+- Dodano endpointy `/api/auth/*` oraz `/api/projects/*`.
+- Dodano projektowe odpowiedniki workflow: upload, layers, render-preview,
+  extract-legend, analyze, inspect-roi, gray-debug-zones i templates.
+- Frontend startuje od logowania/rejestracji, potem pokazuje dashboard
+  projektów. Workspace detekcji działa po wyborze projektu.
+- Dane robocze projektu są izolowane w `backend/data/projects/{project_id}/`.
+  Stare endpointy bez `project_id` zostają jako legacy/dev fallback.
+
 ## Format Wpisu
 
 ```markdown

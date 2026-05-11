@@ -4,6 +4,7 @@ dist/
 .venv/
 venv/
 backend/analysis_debug/
+backend/data/
 __pycache__/
 *.pyc
 uploads/

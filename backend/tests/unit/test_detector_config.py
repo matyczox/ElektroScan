@@ -83,8 +83,8 @@ def test_env_int_enforces_minimum(monkeypatch):
     assert cfg.DETECTOR_SCAN_MAX_WORKERS >= 1
 
 
-def test_debug_limits_are_positive():
+def test_runtime_limits_are_positive():
     import core.detector_config as cfg
-    assert cfg.DEBUG_CANDIDATES_LIMIT > 0
-    assert cfg.DEBUG_ACCEPTED_UNCERTAIN_CANDIDATES_LIMIT > 0
-    assert cfg.DEBUG_REJECTED_CANDIDATES_LIMIT > 0
+    assert cfg.MAX_PEAKS_PER_VARIANT > 0
+    assert cfg.GRAY_RAW_MAX_HITS_PER_TEMPLATE > 0
+    assert cfg.GRAY_STRONG_TRACE_MAX_ITEMS > 0

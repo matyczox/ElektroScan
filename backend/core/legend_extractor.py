@@ -427,6 +427,17 @@ def _merge_close_indices(indices: np.ndarray, gap: int = 5) -> list[int]:
     return [int(np.median(g)) for g in groups]
 
 
+def _first_table_symbol_column_right(col_boundaries: list[int], legend_width: int) -> int:
+    """Pick the first real separator after the symbol column, ignoring outer borders."""
+
+    min_x = max(3, int(legend_width * 0.015))
+    max_x = max(min_x + 1, int(legend_width * 0.60))
+    candidates = [x for x in col_boundaries if min_x < x < max_x]
+    if candidates:
+        return candidates[0]
+    return max(20, int(legend_width * 0.12))
+
+
 def _cell_has_content(cell: np.ndarray, min_density: float = 0.004) -> bool:
     """Sprawdza czy komórka tabeli zawiera rysunek (ciemne piksele > min_density lub >= 8 px).
 
@@ -473,6 +484,75 @@ def _get_row_index_text(
         if 1 <= len(text) <= 10 and not any(c in text for c in ["/", "(", "+", "="]):
             return _sanitize_filename(text)
     return None
+
+
+def _is_row_label_prefix(text: str) -> bool:
+    """Return True for leading row counters/codes that should not become symbol labels."""
+
+    compact = re.sub(r"[^\w]+", "", text, flags=re.UNICODE)
+    if not compact:
+        return True
+    if compact.isdigit():
+        return True
+    if re.fullmatch(r"[A-Za-z]{0,4}\d{1,4}[A-Za-z]?", compact):
+        return True
+    return compact.casefold() in {"lp", "l.p", "nr", "no", "poz", "pos"}
+
+
+def _get_row_label_text(
+    text_items: list,
+    x_start: int,
+    y_start: int,
+    scale: float,
+    row_top_px: int,
+    row_bottom_px: int,
+    col_right_px: int,
+    legend_width_px: int,
+) -> str | None:
+    """Find the human-readable label/description text in the same table row."""
+
+    row_top_pt = (y_start + row_top_px) / scale
+    row_bottom_pt = (y_start + row_bottom_px) / scale
+    label_left_pt = (x_start + col_right_px) / scale
+    label_right_pt = (x_start + legend_width_px) / scale
+    ignored = {"lp", "l.p", "l.p.", "symbol", "opis", "nazwa", "oznaczenie"}
+    candidates: list[tuple[float, str]] = []
+
+    for item in text_items:
+        if len(item) < 5:
+            continue
+        if len(item) == 7 and item[6] != 0:
+            continue
+
+        bx0 = float(item[0])
+        by0 = float(item[1])
+        bx1 = float(item[2])
+        by1 = float(item[3])
+        if bx1 < label_left_pt - 8 or bx0 > label_right_pt + 8:
+            continue
+
+        overlap_y = min(by1, row_bottom_pt + 2) - max(by0, row_top_pt - 2)
+        if overlap_y <= 0:
+            continue
+
+        text = " ".join(str(item[4] or "").split())
+        if sum(1 for char in text if char.isalnum()) < 2:
+            continue
+        if text.strip().casefold().strip(":") in ignored:
+            continue
+
+        candidates.append((bx0, text))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: item[0])
+    tokens = [text for _x, text in candidates]
+    while len(tokens) > 1 and _is_row_label_prefix(tokens[0]):
+        tokens.pop(0)
+    label = " ".join(tokens)
+    safe_label = _sanitize_filename(label)
+    return safe_label if len(safe_label) >= 2 else None
 
 
 def _get_symbol_text_inside_region(
@@ -525,6 +605,7 @@ def _get_symbol_text_inside_region(
 def _extract_table_legend_raw(
     legend_area: np.ndarray,
     text_blocks: list,
+    text_words: list | None,
     x_start: int,
     y_start: int,
     scale: float,
@@ -551,7 +632,7 @@ def _extract_table_legend_raw(
     col_indices = np.where(col_sums >= col_threshold)[0]
     col_boundaries = _merge_close_indices(col_indices, gap=5)
 
-    first_col_right = col_boundaries[0] if col_boundaries else max(20, int(w * 0.12))
+    first_col_right = _first_table_symbol_column_right(col_boundaries, w)
 
     row_spans = [
         (row_boundaries[i], row_boundaries[i + 1])
@@ -625,15 +706,27 @@ def _extract_table_legend_raw(
         dark_px = crop_gray < 200
         symbol_image[dark_px] = symbol_crop[dark_px]
 
-        name = _get_row_index_text(
-            text_blocks,
+        label_source = text_words if text_words else text_blocks
+        name = _get_row_label_text(
+            label_source,
             x_start,
             y_start,
             scale,
             row_top,
             row_bottom,
             first_col_right,
+            w,
         )
+        if not name:
+            name = _get_row_index_text(
+                text_blocks,
+                x_start,
+                y_start,
+                scale,
+                row_top,
+                row_bottom,
+                first_col_right,
+            )
         if not name:
             name = f"sym_{counter:02d}"
 
@@ -836,7 +929,9 @@ def extract_legend(
     if legend_format == "table":
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
-        raw_symbols = _extract_table_legend_raw(legend_area, text_blocks, x_start, y_start, scale)
+        raw_symbols = _extract_table_legend_raw(
+            legend_area, text_blocks, text_words, x_start, y_start, scale
+        )
         results: list[ExtractedSymbol] = []
         start_index = _next_template_index(output_path)
         for counter, (symbol_image, name) in enumerate(raw_symbols, start=start_index):

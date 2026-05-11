@@ -16,10 +16,34 @@ from typing import List, Optional
 import cv2
 import fitz
 import numpy as np
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from auth_store import (
+    archive_project_for_user,
+    authenticate_user,
+    create_auth_session,
+    create_password_reset_token_for_email,
+    create_project,
+    create_user,
+    delete_auth_session,
+    delete_auth_session_by_id,
+    delete_auth_sessions_for_user,
+    get_analysis_run_for_project,
+    get_project_for_user,
+    get_user_by_session_token,
+    init_database,
+    list_analysis_runs_for_project,
+    list_auth_sessions_for_user,
+    list_projects_for_user,
+    project_session_exists,
+    record_analysis_run,
+    record_project_upload_session,
+    reset_password_with_token,
+    update_user_profile,
+    update_project_for_user,
+)
 from core import detector_gray as gray_strategy
 from core.detector import detect_symbols, draw_results, load_templates
 from core.detector_config import GRAY_SCALES
@@ -30,12 +54,24 @@ from core.detector_templates import _prepare_variants
 from core.legend_extractor import _normalize_layer_name, extract_legend, get_pdf_layers, pdf_to_png
 from core.roi_inspector import inspect_roi
 
+
+def _allowed_cors_origins() -> list[str]:
+    raw = os.getenv("ELEKTROSCAN_CORS_ORIGINS")
+    if raw:
+        return [origin.strip() for origin in raw.split(",") if origin.strip()]
+    return [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
+
+
 app = FastAPI(title="ElektroScan AI API")
+init_database()
 
 # Konfiguracja CORS - pozwala na komunikację z frontendem Vite
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_allowed_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -56,12 +92,24 @@ BASE_DIR = Path(__file__).parent
 UPLOAD_DIR = BASE_DIR / "uploads"
 TEMPLATES_DIR = BASE_DIR / "templates"
 ANALYSIS_DIR = BASE_DIR / "analysis_debug"
+DATA_DIR = BASE_DIR / "data"
+PROJECTS_DIR = DATA_DIR / "projects"
 SESSION_META_SUFFIX = ".meta.json"
+SESSION_COOKIE_NAME = "elektroscan_session"
+SESSION_TTL_DAYS = int(os.getenv("ELEKTROSCAN_SESSION_TTL_DAYS", "30"))
+AUTH_COOKIE_SECURE = str(os.getenv("ELEKTROSCAN_AUTH_COOKIE_SECURE", "")).lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 # Upewniamy się, że foldery istnieją
 UPLOAD_DIR.mkdir(exist_ok=True)
 TEMPLATES_DIR.mkdir(exist_ok=True)
 ANALYSIS_DIR.mkdir(exist_ok=True)
+DATA_DIR.mkdir(exist_ok=True)
+PROJECTS_DIR.mkdir(exist_ok=True)
 
 SNAPSHOT_EXECUTOR = ThreadPoolExecutor(max_workers=1)
 ANALYSIS_PROGRESS: dict[str, dict] = {}
@@ -81,11 +129,124 @@ def _env_flag(name: str, default: bool = False) -> bool:
 
 VERBOSE_LOGS = _env_flag("ELEKTROSCAN_VERBOSE_LOGS", default=True)
 DEFAULT_ANALYSIS_DEBUG = _env_flag("ELEKTROSCAN_ANALYSIS_DEBUG", default=True)
+AUTH_DEV_TOKENS = _env_flag("ELEKTROSCAN_AUTH_DEV_TOKENS", default=True)
 
 
 def _log(message: str) -> None:
     if VERBOSE_LOGS:
         print(message)
+
+
+class AuthRegisterRequest(BaseModel):
+    email: str
+    password: str
+    name: Optional[str] = None
+
+
+class AuthLoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class AuthProfileUpdateRequest(BaseModel):
+    name: Optional[str] = None
+
+
+class PasswordResetRequest(BaseModel):
+    email: str
+
+
+class PasswordResetConfirmRequest(BaseModel):
+    token: str
+    new_password: str
+
+
+class ProjectCreateRequest(BaseModel):
+    name: str
+    description: Optional[str] = ""
+
+
+class ProjectUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+
+
+def _set_auth_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        SESSION_COOKIE_NAME,
+        token,
+        max_age=SESSION_TTL_DAYS * 24 * 60 * 60,
+        httponly=True,
+        secure=AUTH_COOKIE_SECURE,
+        samesite="lax",
+        path="/",
+    )
+
+
+def _clear_auth_cookie(response: Response) -> None:
+    response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+
+
+def _current_user_from_request(request: Request) -> dict | None:
+    return get_user_by_session_token(request.cookies.get(SESSION_COOKIE_NAME))
+
+
+def _dev_auth_token_payload(field_name: str, token: str | None) -> dict:
+    if not AUTH_DEV_TOKENS or not token:
+        return {}
+    return {field_name: token}
+
+
+def require_user(request: Request) -> dict:
+    user = _current_user_from_request(request)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Wymagane logowanie.")
+    return user
+
+
+def _project_or_404(project_id: str, user: dict) -> dict:
+    project = get_project_for_user(project_id, user["id"])
+    if project is None:
+        raise HTTPException(status_code=404, detail="Nie znaleziono projektu.")
+    _ensure_project_workspace(project_id)
+    return project
+
+
+def _project_root(project_id: str) -> Path:
+    return PROJECTS_DIR / project_id
+
+
+def _project_upload_dir(project_id: str) -> Path:
+    return _project_root(project_id) / "uploads"
+
+
+def _project_templates_dir(project_id: str) -> Path:
+    return _project_root(project_id) / "templates"
+
+
+def _project_analysis_dir(project_id: str) -> Path:
+    return _project_root(project_id) / "analysis_debug"
+
+
+def _ensure_project_workspace(project_id: str) -> None:
+    for directory in [
+        _project_upload_dir(project_id),
+        _project_templates_dir(project_id),
+        _project_analysis_dir(project_id),
+    ]:
+        directory.mkdir(parents=True, exist_ok=True)
+
+
+def _require_project_session(project_id: str, session_id: str) -> None:
+    if not project_session_exists(project_id, session_id):
+        raise HTTPException(status_code=404, detail="Nie znaleziono sesji w tym projekcie.")
+
+
+def _session_file_or_404(session_id: str, upload_dir: Path) -> Path:
+    file_path = _session_pdf_path(session_id, upload_dir)
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Nie znaleziono pliku sesji.")
+    return file_path
 
 
 def _set_analysis_progress(
@@ -111,19 +272,29 @@ def _set_analysis_progress(
     }
 
 
-def _session_meta_path(session_id: str) -> Path:
-    return UPLOAD_DIR / f"{session_id}{SESSION_META_SUFFIX}"
+def _session_pdf_path(session_id: str, upload_dir: Path = UPLOAD_DIR) -> Path:
+    return upload_dir / f"{session_id}.pdf"
 
 
-def _write_session_meta(session_id: str, *, source_pdf: str) -> None:
-    _session_meta_path(session_id).write_text(
+def _session_meta_path(session_id: str, upload_dir: Path = UPLOAD_DIR) -> Path:
+    return upload_dir / f"{session_id}{SESSION_META_SUFFIX}"
+
+
+def _write_session_meta(
+    session_id: str,
+    *,
+    source_pdf: str,
+    upload_dir: Path = UPLOAD_DIR,
+) -> None:
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    _session_meta_path(session_id, upload_dir).write_text(
         json.dumps({"sourcePdf": source_pdf}, ensure_ascii=False),
         encoding="utf-8",
     )
 
 
-def _read_session_meta(session_id: str) -> dict:
-    meta_path = _session_meta_path(session_id)
+def _read_session_meta(session_id: str, upload_dir: Path = UPLOAD_DIR) -> dict:
+    meta_path = _session_meta_path(session_id, upload_dir)
     if not meta_path.exists():
         return {}
 
@@ -211,12 +382,17 @@ def _preview_response_meta(
     }
 
 
-def _analysis_snapshot_path(analysis_id: str) -> Path:
-    return ANALYSIS_DIR / f"{analysis_id}.json"
+def _analysis_snapshot_path(analysis_id: str, analysis_dir: Path = ANALYSIS_DIR) -> Path:
+    return analysis_dir / f"{analysis_id}.json"
 
 
-def _write_analysis_snapshot(analysis_id: str, payload: dict) -> None:
-    _analysis_snapshot_path(analysis_id).write_text(
+def _write_analysis_snapshot(
+    analysis_id: str,
+    payload: dict,
+    analysis_dir: Path = ANALYSIS_DIR,
+) -> None:
+    analysis_dir.mkdir(parents=True, exist_ok=True)
+    _analysis_snapshot_path(analysis_id, analysis_dir).write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
@@ -227,7 +403,7 @@ def _elapsed_ms(start: float) -> float:
 
 
 def _clear_directory_contents(directory: Path) -> None:
-    directory.mkdir(exist_ok=True)
+    directory.mkdir(parents=True, exist_ok=True)
     for entry in directory.iterdir():
         if entry.is_dir():
             shutil.rmtree(entry)
@@ -252,15 +428,15 @@ def _display_template_name(stem: str) -> str:
     return re.sub(r"^\d+_+", "", stem)
 
 
-def _template_path_for_id(template_id: str) -> Path | None:
+def _template_path_for_id(template_id: str, templates_dir: Path = TEMPLATES_DIR) -> Path | None:
     """Find a template by exact stem, with a suffix fallback for legacy responses."""
 
     safe_stem = _safe_template_stem(template_id)
-    exact = TEMPLATES_DIR / f"{safe_stem}.png"
+    exact = templates_dir / f"{safe_stem}.png"
     if exact.exists():
         return exact
 
-    suffix_matches = sorted(TEMPLATES_DIR.glob(f"*_{safe_stem}.png"))
+    suffix_matches = sorted(templates_dir.glob(f"*_{safe_stem}.png"))
     return suffix_matches[0] if suffix_matches else None
 
 
@@ -521,32 +697,25 @@ def _extract_exclude_rects_from_request(
     return exclude_rects, plan_zone_rect, plan_zone_outside_rects
 
 
-class ExtractRequest(BaseModel):
-    excluded_zones: Optional[List[dict]] = []
-    hidden_layers: Optional[List[str]] = []
-    legend_zone: Optional[LegendZone] = None
-    detector_profile: Optional[str] = "auto"
-
-
-class RenderRequest(BaseModel):
-    hidden_layers: Optional[List[str]] = []
-
-
-@app.post("/api/preview")
-async def api_preview(file: UploadFile = File(...)):
+async def _build_preview_response(
+    file: UploadFile,
+    *,
+    upload_dir: Path,
+    templates_dir: Path,
+) -> dict:
     filename = file.filename or ""
     if not filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Tylko pliki PDF są obsługiwane.")
 
     session_id = str(uuid.uuid4())
-    file_path = UPLOAD_DIR / f"{session_id}.pdf"
-    _clear_directory_contents(TEMPLATES_DIR)
+    file_path = _session_pdf_path(session_id, upload_dir)
+    _clear_directory_contents(templates_dir)
+    upload_dir.mkdir(parents=True, exist_ok=True)
     _clear_render_cache()
 
-    # Zapis
     with file_path.open("wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
-    _write_session_meta(session_id, source_pdf=filename or file_path.name)
+    _write_session_meta(session_id, source_pdf=filename or file_path.name, upload_dir=upload_dir)
 
     try:
         # Render podglądu (300 DPI — identycznie jak detekcja)
@@ -576,20 +745,272 @@ async def api_preview(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/auth/register")
+async def api_auth_register(body: AuthRegisterRequest, response: Response):
+    try:
+        user = create_user(email=body.email, password=body.password, name=body.name)
+        token, session = create_auth_session(user["id"], ttl_days=SESSION_TTL_DAYS)
+        _set_auth_cookie(response, token)
+        return {"user": user, "session": session}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/auth/login")
+async def api_auth_login(body: AuthLoginRequest, response: Response):
+    user = authenticate_user(body.email, body.password)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Niepoprawny e-mail lub hasło.")
+    token, session = create_auth_session(user["id"], ttl_days=SESSION_TTL_DAYS)
+    _set_auth_cookie(response, token)
+    return {"user": user, "session": session}
+
+
+@app.get("/api/auth/me")
+async def api_auth_me(request: Request):
+    return {"user": _current_user_from_request(request)}
+
+
+@app.patch("/api/auth/me")
+async def api_auth_update_me(
+    body: AuthProfileUpdateRequest,
+    user: dict = Depends(require_user),
+):
+    try:
+        updated = update_user_profile(user["id"], name=body.name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Nie znaleziono użytkownika.")
+    return {"user": updated}
+
+
+@app.post("/api/auth/password-reset/request")
+async def api_auth_password_reset_request(body: PasswordResetRequest):
+    reset_result = create_password_reset_token_for_email(body.email)
+    payload = {
+        "message": "Jeśli konto istnieje, wysłano instrukcję resetu hasła.",
+        "passwordReset": None,
+    }
+    if reset_result is not None:
+        reset_token, reset_info = reset_result
+        payload["passwordReset"] = {
+            **reset_info,
+            **_dev_auth_token_payload("resetToken", reset_token),
+        }
+    return payload
+
+
+@app.post("/api/auth/password-reset/confirm")
+async def api_auth_password_reset_confirm(body: PasswordResetConfirmRequest, response: Response):
+    try:
+        user = reset_password_with_token(body.token, body.new_password)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if user is None:
+        raise HTTPException(status_code=400, detail="Token resetu jest niepoprawny albo wygasł.")
+    _clear_auth_cookie(response)
+    return {"user": user, "message": "Hasło zostało zmienione. Zaloguj się ponownie."}
+
+
+@app.get("/api/auth/sessions")
+async def api_auth_sessions(request: Request, user: dict = Depends(require_user)):
+    sessions = list_auth_sessions_for_user(
+        user["id"],
+        current_token=request.cookies.get(SESSION_COOKIE_NAME),
+    )
+    return {"sessions": sessions}
+
+
+@app.delete("/api/auth/sessions/{session_id}")
+async def api_auth_delete_session(
+    session_id: str,
+    request: Request,
+    response: Response,
+    user: dict = Depends(require_user),
+):
+    sessions = list_auth_sessions_for_user(
+        user["id"],
+        current_token=request.cookies.get(SESSION_COOKIE_NAME),
+    )
+    current_session = next((item for item in sessions if item["id"] == session_id), None)
+    if current_session is None:
+        raise HTTPException(status_code=404, detail="Nie znaleziono sesji.")
+    delete_auth_session_by_id(user["id"], session_id)
+    if current_session.get("isCurrent"):
+        _clear_auth_cookie(response)
+    return {"message": "Sesja została usunięta.", "deletedCurrentSession": current_session.get("isCurrent")}
+
+
+@app.post("/api/auth/logout-all")
+async def api_auth_logout_all(response: Response, user: dict = Depends(require_user)):
+    deleted = delete_auth_sessions_for_user(user["id"])
+    _clear_auth_cookie(response)
+    return {"message": "Wylogowano ze wszystkich sesji.", "deletedSessions": deleted}
+
+
+@app.post("/api/auth/logout")
+async def api_auth_logout(request: Request, response: Response):
+    delete_auth_session(request.cookies.get(SESSION_COOKIE_NAME))
+    _clear_auth_cookie(response)
+    return {"message": "Wylogowano."}
+
+
+@app.get("/api/projects")
+async def api_projects(user: dict = Depends(require_user)):
+    return {"projects": list_projects_for_user(user["id"])}
+
+
+@app.post("/api/projects")
+async def api_create_project(body: ProjectCreateRequest, user: dict = Depends(require_user)):
+    try:
+        project = create_project(
+            user["id"],
+            name=body.name,
+            description=body.description or "",
+        )
+        _ensure_project_workspace(project["id"])
+        return {"project": project}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/projects/{project_id}")
+async def api_project(project_id: str, user: dict = Depends(require_user)):
+    return {"project": _project_or_404(project_id, user)}
+
+
+@app.patch("/api/projects/{project_id}")
+async def api_update_project(
+    project_id: str,
+    body: ProjectUpdateRequest,
+    user: dict = Depends(require_user),
+):
+    try:
+        project = update_project_for_user(
+            project_id,
+            user["id"],
+            name=body.name,
+            description=body.description,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if project is None:
+        raise HTTPException(status_code=404, detail="Nie znaleziono projektu.")
+    return {"project": project}
+
+
+@app.delete("/api/projects/{project_id}")
+async def api_delete_project(project_id: str, user: dict = Depends(require_user)):
+    if not archive_project_for_user(project_id, user["id"]):
+        raise HTTPException(status_code=404, detail="Nie znaleziono projektu.")
+    return {"message": "Projekt usunięty."}
+
+
+@app.get("/api/projects/{project_id}/analysis-runs")
+async def api_project_analysis_runs(project_id: str, user: dict = Depends(require_user)):
+    _project_or_404(project_id, user)
+    return {"analysisRuns": list_analysis_runs_for_project(project_id)}
+
+
+@app.get("/api/projects/{project_id}/analysis-runs/{analysis_id}")
+async def api_project_analysis_run(
+    project_id: str,
+    analysis_id: str,
+    user: dict = Depends(require_user),
+):
+    _project_or_404(project_id, user)
+    run = get_analysis_run_for_project(project_id, analysis_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Nie znaleziono analizy.")
+    snapshot_path = _analysis_snapshot_path(analysis_id, _project_analysis_dir(project_id))
+    snapshot = None
+    if snapshot_path.exists():
+        try:
+            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            snapshot = None
+    return {"analysisRun": run, "snapshot": snapshot}
+
+
+@app.post("/api/projects/{project_id}/preview")
+async def api_project_preview(
+    project_id: str,
+    file: UploadFile = File(...),
+    user: dict = Depends(require_user),
+):
+    _project_or_404(project_id, user)
+    payload = await _build_preview_response(
+        file,
+        upload_dir=_project_upload_dir(project_id),
+        templates_dir=_project_templates_dir(project_id),
+    )
+    record_project_upload_session(
+        session_id=payload["sessionId"],
+        project_id=project_id,
+        source_pdf=payload["sourcePdf"],
+    )
+    return payload
+
+
+class ExtractRequest(BaseModel):
+    excluded_zones: Optional[List[dict]] = []
+    hidden_layers: Optional[List[str]] = []
+    legend_zone: Optional[LegendZone] = None
+    detector_profile: Optional[str] = "auto"
+
+
+class RenderRequest(BaseModel):
+    hidden_layers: Optional[List[str]] = []
+
+
+@app.post("/api/preview")
+async def api_preview(file: UploadFile = File(...)):
+    return await _build_preview_response(
+        file,
+        upload_dir=UPLOAD_DIR,
+        templates_dir=TEMPLATES_DIR,
+    )
+
+
 @app.get("/api/layers")
 async def api_layers(session_id: str):
-    file_path = UPLOAD_DIR / f"{session_id}.pdf"
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="Nie znaleziono pliku sesji.")
+    file_path = _session_file_or_404(session_id, UPLOAD_DIR)
+    layers = get_pdf_layers(str(file_path))
+    return {"layers": layers}
+
+
+@app.get("/api/projects/{project_id}/layers")
+async def api_project_layers(
+    project_id: str,
+    session_id: str,
+    user: dict = Depends(require_user),
+):
+    _project_or_404(project_id, user)
+    _require_project_session(project_id, session_id)
+    file_path = _session_file_or_404(session_id, _project_upload_dir(project_id))
     layers = get_pdf_layers(str(file_path))
     return {"layers": layers}
 
 
 @app.get("/api/pdf-diagnostics")
 async def api_pdf_diagnostics(session_id: str):
-    file_path = UPLOAD_DIR / f"{session_id}.pdf"
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="Nie znaleziono pliku sesji.")
+    file_path = _session_file_or_404(session_id, UPLOAD_DIR)
+    try:
+        return {"pdfDiagnostics": _build_pdf_diagnostics(str(file_path))}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/projects/{project_id}/pdf-diagnostics")
+async def api_project_pdf_diagnostics(
+    project_id: str,
+    session_id: str,
+    user: dict = Depends(require_user),
+):
+    _project_or_404(project_id, user)
+    _require_project_session(project_id, session_id)
+    file_path = _session_file_or_404(session_id, _project_upload_dir(project_id))
     try:
         return {"pdfDiagnostics": _build_pdf_diagnostics(str(file_path))}
     except Exception as e:
@@ -598,9 +1019,7 @@ async def api_pdf_diagnostics(session_id: str):
 
 @app.post("/api/render-preview")
 async def api_render_preview(session_id: str, body: RenderRequest = None):
-    file_path = UPLOAD_DIR / f"{session_id}.pdf"
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="Nie znaleziono pliku sesji.")
+    file_path = _session_file_or_404(session_id, UPLOAD_DIR)
     try:
         hidden_layers = body.hidden_layers if body else []
         plan_img, cache_hit = _render_pdf_for_session(
@@ -626,11 +1045,38 @@ async def api_render_preview(session_id: str, body: RenderRequest = None):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/extract-legend")
-async def api_extract_legend(session_id: str, body: ExtractRequest = None):
-    file_path = UPLOAD_DIR / f"{session_id}.pdf"
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="Nie znaleziono pliku sesji.")
+@app.post("/api/projects/{project_id}/render-preview")
+async def api_project_render_preview(
+    project_id: str,
+    session_id: str,
+    body: RenderRequest = None,
+    user: dict = Depends(require_user),
+):
+    _project_or_404(project_id, user)
+    _require_project_session(project_id, session_id)
+    file_path = _session_file_or_404(session_id, _project_upload_dir(project_id))
+    try:
+        hidden_layers = body.hidden_layers if body else []
+        plan_img = pdf_to_png(str(file_path), dpi=300, hidden_layers=hidden_layers)
+        pdf_diagnostics = _build_pdf_diagnostics(str(file_path), plan_img)
+        _, buffer_plan = cv2.imencode(".jpg", plan_img, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        plan_base64 = base64.b64encode(buffer_plan).decode("utf-8")
+        return {
+            "planPreview": f"data:image/jpeg;base64,{plan_base64}",
+            "pdfDiagnostics": pdf_diagnostics,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+async def _extract_legend_response(
+    session_id: str,
+    body: ExtractRequest | None,
+    *,
+    upload_dir: Path,
+    templates_dir: Path,
+) -> dict:
+    file_path = _session_file_or_404(session_id, upload_dir)
 
     try:
         _log("Renderowanie planu do ekstrakcji (300 DPI)")
@@ -651,7 +1097,6 @@ async def api_extract_legend(session_id: str, body: ExtractRequest = None):
         )
         mask_mode = resolved_profile if resolved_profile in {"color", "gray"} else "auto"
 
-        # Strefy wykluczone
         exclude_rects = []
         if body and body.excluded_zones:
             for zone in body.excluded_zones:
@@ -678,25 +1123,19 @@ async def api_extract_legend(session_id: str, body: ExtractRequest = None):
             )
 
         _log("Ekstrakcja legendy...")
-        # Nie czyscimy automatycznie katalogu wzorcow przy ponownej ekstrakcji.
-        # Uzytkownik moze miec juz zaakceptowane symbole z poprzedniego cropa legendy;
-        # nowe wykrycia nadpisza swoje pliki po id, a brakujace stare wzorce zostaja.
-
         symbols = extract_legend(
             str(file_path),
             plan_img,
-            output_dir=str(TEMPLATES_DIR),
+            output_dir=str(templates_dir),
             dpi=ANALYSIS_DPI,
             exclude_rects=exclude_rects,
             legend_rect_px=legend_rect_px,
             mask_mode=mask_mode,
         )
 
-        # Zwracamy cala baze wzorcow, nie tylko aktualny crop legendy.
-        # Dzieki temu kolejne zaznaczenie legendy dopisuje symbole zamiast ukrywac poprzednie.
         extracted_ids = {f"{s.index:02d}_{s.name}" for s in symbols}
         patterns_list = []
-        for template_path in sorted(TEMPLATES_DIR.glob("*.png")):
+        for template_path in sorted(templates_dir.glob("*.png")):
             payload = _template_payload_from_path(template_path)
             if payload is None:
                 continue
@@ -712,9 +1151,38 @@ async def api_extract_legend(session_id: str, body: ExtractRequest = None):
             "pdfDiagnostics": pdf_diagnostics,
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Błąd podczas ekstrakcji: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Błąd serwera: {str(e)}")
+
+
+@app.post("/api/extract-legend")
+async def api_extract_legend(session_id: str, body: ExtractRequest = None):
+    return await _extract_legend_response(
+        session_id,
+        body,
+        upload_dir=UPLOAD_DIR,
+        templates_dir=TEMPLATES_DIR,
+    )
+
+
+@app.post("/api/projects/{project_id}/extract-legend")
+async def api_project_extract_legend(
+    project_id: str,
+    session_id: str,
+    body: ExtractRequest = None,
+    user: dict = Depends(require_user),
+):
+    _project_or_404(project_id, user)
+    _require_project_session(project_id, session_id)
+    return await _extract_legend_response(
+        session_id,
+        body,
+        upload_dir=_project_upload_dir(project_id),
+        templates_dir=_project_templates_dir(project_id),
+    )
 
 
 class AnalyzeRequest(BaseModel):
@@ -775,9 +1243,16 @@ async def api_analysis_progress(session_id: str):
     }
 
 
-@app.post("/api/analyze")
-def api_analyze(session_id: str, body: AnalyzeRequest = None):
-    plan_path = UPLOAD_DIR / f"{session_id}.pdf"
+def _analyze_session(
+    session_id: str,
+    body: AnalyzeRequest | None,
+    *,
+    upload_dir: Path,
+    templates_dir: Path,
+    analysis_dir: Path,
+    project_id: str | None = None,
+):
+    plan_path = _session_pdf_path(session_id, upload_dir)
 
     if not plan_path.exists():
         raise HTTPException(status_code=404, detail="Nie znaleziono pliku sesji.")
@@ -799,7 +1274,7 @@ def api_analyze(session_id: str, body: AnalyzeRequest = None):
         )
         requested_profile = _normalize_detector_profile(body.detector_profile if body else "auto")
         include_image = body.include_image if body and body.include_image is not None else True
-        session_meta = _read_session_meta(session_id)
+        session_meta = _read_session_meta(session_id, upload_dir)
         timings_ms["requestSetup"] = _elapsed_ms(phase_start)
 
         # 1. Ładujemy plan
@@ -841,7 +1316,7 @@ def api_analyze(session_id: str, body: AnalyzeRequest = None):
             session_id, "load_templates", 10, "Ladowanie wzorcow", analysis_id=analysis_id
         )
         phase_start = time.perf_counter()
-        templates = load_templates(str(TEMPLATES_DIR))
+        templates = load_templates(str(templates_dir))
         timings_ms["loadTemplates"] = _elapsed_ms(phase_start)
         counters["templatesLoaded"] = len(templates)
 
@@ -1058,6 +1533,7 @@ def api_analyze(session_id: str, body: AnalyzeRequest = None):
                 _write_analysis_snapshot,
                 analysis_context["analysisId"],
                 snapshot_payload,
+                analysis_dir,
             )
             performance["backendTimingsMs"]["snapshotQueue"] = _elapsed_ms(phase_start)
             snapshot_queued = True
@@ -1081,6 +1557,14 @@ def api_analyze(session_id: str, body: AnalyzeRequest = None):
             f" total_ms={performance['backendTimingsMs']['total']:.0f},"
             f" slowest={performance['slowestStages']}"
         )
+        if project_id is not None:
+            record_analysis_run(
+                analysis_id=analysis_context["analysisId"],
+                project_id=project_id,
+                session_id=session_id,
+                source_pdf=analysis_context["sourcePdf"],
+                snapshot_path=str(_analysis_snapshot_path(analysis_context["analysisId"], analysis_dir)),
+            )
 
         _set_analysis_progress(
             session_id,
@@ -1107,11 +1591,44 @@ def api_analyze(session_id: str, body: AnalyzeRequest = None):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/inspect-roi")
-def api_inspect_roi(session_id: str, body: RoiInspectRequest):
-    plan_path = UPLOAD_DIR / f"{session_id}.pdf"
-    if not plan_path.exists():
-        raise HTTPException(status_code=404, detail="Nie znaleziono pliku sesji.")
+@app.post("/api/analyze")
+def api_analyze(session_id: str, body: AnalyzeRequest = None):
+    return _analyze_session(
+        session_id,
+        body,
+        upload_dir=UPLOAD_DIR,
+        templates_dir=TEMPLATES_DIR,
+        analysis_dir=ANALYSIS_DIR,
+    )
+
+
+@app.post("/api/projects/{project_id}/analyze")
+def api_project_analyze(
+    project_id: str,
+    session_id: str,
+    body: AnalyzeRequest = None,
+    user: dict = Depends(require_user),
+):
+    _project_or_404(project_id, user)
+    _require_project_session(project_id, session_id)
+    return _analyze_session(
+        session_id,
+        body,
+        upload_dir=_project_upload_dir(project_id),
+        templates_dir=_project_templates_dir(project_id),
+        analysis_dir=_project_analysis_dir(project_id),
+        project_id=project_id,
+    )
+
+
+def _inspect_roi_response(
+    session_id: str,
+    body: RoiInspectRequest,
+    *,
+    upload_dir: Path,
+    templates_dir: Path,
+) -> dict:
+    plan_path = _session_file_or_404(session_id, upload_dir)
 
     try:
         hidden_layers = body.hidden_layers if body else []
@@ -1131,7 +1648,7 @@ def api_inspect_roi(session_id: str, body: RoiInspectRequest):
         if resolved_profile not in {"color", "gray"}:
             resolved_profile = "color"
 
-        templates = load_templates(str(TEMPLATES_DIR))
+        templates = load_templates(str(templates_dir))
         roi = (
             int(round(body.roi.x)),
             int(round(body.roi.y)),
@@ -1155,11 +1672,41 @@ def api_inspect_roi(session_id: str, body: RoiInspectRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/gray-debug-zones")
-def api_gray_debug_zones(session_id: str, body: GrayDebugZonesRequest = None):
-    plan_path = UPLOAD_DIR / f"{session_id}.pdf"
-    if not plan_path.exists():
-        raise HTTPException(status_code=404, detail="Nie znaleziono pliku sesji.")
+@app.post("/api/inspect-roi")
+def api_inspect_roi(session_id: str, body: RoiInspectRequest):
+    return _inspect_roi_response(
+        session_id,
+        body,
+        upload_dir=UPLOAD_DIR,
+        templates_dir=TEMPLATES_DIR,
+    )
+
+
+@app.post("/api/projects/{project_id}/inspect-roi")
+def api_project_inspect_roi(
+    project_id: str,
+    session_id: str,
+    body: RoiInspectRequest,
+    user: dict = Depends(require_user),
+):
+    _project_or_404(project_id, user)
+    _require_project_session(project_id, session_id)
+    return _inspect_roi_response(
+        session_id,
+        body,
+        upload_dir=_project_upload_dir(project_id),
+        templates_dir=_project_templates_dir(project_id),
+    )
+
+
+def _gray_debug_zones_response(
+    session_id: str,
+    body: GrayDebugZonesRequest | None,
+    *,
+    upload_dir: Path,
+    templates_dir: Path,
+) -> dict:
+    plan_path = _session_file_or_404(session_id, upload_dir)
 
     try:
         hidden_layers = body.hidden_layers if body else []
@@ -1169,7 +1716,7 @@ def api_gray_debug_zones(session_id: str, body: GrayDebugZonesRequest = None):
             dpi=ANALYSIS_DPI,
             hidden_layers=hidden_layers,
         )
-        templates = load_templates(str(TEMPLATES_DIR))
+        templates = load_templates(str(templates_dir))
         exclude_rects, plan_zone_rect, plan_zone_outside_rects = (
             _extract_exclude_rects_from_request(
                 body,
@@ -1250,25 +1797,70 @@ def api_gray_debug_zones(session_id: str, body: GrayDebugZonesRequest = None):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/gray-debug-zones")
+def api_gray_debug_zones(session_id: str, body: GrayDebugZonesRequest = None):
+    return _gray_debug_zones_response(
+        session_id,
+        body,
+        upload_dir=UPLOAD_DIR,
+        templates_dir=TEMPLATES_DIR,
+    )
+
+
+@app.post("/api/projects/{project_id}/gray-debug-zones")
+def api_project_gray_debug_zones(
+    project_id: str,
+    session_id: str,
+    body: GrayDebugZonesRequest = None,
+    user: dict = Depends(require_user),
+):
+    _project_or_404(project_id, user)
+    _require_project_session(project_id, session_id)
+    return _gray_debug_zones_response(
+        session_id,
+        body,
+        upload_dir=_project_upload_dir(project_id),
+        templates_dir=_project_templates_dir(project_id),
+    )
+
+
 @app.get("/api/templates")
 async def api_get_templates():
+    return _templates_response(TEMPLATES_DIR)
+
+
+def _templates_response(templates_dir: Path) -> dict:
     patterns_list = []
-    if TEMPLATES_DIR.exists():
-        for file_path in sorted(TEMPLATES_DIR.glob("*.png")):
+    if templates_dir.exists():
+        for file_path in sorted(templates_dir.glob("*.png")):
             payload = _template_payload_from_path(file_path)
             if payload is not None:
                 patterns_list.append(payload)
     return {"patterns": patterns_list}
 
 
+@app.get("/api/projects/{project_id}/templates")
+async def api_project_get_templates(
+    project_id: str,
+    user: dict = Depends(require_user),
+):
+    _project_or_404(project_id, user)
+    return _templates_response(_project_templates_dir(project_id))
+
+
 @app.post("/api/templates/upload")
 async def api_upload_template(file: UploadFile = File(...)):
+    return await _upload_template_response(file, TEMPLATES_DIR)
+
+
+async def _upload_template_response(file: UploadFile, templates_dir: Path) -> dict:
     """Ręczny upload wzorca PNG do bazy wiedzy."""
     if not file.filename.lower().endswith(".png"):
         raise HTTPException(status_code=400, detail="Tylko pliki PNG są obsługiwane.")
 
     safe_name = Path(file.filename).stem
-    dest_path = TEMPLATES_DIR / f"{safe_name}.png"
+    templates_dir.mkdir(parents=True, exist_ok=True)
+    dest_path = templates_dir / f"{safe_name}.png"
 
     try:
         with dest_path.open("wb") as f_out:
@@ -1278,13 +1870,36 @@ async def api_upload_template(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/projects/{project_id}/templates/upload")
+async def api_project_upload_template(
+    project_id: str,
+    file: UploadFile = File(...),
+    user: dict = Depends(require_user),
+):
+    _project_or_404(project_id, user)
+    return await _upload_template_response(file, _project_templates_dir(project_id))
+
+
 @app.post("/api/templates/{template_name}/crop")
 async def api_crop_template(template_name: str, body: TemplateCropRequest):
+    return await _crop_template_response(
+        template_name,
+        body,
+        upload_dir=UPLOAD_DIR,
+        templates_dir=TEMPLATES_DIR,
+    )
+
+
+async def _crop_template_response(
+    template_name: str,
+    body: TemplateCropRequest,
+    *,
+    upload_dir: Path,
+    templates_dir: Path,
+) -> dict:
     """Replace or create a template from a user-selected crop on the rendered plan."""
 
-    plan_path = UPLOAD_DIR / f"{body.session_id}.pdf"
-    if not plan_path.exists():
-        raise HTTPException(status_code=404, detail="Nie znaleziono pliku sesji.")
+    plan_path = _session_file_or_404(body.session_id, upload_dir)
 
     try:
         plan_img, _cache_hit = _render_pdf_for_session(
@@ -1308,7 +1923,7 @@ async def api_crop_template(template_name: str, body: TemplateCropRequest):
         if crop.size == 0:
             raise HTTPException(status_code=400, detail="Zaznaczenie wzorca jest puste.")
 
-        old_path = _template_path_for_id(template_name)
+        old_path = _template_path_for_id(template_name, templates_dir)
         if body.name:
             target_stem = _safe_template_stem(body.name)
         elif old_path is not None:
@@ -1316,7 +1931,8 @@ async def api_crop_template(template_name: str, body: TemplateCropRequest):
         else:
             target_stem = _safe_template_stem(template_name)
 
-        target_path = TEMPLATES_DIR / f"{target_stem}.png"
+        templates_dir.mkdir(parents=True, exist_ok=True)
+        target_path = templates_dir / f"{target_stem}.png"
         if old_path is not None and old_path != target_path and target_path.exists():
             raise HTTPException(
                 status_code=409,
@@ -1343,9 +1959,34 @@ async def api_crop_template(template_name: str, body: TemplateCropRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/projects/{project_id}/templates/{template_name}/crop")
+async def api_project_crop_template(
+    project_id: str,
+    template_name: str,
+    body: TemplateCropRequest,
+    user: dict = Depends(require_user),
+):
+    _project_or_404(project_id, user)
+    _require_project_session(project_id, body.session_id)
+    return await _crop_template_response(
+        template_name,
+        body,
+        upload_dir=_project_upload_dir(project_id),
+        templates_dir=_project_templates_dir(project_id),
+    )
+
+
 @app.patch("/api/templates/{template_name}")
 async def api_update_template(template_name: str, body: TemplateUpdateRequest):
-    target = _template_path_for_id(template_name)
+    return _update_template_response(template_name, body, TEMPLATES_DIR)
+
+
+def _update_template_response(
+    template_name: str,
+    body: TemplateUpdateRequest,
+    templates_dir: Path,
+) -> dict:
+    target = _template_path_for_id(template_name, templates_dir)
     if target is None:
         raise HTTPException(status_code=404, detail="Nie znaleziono wzorca.")
 
@@ -1354,7 +1995,7 @@ async def api_update_template(template_name: str, body: TemplateUpdateRequest):
         return {"message": "Brak zmian.", "pattern": payload}
 
     new_stem = _safe_template_stem(body.name)
-    new_path = TEMPLATES_DIR / f"{new_stem}.png"
+    new_path = templates_dir / f"{new_stem}.png"
     if new_path != target and new_path.exists():
         raise HTTPException(status_code=409, detail=f"Wzorzec '{new_stem}' już istnieje.")
 
@@ -1365,20 +2006,55 @@ async def api_update_template(template_name: str, body: TemplateUpdateRequest):
     return {"message": f"Wzorzec zmieniony na '{payload['name']}'.", "pattern": payload}
 
 
+@app.patch("/api/projects/{project_id}/templates/{template_name}")
+async def api_project_update_template(
+    project_id: str,
+    template_name: str,
+    body: TemplateUpdateRequest,
+    user: dict = Depends(require_user),
+):
+    _project_or_404(project_id, user)
+    return _update_template_response(template_name, body, _project_templates_dir(project_id))
+
+
 @app.delete("/api/templates")
 async def api_delete_templates():
     _clear_directory_contents(TEMPLATES_DIR)
     return {"message": "Baza wiedzy wyczyszczona."}
 
 
+@app.delete("/api/projects/{project_id}/templates")
+async def api_project_delete_templates(
+    project_id: str,
+    user: dict = Depends(require_user),
+):
+    _project_or_404(project_id, user)
+    _clear_directory_contents(_project_templates_dir(project_id))
+    return {"message": "Baza wiedzy wyczyszczona."}
+
+
 @app.delete("/api/templates/{template_name}")
 async def api_delete_template(template_name: str):
-    target = _template_path_for_id(template_name)
+    return _delete_template_response(template_name, TEMPLATES_DIR)
+
+
+def _delete_template_response(template_name: str, templates_dir: Path) -> dict:
+    target = _template_path_for_id(template_name, templates_dir)
     if target is None:
         raise HTTPException(status_code=404, detail="Nie znaleziono wzorca.")
 
     target.unlink()
     return {"message": f"Wzorzec '{template_name}' usunięty."}
+
+
+@app.delete("/api/projects/{project_id}/templates/{template_name}")
+async def api_project_delete_template(
+    project_id: str,
+    template_name: str,
+    user: dict = Depends(require_user),
+):
+    _project_or_404(project_id, user)
+    return _delete_template_response(template_name, _project_templates_dir(project_id))
 
 
 @app.post("/api/clear")
@@ -1387,6 +2063,18 @@ async def api_clear():
     for folder in [UPLOAD_DIR, TEMPLATES_DIR]:
         _clear_directory_contents(folder)
     return {"message": "Wyczyszczono dane robocze."}
+
+
+@app.post("/api/projects/{project_id}/clear")
+async def api_project_clear(project_id: str, user: dict = Depends(require_user)):
+    _project_or_404(project_id, user)
+    for folder in [
+        _project_upload_dir(project_id),
+        _project_templates_dir(project_id),
+        _project_analysis_dir(project_id),
+    ]:
+        _clear_directory_contents(folder)
+    return {"message": "Wyczyszczono dane robocze projektu."}
 
 
 if __name__ == "__main__":

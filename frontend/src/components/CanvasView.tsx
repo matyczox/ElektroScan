@@ -161,9 +161,6 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
   const [pulsingId, setPulsingId] = useState<string | null>(null);
   const [copiedBoxId, setCopiedBoxId] = useState<string | null>(null);
   const [isZooming, setIsZooming] = useState(false);
-  const [coordinateInput, setCoordinateInput] = useState('');
-  const [inspectedPoint, setInspectedPoint] = useState<{ x: number; y: number } | null>(null);
-  const [coordinateError, setCoordinateError] = useState<string | null>(null);
   const zoomTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -218,8 +215,6 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
   useEffect(() => {
     setPulsingId(null);
     setCopiedBoxId(null);
-    setInspectedPoint(null);
-    setCoordinateError(null);
   }, [analysisContext?.analysisId]);
 
   useEffect(() => {
@@ -315,38 +310,6 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
       x: (clientX - rect.left - position.x) / scale,
       y: (clientY - rect.top - position.y) / scale,
     };
-  };
-
-  const parseCoordinateInput = (value: string) => {
-    const numbers = value.match(/-?\d+(?:\.\d+)?/g);
-    if (!numbers || numbers.length < 2) return null;
-    const x = Number(numbers[0]);
-    const y = Number(numbers[1]);
-    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
-    return { x, y };
-  };
-
-  const centerOnPoint = (point: { x: number; y: number }) => {
-    if (!containerRef.current) return;
-    const container = containerRef.current;
-    const targetScale = Math.min(Math.max(scale, 2), 5);
-    setScale(targetScale);
-    setPosition({
-      x: container.clientWidth / 2 - point.x * targetScale,
-      y: container.clientHeight / 2 - point.y * targetScale,
-    });
-    setInspectedPoint(point);
-    setCoordinateError(null);
-  };
-
-  const handleCoordinateSubmit = (event: React.FormEvent) => {
-    event.preventDefault();
-    const point = parseCoordinateInput(coordinateInput);
-    if (!point) {
-      setCoordinateError('Wpisz x,y');
-      return;
-    }
-    centerOnPoint(point);
   };
 
   const handleMouseDown = (e: React.MouseEvent) => {
@@ -472,30 +435,6 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
 
   const formatOverlapGroup = (group?: Box[]) =>
     group?.length ? group.map(item => `${item.symbolName}@${item.x},${item.y},${item.width},${item.height}`).join(' + ') : '';
-
-  const inspectedNearbyBoxes = inspectedPoint
-    ? boxes
-      .map(box => {
-        const centerX = box.x + box.width / 2;
-        const centerY = box.y + box.height / 2;
-        const contains =
-          inspectedPoint.x >= box.x &&
-          inspectedPoint.x <= box.x + box.width &&
-          inspectedPoint.y >= box.y &&
-          inspectedPoint.y <= box.y + box.height;
-        return {
-          box,
-          contains,
-          distance: Math.hypot(centerX - inspectedPoint.x, centerY - inspectedPoint.y),
-        };
-      })
-      .filter(item => item.contains || item.distance <= 220)
-      .sort((left, right) => {
-        if (left.contains !== right.contains) return left.contains ? -1 : 1;
-        return left.distance - right.distance;
-      })
-      .slice(0, 8)
-    : [];
 
   const formatDebugValue = (value?: number, digits = 3) =>
     typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : 'n/a';
@@ -642,84 +581,6 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
 
   return (
     <div className="workspace" ref={containerRef} onWheel={handleWheel}>
-      {/* Skok do koordynatow */}
-      <div style={{
-        position: 'absolute',
-        top: 16,
-        left: '50%',
-        transform: 'translateX(-50%)',
-        zIndex: 24,
-        display: 'flex',
-        justifyContent: 'center',
-        pointerEvents: 'none',
-      }} data-wheel-ui="true">
-        <form
-          onSubmit={handleCoordinateSubmit}
-          onMouseDown={e => e.stopPropagation()}
-          onClick={e => e.stopPropagation()}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 6,
-            background: 'rgba(15, 23, 42, 0.84)',
-            border: `1px solid ${coordinateError ? '#ef4444' : 'var(--border-light)'}`,
-            borderRadius: 6,
-            padding: 4,
-            boxShadow: '0 8px 20px rgba(0,0,0,0.18)',
-            pointerEvents: 'auto',
-          }}
-        >
-          <input
-            value={coordinateInput}
-            onChange={event => {
-              setCoordinateInput(event.target.value);
-              if (coordinateError) setCoordinateError(null);
-            }}
-            placeholder="x,y"
-            title="Wpisz koordynaty planu, np. 6199,3619"
-            style={{
-              width: 104,
-              height: 27,
-              background: 'rgba(2, 6, 23, 0.72)',
-              border: '1px solid rgba(148, 163, 184, 0.35)',
-              borderRadius: 4,
-              color: '#e5e7eb',
-              fontSize: 12,
-              fontWeight: 700,
-              padding: '0 8px',
-              outline: 'none',
-            }}
-          />
-          <button
-            type="submit"
-            className="btn-secondary"
-            title="Przejdz do punktu"
-            style={{
-              padding: '6px 10px',
-              fontSize: 11,
-              fontWeight: 700,
-              color: coordinateError ? '#fca5a5' : undefined,
-            }}
-          >
-            Pokaż
-          </button>
-          {inspectedPoint && (
-            <button
-              type="button"
-              className="btn-secondary"
-              onClick={() => {
-                setInspectedPoint(null);
-                setCoordinateError(null);
-              }}
-              title="Ukryj celownik"
-              style={{ padding: '6px 8px' }}
-            >
-              <X size={13} />
-            </button>
-          )}
-        </form>
-      </div>
-
       {/* Kontrolki */}
       <div data-wheel-ui="true" style={{ position: 'absolute', top: 16, right: 16, zIndex: 20, display: 'flex', gap: 6 }}>
         <button
@@ -862,85 +723,6 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
         </button>
       </div>
 
-      {inspectedPoint && (
-        <div
-          data-wheel-ui="true"
-          onMouseDown={e => e.stopPropagation()}
-          onClick={e => e.stopPropagation()}
-          style={{
-            position: 'absolute',
-            top: 58,
-            left: '50%',
-            transform: 'translateX(-50%)',
-            zIndex: 21,
-            width: 280,
-            maxWidth: 'calc(100% - 32px)',
-            background: 'rgba(15, 23, 42, 0.92)',
-            border: '1px solid rgba(249, 115, 22, 0.45)',
-            borderRadius: 8,
-            padding: 10,
-            color: '#e5e7eb',
-            boxShadow: '0 14px 32px rgba(0,0,0,0.28)',
-          }}
-        >
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
-            <strong style={{ color: '#fb923c', fontSize: 12 }}>
-              Punkt {Math.round(inspectedPoint.x)},{Math.round(inspectedPoint.y)}
-            </strong>
-            <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>
-              {inspectedNearbyBoxes.length ? `${inspectedNearbyBoxes.length} boxów` : 'brak boxów'}
-            </span>
-          </div>
-          {inspectedNearbyBoxes.length > 0 && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 8 }}>
-              {inspectedNearbyBoxes.map(({ box, distance, contains }) => {
-                const overlapGroup = overlapGroupsByBoxId.get(box.id);
-                const overlapSummary = formatOverlapGroup(overlapGroup);
-                return (
-                  <button
-                    key={`near-${box.analysisId ?? analysisContext?.analysisId ?? 'na'}-${box.id}`}
-                    className="btn-secondary"
-                    onClick={() => {
-                      onBoxClick?.(box.id);
-                      void copyBoxDebug(box);
-                    }}
-                    title={overlapSummary ? `Klik kopiuje debug boxa\nNakladki: ${overlapSummary}` : 'Klik kopiuje debug boxa'}
-                    style={{
-                      justifyContent: 'space-between',
-                      padding: '5px 7px',
-                      fontSize: 11,
-                      borderColor: contains ? '#fb923c' : undefined,
-                      color: contains ? '#fed7aa' : undefined,
-                    }}
-                  >
-                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {box.symbolName}@{box.x},{box.y},{box.width},{box.height}
-                    </span>
-                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginLeft: 8 }}>
-                      {overlapGroup && (
-                        <span style={{
-                          background: '#7c3aed',
-                          color: '#fff',
-                          borderRadius: 999,
-                          padding: '1px 5px',
-                          fontSize: 10,
-                          fontWeight: 800,
-                        }}>
-                          {overlapGroup.length}x
-                        </span>
-                      )}
-                      <span style={{ color: contains ? '#fb923c' : 'var(--text-muted)' }}>
-                        {contains ? 'inside' : Math.round(distance)}
-                      </span>
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        </div>
-      )}
-
       {/* Hint rysowania */}
       {activeDrawMode !== 'none' && (
         <div style={{
@@ -1016,52 +798,6 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
               <div>zielone: zone &lt;{grayDebugInfo.zoneThreshold}, pomaranczowe: evidence &lt;{grayDebugInfo.evidenceThreshold}</div>
               <div>ROI: {grayDebugInfo.roiCount} unikalnych / {grayDebugInfo.roiRefs} lacznie, templates {grayDebugInfo.templates}</div>
               <div>piksele: zone {grayDebugInfo.zonePixels}, evidence {grayDebugInfo.evidencePixels}</div>
-            </div>
-          )}
-
-          {inspectedPoint && (
-            <div
-              style={{
-                position: 'absolute',
-                left: inspectedPoint.x,
-                top: inspectedPoint.y,
-                width: 46,
-                height: 46,
-                transform: `translate(-50%, -50%) scale(${1 / scale})`,
-                transformOrigin: 'center',
-                pointerEvents: 'none',
-                zIndex: 50,
-              }}
-            >
-              <div style={{
-                position: 'absolute',
-                left: 0,
-                top: '50%',
-                width: '100%',
-                height: 2,
-                background: '#fb923c',
-                boxShadow: '0 0 10px rgba(251,146,60,0.75)',
-              }} />
-              <div style={{
-                position: 'absolute',
-                left: '50%',
-                top: 0,
-                width: 2,
-                height: '100%',
-                background: '#fb923c',
-                boxShadow: '0 0 10px rgba(251,146,60,0.75)',
-              }} />
-              <div style={{
-                position: 'absolute',
-                left: '50%',
-                top: '50%',
-                width: 14,
-                height: 14,
-                border: '2px solid #fed7aa',
-                borderRadius: 999,
-                transform: 'translate(-50%, -50%)',
-                background: 'rgba(249, 115, 22, 0.24)',
-              }} />
             </div>
           )}
 

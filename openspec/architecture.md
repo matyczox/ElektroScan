@@ -38,7 +38,11 @@ Aktualny cel jakościowy:
 ```text
 backend/
   main.py                        # FastAPI, upload, render, ekstrakcja legendy, analiza
+  auth_store.py                  # SQLite, użytkownicy, sesje auth, projekty
   requirements.txt
+  data/
+    elektroscan.db               # lokalna baza SQLite (nie commitować)
+    projects/{project_id}/       # izolowane dane projektu: uploads/templates/debug
   templates/                     # wzorce symboli (PNG/JPG), zarządzane przez API i UI
   uploads/                       # uploadowane PDF-y (tymczasowe, per session)
   analysis_debug/                # snapshoty JSON — NIE commitować
@@ -61,6 +65,8 @@ frontend/
   src/
     App.tsx                      # stan, requesty API, HITL state, ręczne boxy
     components/
+      AuthScreen.tsx             # logowanie, rejestracja, reset hasła
+      ProjectDashboard.tsx       # projekty, historia analiz, konto, sesje
       CanvasView.tsx             # render planu, finalne boxy, debug boxy, ręczny box
       ResultsPanel.tsx           # lista wyników, zmiana klasy, debug lista
       Sidebar.tsx                # upload, legenda, analiza, lista wzorców
@@ -72,6 +78,23 @@ frontend/
 
 ### main.py
 FastAPI. Obsługuje: upload PDF, render preview, ekstrakcję legendy, analizę, zarządzanie wzorcami (templates), snapshoty debug. Odpowiada za formatowanie odpowiedzi dla frontendu i asynchroniczny zapis snapshotów przez `SNAPSHOT_EXECUTOR`.
+
+Po dodaniu logowania nowe endpointy projektowe są preferowaną ścieżką pracy:
+`/api/projects/{project_id}/...`. Legacy endpointy bez `project_id` zostają jako
+fallback developerski, ale UI po zalogowaniu izoluje uploady, wzorce i snapshoty
+w `backend/data/projects/{project_id}/`.
+
+### auth_store.py
+Lekka warstwa persystencji SQLite bez ORM. Trzyma użytkowników, hashe haseł,
+sesje `HttpOnly` cookie, tokeny jednorazowe auth, projekty, sesje uploadu PDF i
+rejestr analiz. Projekt należy do jednego użytkownika; backend sprawdza
+właściciela przed dostępem do projektowych plików.
+
+Aktualne tokeny jednorazowe:
+- `password_reset` — reset hasła, po użyciu usuwa aktywne sesje użytkownika.
+
+Obecny model uprawnień jest owner-only. Współdzielenie projektów powinno wejść
+przez osobną tabelę membership/roles, nie przez pomijanie sprawdzenia właściciela.
 
 ### core/legend_extractor.py
 Renderowanie PDF do obrazu 300 DPI przez pymupdf/fitz. Obsługa warstw PDF (ukrywanie przed renderem). Ekstrakcja legendy z obrazu lub bezpośrednio z PDF.
@@ -106,7 +129,17 @@ Pomocnicze: wyciąganie tekstu z warstwy PDF, wykluczanie strefy legendy. Nie u�
 ## Opis Komponentów Frontendu
 
 ### App.tsx
-Zarządza stanem: wyniki, HITL boxy, ręczne boxy, debugCandidates, wzorce. Komunikacja z API. Przekazuje props do wszystkich komponentów.
+Zarządza stanem: auth, projekty, historia analiz, wyniki, HITL boxy, ręczne
+boxy, wzorce. Komunikacja z API. Przekazuje props do wszystkich komponentów.
+
+### AuthScreen.tsx
+Ekran wejściowy: logowanie, rejestracja oraz reset hasła. W dev może od razu
+przyjąć token resetu zwrócony z API; docelowo token powinien przychodzić mailem.
+
+### ProjectDashboard.tsx
+Dashboard po zalogowaniu: tworzenie projektów, lista z wyszukiwarką i
+sortowaniem, edycja/archiwizacja projektu, historia analiz, profil użytkownika
+i lista aktywnych sesji.
 
 ### CanvasView.tsx
 Renderuje obraz planu (base64) na canvas. Rysuje zielone finalne boxy, czerwone/pomarańczowe debug boxy. Kliknięcie boxa kopiuje debug payload do schowka. Tryb ręcznego rysowania boxa.
