@@ -493,6 +493,7 @@ def _detect_symbols_pipeline(
         exclude_rects=exclude_rects,
     )
     pdf_candidates = [hit for hits in pdf_hits_by_template.values() for hit in hits]
+    has_pdf_text_assist = len(pdf_candidates) > 0
     timings["pdf_text"] = time.perf_counter() - phase_start
 
     phase_start = time.perf_counter()
@@ -941,6 +942,9 @@ def _detect_symbols_pipeline(
         prefiltered_candidates,
         parent_ids_by_child,
         mode=detector_profile,
+        prefer_direct_color_family_parent=(
+            detector_profile != "color" or not has_pdf_text_assist
+        ),
     )
     pre_parent_ids = {id(hit) for hit in pre_parent_candidates}
     pre_parent_suppressed = [hit for hit in prefiltered_candidates if id(hit) not in pre_parent_ids]
@@ -976,6 +980,7 @@ def _detect_symbols_pipeline(
         variants_lookup=variants_lookup,
         socket_07_promotions=socket_07_promotions,
         plan_hsv=plan_hsv,
+        allow_color_switch_10=(detector_profile != "color" or not has_pdf_text_assist),
         postprocess_workers=postprocess_workers,
         progress_callback=_progress,
     )
@@ -1002,6 +1007,9 @@ def _detect_symbols_pipeline(
         parent_search_candidates,
         parent_ids_by_child,
         mode=detector_profile,
+        prefer_direct_color_family_parent=(
+            detector_profile != "color" or not has_pdf_text_assist
+        ),
     )
     final_cluster_ids = {id(hit) for hit in final_hits}
     final_cluster_suppressed = [
@@ -1030,11 +1038,15 @@ def _detect_symbols_pipeline(
             templates,
         )
     else:
-        final_hits, color_fragment_suppressed = _suppress_color_local_fragments(final_hits)
+        (
+            final_hits,
+            color_fragment_suppressed,
+            color_fragment_suppression_reasons,
+        ) = _suppress_color_local_fragments(final_hits)
         _record_candidate_trace(
             "color_fragment_suppressed",
             color_fragment_suppressed,
-            {id(hit): "color_local_fragment" for hit in color_fragment_suppressed},
+            color_fragment_suppression_reasons,
         )
         rescued_gray_frames = 0
         gray_unresolved_strong_hits = {"strongValidated": 0, "unresolved": 0, "items": []}

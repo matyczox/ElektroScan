@@ -1064,11 +1064,33 @@ def _validate_template_hit(
         hit.dominant_hsv is not None
         and hit.source == "template_color_recovery"
         and early_color_similarity >= COLOR_RECOVERY_MIN_COLOR_SIMILARITY
-        and hit.match_score >= COLOR_NEAR_THRESHOLD_RECOVERY_MIN_MATCH
-        and coverage >= COLOR_RECOVERY_MIN_COVERAGE
-        and purity >= COLOR_RECOVERY_MIN_PURITY
-        and context_purity >= COLOR_RECOVERY_MIN_CONTEXT
+        and hit.scale >= 0.90
+        and 900 <= hit_area <= 3_800
+        and hit_aspect <= 3.20
+        and (
+            (
+                hit.match_score >= 0.52
+                and coverage >= max(0.70, COLOR_RECOVERY_MIN_COVERAGE)
+                and purity >= max(0.60, COLOR_RECOVERY_MIN_PURITY)
+                and context_purity >= max(0.18, COLOR_RECOVERY_MIN_CONTEXT)
+                and hit_area >= 1_100
+            )
+            or (
+                hit.match_score >= 0.46
+                and coverage >= 0.74
+                and purity >= 0.66
+                and context_purity >= 0.30
+                and hit_area >= 900
+            )
+        )
     )
+    if (
+        hit.dominant_hsv is not None
+        and hit.source == "template_color_recovery"
+        and not color_recovery_geometry
+    ):
+        _record("color_recovery_isolated_fragment")
+        return False
     color_full_label_source = (
         hit.source in {"template", "template_color_recovery"}
         or hit.source.startswith("template_parent_search_")
@@ -1090,12 +1112,11 @@ def _validate_template_hit(
             )
             or (
                 hit.source == "template_color_recovery"
-                and hit.match_score >= COLOR_NEAR_THRESHOLD_RECOVERY_MIN_MATCH
-                and coverage >= COLOR_RECOVERY_MIN_COVERAGE
-                and purity >= COLOR_RECOVERY_MIN_PURITY
-                and context_purity >= COLOR_RECOVERY_MIN_CONTEXT
+                and color_recovery_geometry
             )
             or (
+                hit.source != "template_color_recovery"
+                and
                 hit.match_score >= 0.40
                 and coverage >= 0.58
                 and purity >= 0.50

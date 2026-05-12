@@ -196,6 +196,7 @@ def _maybe_promote_switch_parent_search(
     promotions: dict[tuple[int, float, int, bool], list[TargetedPromotionRule]],
     stats: dict[str, int] | None = None,
     plan_hsv: np.ndarray | None = None,
+    allow_color_switch_10: bool = True,
 ) -> CandidateHit:
     """Run the expensive 11 -> 10/12 parent search only on prefiltered hits."""
 
@@ -222,7 +223,7 @@ def _maybe_promote_switch_parent_search(
         if parent_prefix not in {"10", "12"}:
             continue
         color_parent_search = hit.dominant_hsv is not None
-        if color_parent_search and parent_prefix != "12":
+        if color_parent_search and parent_prefix == "10" and not allow_color_switch_10:
             continue
 
         parent_variant = variants_lookup.get(
@@ -334,6 +335,7 @@ def _maybe_promote_switch_parent_search(
                     min_purity = 0.50
                     min_context = 0.16
                     min_verification = 0.50
+                    max_drop = max(max_drop, SWITCH_12_PROMOTED_MAX_VERIFICATION_DROP)
                 if (
                     promoted_hit.purity < min_purity
                     or promoted_hit.context_purity < min_context
@@ -344,6 +346,7 @@ def _maybe_promote_switch_parent_search(
 
                 if (
                     parent_prefix == "10"
+                    and not color_parent_search
                     and promoted_hit.verification_score + 0.02 < hit.verification_score
                 ):
                     continue

@@ -1,0 +1,31 @@
+{
+  "name": "pw_e_02_rev2_color",
+  "enabled": true,
+  "caution": true,
+  "notes": "Caution demo snapshot for manual review before treating as final production truth.",
+  "pdfPath": "PW-E-02 Rev2.pdf",
+  "templatesDir": "templates",
+  "golden": "../../golden/pw_e_02_rev2_color_caution.json",
+  "detectorProfile": "color",
+  "expectedProfile": "color",
+  "templateCount": 22,
+  "extractTemplatesFresh": true,
+  "legendMaskMode": "color",
+  "legendZone": {
+    "x": 3481,
+    "y": 385,
+    "width": 1341,
+    "height": 1480
+  },
+  "excludedZones": [
+    {
+      "x": 3481,
+      "y": 385,
+      "width": 1341,
+      "height": 1480
+    }
+  ],
+  "focus": "06,07,09,10,11,12,13,18,19,20,21",
+  "centerTolerance": 18,
+  "sizeTolerance": 0.4
+}

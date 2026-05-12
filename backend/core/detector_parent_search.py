@@ -34,6 +34,7 @@ def search_parent_candidates(
     variants_lookup: dict[tuple[int, float, int, bool], TemplateVariant],
     socket_07_promotions: dict[tuple[int, float, int, bool], list[TargetedPromotionRule]],
     plan_hsv: np.ndarray | None,
+    allow_color_switch_10: bool,
     postprocess_workers: int,
     progress_callback: Callable[[str, float, str], None],
 ) -> ParentSearchResult:
@@ -64,6 +65,7 @@ def search_parent_candidates(
             socket_07_promotions,
             local_stats,
             plan_hsv=plan_hsv,
+            allow_color_switch_10=allow_color_switch_10,
         )
         return promoted_hit, local_stats
 

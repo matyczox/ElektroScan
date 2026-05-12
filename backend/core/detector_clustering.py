@@ -700,6 +700,86 @@ def _maybe_prefer_fuller_color_candidate(
     )
 
 
+def _maybe_prefer_direct_color_family_parent(
+    group_hits: list[CandidateHit],
+    base_winner: CandidateHit,
+    parent_ids_by_child: dict[int, set[int]],
+) -> CandidateHit:
+    """Prefer a validated fuller same-color family parent over its local core."""
+
+    if (
+        base_winner.dominant_hsv is None
+        or base_winner.source == "pdf_text"
+        or base_winner.is_text_label
+    ):
+        return base_winner
+
+    parent_ids = parent_ids_by_child.get(base_winner.template_id, set())
+    if not parent_ids:
+        return base_winner
+
+    base_area = max(1, base_winner.bbox[2] * base_winner.bbox[3])
+    contenders: list[CandidateHit] = []
+
+    for hit in group_hits:
+        if (
+            hit is base_winner
+            or hit.template_id not in parent_ids
+            or hit.dominant_hsv is None
+            or hit.source == "pdf_text"
+            or hit.is_text_label
+        ):
+            continue
+        if _hue_distance(hit.dominant_hsv[0], base_winner.dominant_hsv[0]) > (
+            COLOR_HUE_TOLERANCE + 6
+        ):
+            continue
+
+        hit_area = max(1, hit.bbox[2] * hit.bbox[3])
+        if hit_area < base_area * 1.08 or hit_area > base_area * 2.35:
+            continue
+
+        inter_area, iou, iom, center_distance = _bbox_metrics(hit.bbox, base_winner.bbox)
+        if inter_area <= 0:
+            continue
+
+        own_area = hit_area - inter_area
+        if own_area < max(80, int(hit_area * 0.16)):
+            continue
+        if not (iom >= 0.78 or iou >= 0.46 or center_distance <= 0.46):
+            continue
+
+        if (
+            hit.match_score < 0.54
+            or hit.verification_score < 0.56
+            or hit.coverage < 0.58
+            or hit.purity < 0.64
+            or hit.context_purity < 0.36
+        ):
+            continue
+
+        if hit.verification_score + 0.12 < base_winner.verification_score:
+            continue
+        if hit.match_score + 0.18 < base_winner.match_score:
+            continue
+
+        contenders.append(hit)
+
+    if not contenders:
+        return base_winner
+
+    return max(
+        contenders + [base_winner],
+        key=lambda hit: (
+            float(max(1, hit.bbox[2] * hit.bbox[3])),
+            float(hit.verification_score),
+            float(hit.match_score),
+            float(hit.coverage),
+            float(hit.purity),
+        ),
+    )
+
+
 def _axis_overlap_fraction(
     start_a: int,
     length_a: int,
@@ -725,6 +805,14 @@ def _labelish_aspect(hit: CandidateHit) -> bool:
         float(hit.bbox[3]) / max(1.0, float(hit.bbox[2])),
     )
     return 1.15 <= aspect <= 3.35
+
+
+def _loose_labelish_aspect(hit: CandidateHit) -> bool:
+    aspect = max(
+        float(hit.bbox[2]) / max(1.0, float(hit.bbox[3])),
+        float(hit.bbox[3]) / max(1.0, float(hit.bbox[2])),
+    )
+    return 1.05 <= aspect <= 3.45
 
 
 def _is_weaker_adjacent_color_fragment(
@@ -771,8 +859,8 @@ def _is_weaker_adjacent_color_fragment(
     y_distance = abs(cy - sy) / max(1.0, min(candidate.bbox[3], stronger.bbox[3]))
     x_gap = _axis_gap(candidate.bbox[0], candidate.bbox[2], stronger.bbox[0], stronger.bbox[2])
     same_row_edge_fragment = (
-        _labelish_aspect(candidate)
-        and _labelish_aspect(stronger)
+        _loose_labelish_aspect(candidate)
+        and _loose_labelish_aspect(stronger)
         and
         stronger_area >= candidate_area * 1.20
         and stronger.match_score >= 0.40
@@ -810,28 +898,102 @@ def _is_weaker_adjacent_color_fragment(
     )
 
 
+def _color_fragment_suppression_reason(
+    candidate: CandidateHit,
+    stronger: CandidateHit,
+) -> str | None:
+    if candidate.dominant_hsv is None or stronger.dominant_hsv is None:
+        return None
+    if candidate.source == "pdf_text" or stronger.source == "pdf_text":
+        return None
+    if _hue_distance(candidate.dominant_hsv[0], stronger.dominant_hsv[0]) > (
+        COLOR_HUE_TOLERANCE + 6
+    ):
+        return None
+
+    candidate_area = max(1, candidate.bbox[2] * candidate.bbox[3])
+    stronger_area = max(1, stronger.bbox[2] * stronger.bbox[3])
+    inter_area, _iou, iom, center_distance = _bbox_metrics(candidate.bbox, stronger.bbox)
+    x_overlap = _axis_overlap_fraction(
+        candidate.bbox[0],
+        candidate.bbox[2],
+        stronger.bbox[0],
+        stronger.bbox[2],
+    )
+    y_overlap = _axis_overlap_fraction(
+        candidate.bbox[1],
+        candidate.bbox[3],
+        stronger.bbox[1],
+        stronger.bbox[3],
+    )
+
+    same_template_recovery_fragment = (
+        candidate.source == "template_color_recovery"
+        and stronger.source != "template_color_recovery"
+        and candidate.template_id == stronger.template_id
+        and candidate_area <= stronger_area * 1.45
+        and (
+            (inter_area > 0 and iom >= 0.18)
+            or (x_overlap >= 0.55 and y_overlap >= 0.55)
+            or center_distance <= 0.95
+        )
+        and candidate.match_score <= stronger.match_score + 0.18
+        and candidate.verification_score <= stronger.verification_score + 0.20
+    )
+    if same_template_recovery_fragment:
+        return "color_recovery_same_template_bridge"
+
+    if _is_weaker_adjacent_color_fragment(candidate, stronger):
+        if candidate.source == "template_color_recovery":
+            return "color_recovery_adjacent_fragment"
+        return "color_local_fragment"
+
+    weak_template_fragment = (
+        candidate.source == "template"
+        and candidate_area <= stronger_area * 1.60
+        and candidate.match_score < 0.56
+        and candidate.verification_score < 0.60
+        and candidate.coverage < 0.80
+        and candidate.context_purity < 0.50
+        and stronger.verification_score >= candidate.verification_score + 0.07
+        and stronger.coverage >= 0.65
+        and (
+            (inter_area > 0 and iom >= 0.18 and center_distance <= 0.95)
+            or (x_overlap >= 0.55 and y_overlap >= 0.55)
+        )
+    )
+    if weak_template_fragment:
+        return "color_local_fragment"
+
+    return None
+
+
 def _suppress_color_local_fragments(
     candidates: list[CandidateHit],
-) -> tuple[list[CandidateHit], list[CandidateHit]]:
+) -> tuple[list[CandidateHit], list[CandidateHit], dict[int, str]]:
     """Drop weak color fragments adjacent to a stronger local same-hue symbol."""
 
     suppressed: set[int] = set()
+    reasons: dict[int, str] = {}
     for idx, candidate in enumerate(candidates):
         if candidate.dominant_hsv is None:
             continue
         for other_idx, other in enumerate(candidates):
             if idx == other_idx:
                 continue
-            if _is_weaker_adjacent_color_fragment(candidate, other):
+            reason = _color_fragment_suppression_reason(candidate, other)
+            if reason:
                 suppressed.add(idx)
+                reasons[id(candidate)] = reason
                 break
 
     if not suppressed:
-        return candidates, []
+        return candidates, [], {}
 
     return (
         [candidate for idx, candidate in enumerate(candidates) if idx not in suppressed],
         [candidate for idx, candidate in enumerate(candidates) if idx in suppressed],
+        reasons,
     )
 
 
@@ -970,12 +1132,19 @@ def _maybe_prefer_fuller_gray_symbol(
 def _select_cluster_winner(
     group_hits: list[CandidateHit],
     parent_ids_by_child: dict[int, set[int]],
+    prefer_direct_color_family_parent: bool = True,
 ) -> CandidateHit:
     """Pick one winner per cluster, preferring promoted fuller symbols over simpler cores."""
 
     base_winner = max(group_hits, key=_candidate_rank_key)
     base_winner = _maybe_prefer_tighter_color_template(group_hits, base_winner)
     base_winner = _maybe_prefer_fuller_color_candidate(group_hits, base_winner)
+    if prefer_direct_color_family_parent:
+        base_winner = _maybe_prefer_direct_color_family_parent(
+            group_hits,
+            base_winner,
+            parent_ids_by_child,
+        )
     base_winner = _maybe_prefer_full_gray_text_label(group_hits, base_winner)
     base_winner = _maybe_prefer_fuller_text_label(group_hits, base_winner)
     base_winner = _maybe_prefer_fuller_gray_symbol(group_hits, base_winner)
@@ -1065,6 +1234,7 @@ def _cluster_candidates(
     candidates: list[CandidateHit],
     parent_ids_by_child: dict[int, set[int]] | None = None,
     mode: str = "color",
+    prefer_direct_color_family_parent: bool = True,
 ) -> list[CandidateHit]:
     """Cluster class-agnostic overlaps and keep one winner per physical place."""
 
@@ -1102,7 +1272,11 @@ def _cluster_candidates(
 
     winners: list[CandidateHit] = []
     for group_hits in groups.values():
-        winner = _select_cluster_winner(group_hits, parent_ids_by_child)
+        winner = _select_cluster_winner(
+            group_hits,
+            parent_ids_by_child,
+            prefer_direct_color_family_parent=prefer_direct_color_family_parent,
+        )
         winners.append(winner)
         winners.extend(_select_cluster_satellites(group_hits, winner))
 
