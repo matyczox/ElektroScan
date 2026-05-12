@@ -750,13 +750,13 @@ def _maybe_prefer_fuller_color_candidate(
                 and hit_area <= base_area * 1.70
                 and inter_area > 0
                 and (iom >= 0.55 or iou >= 0.22 or center_distance <= 0.72)
-                and hit.match_score >= 0.68
-                and hit.verification_score >= 0.62
+                and hit.match_score >= 0.64
+                and hit.verification_score >= 0.56
                 and hit.coverage >= 0.66
-                and hit.purity >= 0.78
-                and hit.context_purity >= 0.28
-                and hit.match_score + 0.09 >= base_winner.match_score
-                and hit.verification_score + 0.14 >= base_winner.verification_score
+                and hit.purity >= 0.58
+                and hit.context_purity >= 0.18
+                and hit.match_score + 0.20 >= base_winner.match_score
+                and hit.verification_score + 0.18 >= base_winner.verification_score
             )
             hit_is_fuller_label = hit_is_fuller_label or hit_is_fuller_parent_label
             base_is_strong_local_symbol = (
@@ -956,6 +956,93 @@ def _maybe_prefer_stronger_same_template_color_variant(
     return max(
         contenders,
         key=lambda hit: (
+            float(hit.verification_score),
+            float(hit.match_score),
+            float(hit.coverage),
+            float(hit.purity),
+        ),
+    )
+
+
+def _maybe_prefer_stronger_same_place_color_label(
+    group_hits: list[CandidateHit],
+    base_winner: CandidateHit,
+) -> CandidateHit:
+    """Prefer the stronger full color label over a weaker same-place family sibling."""
+
+    if base_winner.dominant_hsv is None or base_winner.source == "pdf_text":
+        return base_winner
+    if not (base_winner.is_text_label or _is_color_label_like_shape(base_winner)):
+        return base_winner
+
+    base_area = max(1, base_winner.bbox[2] * base_winner.bbox[3])
+    base_score = _color_template_score(base_winner)
+    contenders: list[CandidateHit] = []
+
+    for hit in group_hits:
+        if (
+            hit is base_winner
+            or hit.dominant_hsv is None
+            or hit.source == "pdf_text"
+            or not (hit.is_text_label or _is_color_label_like_shape(hit))
+        ):
+            continue
+        if _hue_distance(hit.dominant_hsv[0], base_winner.dominant_hsv[0]) > (
+            COLOR_HUE_TOLERANCE + 6
+        ):
+            continue
+
+        hit_area = max(1, hit.bbox[2] * hit.bbox[3])
+        if not (base_area * 0.70 <= hit_area <= base_area * 1.35):
+            continue
+
+        inter_area, iou, iom, center_distance = _bbox_metrics(hit.bbox, base_winner.bbox)
+        x_overlap = _axis_overlap_fraction(
+            hit.bbox[0],
+            hit.bbox[2],
+            base_winner.bbox[0],
+            base_winner.bbox[2],
+        )
+        y_overlap = _axis_overlap_fraction(
+            hit.bbox[1],
+            hit.bbox[3],
+            base_winner.bbox[1],
+            base_winner.bbox[3],
+        )
+        if not (
+            inter_area > 0
+            and (iou >= 0.30 or iom >= 0.52 or (x_overlap >= 0.72 and y_overlap >= 0.72))
+            and center_distance <= 0.72
+        ):
+            continue
+        base_is_fuller_parent_label = (
+            base_winner.source.startswith("template_parent_search_")
+            and base_area >= hit_area * 1.15
+            and base_winner.match_score >= 0.64
+            and base_winner.verification_score >= 0.56
+            and base_winner.coverage >= 0.62
+            and base_winner.purity >= 0.58
+        )
+        hit_is_parent_label = hit.source.startswith("template_parent_search_")
+        if base_is_fuller_parent_label and not hit_is_parent_label:
+            continue
+
+        if hit.match_score < 0.62 or hit.verification_score < 0.56:
+            continue
+        if hit.coverage < 0.62 or hit.purity < 0.58 or hit.context_purity < 0.18:
+            continue
+        if _color_template_score(hit) < base_score + 0.08:
+            continue
+
+        contenders.append(hit)
+
+    if not contenders:
+        return base_winner
+
+    return max(
+        contenders + [base_winner],
+        key=lambda hit: (
+            _color_template_score(hit),
             float(hit.verification_score),
             float(hit.match_score),
             float(hit.coverage),
@@ -1223,10 +1310,22 @@ def _color_fragment_suppression_reason(
     if protected_adjacent_text_label:
         return None
 
+    same_template_parent_label_pair = (
+        (
+            candidate.source.startswith("template_parent_search_")
+            or stronger.source.startswith("template_parent_search_")
+        )
+        and (candidate.is_text_label or _is_color_label_like_shape(candidate))
+        and (stronger.is_text_label or _is_color_label_like_shape(stronger))
+    )
     same_template_duplicate = (
         candidate.template_id == stronger.template_id
         and 0.70 <= candidate_area / max(1, stronger_area) <= 1.35
         and iom >= 0.28
+        and (
+            not same_template_parent_label_pair
+            or (x_overlap >= 0.70 and y_overlap >= 0.70)
+        )
         and center_distance <= 0.60
         and candidate_score + 0.005 < stronger_score
     )
@@ -1484,6 +1583,7 @@ def _select_cluster_winner(
     base_winner = _maybe_prefer_fuller_color_candidate(group_hits, base_winner)
     base_winner = _maybe_prefer_coverage_color_text_label(group_hits, base_winner)
     base_winner = _maybe_prefer_stronger_same_template_color_variant(group_hits, base_winner)
+    base_winner = _maybe_prefer_stronger_same_place_color_label(group_hits, base_winner)
     if prefer_direct_color_family_parent:
         base_winner = _maybe_prefer_direct_color_family_parent(
             group_hits,
@@ -1494,6 +1594,7 @@ def _select_cluster_winner(
     base_winner = _maybe_prefer_fuller_text_label(group_hits, base_winner)
     base_winner = _maybe_prefer_fuller_gray_symbol(group_hits, base_winner)
     base_winner = _maybe_prefer_stronger_same_template_color_variant(group_hits, base_winner)
+    base_winner = _maybe_prefer_stronger_same_place_color_label(group_hits, base_winner)
     override_candidates: list[CandidateHit] = []
 
     for hit in group_hits:
@@ -1675,11 +1776,37 @@ def _is_adjacent_color_text_label_satellite_candidate(
     return iom <= 0.36 or iou <= 0.24 or center_distance >= 0.42
 
 
+def _is_color_parent_label_satellite_candidate(hit: CandidateHit) -> bool:
+    """Keep promoted fuller color labels that are separate but bridged by local cores."""
+
+    if (
+        hit.dominant_hsv is None
+        or not hit.source.startswith("template_parent_search_")
+        or hit.source == "pdf_text"
+    ):
+        return False
+    area = max(1, hit.bbox[2] * hit.bbox[3])
+    aspect = max(
+        float(hit.bbox[2]) / max(1.0, float(hit.bbox[3])),
+        float(hit.bbox[3]) / max(1.0, float(hit.bbox[2])),
+    )
+    if area < 1_150 or area > 2_200 or aspect > 1.85:
+        return False
+    return (
+        hit.match_score >= 0.64
+        and hit.verification_score >= 0.56
+        and hit.coverage >= 0.70
+        and hit.purity >= 0.58
+        and hit.context_purity >= 0.18
+    )
+
+
 def _is_satellite_candidate(hit: CandidateHit) -> bool:
     return (
         _is_gray_satellite_candidate(hit)
         or _is_strong_color_satellite_candidate(hit)
         or _is_strong_color_text_label_satellite_candidate(hit)
+        or _is_color_parent_label_satellite_candidate(hit)
     )
 
 
@@ -1723,7 +1850,7 @@ def _select_cluster_satellites(
             continue
         satellites.append(hit)
 
-    strongest_compact_by_template: dict[int, CandidateHit] = {}
+    strong_compact_candidates: list[CandidateHit] = []
     for hit in group_hits:
         area = max(1, hit.bbox[2] * hit.bbox[3])
         aspect = max(
@@ -1742,12 +1869,10 @@ def _select_cluster_satellites(
         )
         if hit is winner or not compact_color_hit:
             continue
-        existing = strongest_compact_by_template.get(hit.template_id)
-        if existing is None or _satellite_rank_key(hit) > _satellite_rank_key(existing):
-            strongest_compact_by_template[hit.template_id] = hit
+        strong_compact_candidates.append(hit)
 
     for hit in sorted(
-        strongest_compact_by_template.values(),
+        strong_compact_candidates,
         key=_satellite_rank_key,
         reverse=True,
     ):
