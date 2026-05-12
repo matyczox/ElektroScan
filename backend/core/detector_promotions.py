@@ -150,6 +150,11 @@ def _maybe_promote_socket_06_to_07(
                 ):
                     continue
                 if parent_prefix == "07":
+                    if color_hit:
+                        child_area = max(1, hit.bbox[2] * hit.bbox[3])
+                        parent_area = max(1, promoted_hit.bbox[2] * promoted_hit.bbox[3])
+                        if parent_area < child_area * 1.35:
+                            continue
                     max_drop = SOCKET_PROMOTED_MAX_VERIFICATION_DROP
                     if (
                         child_prefix == "06"
@@ -210,11 +215,13 @@ def _maybe_promote_switch_parent_search(
         return hit
 
     child_prefix = _template_numeric_prefix(Path(templates[hit.template_id].path).name)
-    if child_prefix != "11":
+    color_child = hit.dominant_hsv is not None
+    if child_prefix != "11" and not (color_child and child_prefix == "06"):
         return hit
 
     rules = promotions.get((hit.template_id, hit.scale, hit.rotation, hit.mirrored), [])
-    if not rules:
+    color_socket_child = color_child and child_prefix == "06"
+    if not rules and not color_socket_child:
         return hit
 
     child_center = _box_center(hit.bbox)
@@ -226,9 +233,11 @@ def _maybe_promote_switch_parent_search(
 
     for rule in rules:
         parent_prefix = _template_numeric_prefix(Path(templates[rule.parent_template_id].path).name)
-        if parent_prefix not in {"10", "12"}:
+        if parent_prefix not in {"07", "10", "12"}:
             continue
         color_parent_search = hit.dominant_hsv is not None
+        if color_parent_search and parent_prefix == "07" and child_prefix != "06":
+            continue
         if color_parent_search and parent_prefix == "10" and not allow_color_switch_10:
             continue
 
@@ -255,9 +264,12 @@ def _maybe_promote_switch_parent_search(
             base_x = int(round(child_center[0] - parent_variant.width / 2.0))
             base_y = int(round(child_center[1] - parent_variant.height / 2.0))
 
-        search_radius = (
-            3 if hit.dominant_hsv is not None else SWITCH_PARENT_FALLBACK_SEARCH_RADIUS
-        )
+        if parent_prefix == "07":
+            search_radius = SOCKET_07_PROMOTION_SEARCH_RADIUS
+        else:
+            search_radius = (
+                3 if hit.dominant_hsv is not None else SWITCH_PARENT_FALLBACK_SEARCH_RADIUS
+            )
         for delta_y in range(-search_radius, search_radius + 1):
             for delta_x in range(-search_radius, search_radius + 1):
                 parent_bbox = (
@@ -329,18 +341,26 @@ def _maybe_promote_switch_parent_search(
                 ):
                     continue
 
-                max_drop = (
-                    SWITCH_12_PROMOTED_MAX_VERIFICATION_DROP
-                    if parent_prefix == "12"
-                    else SWITCH_10_PROMOTED_MAX_VERIFICATION_DROP
-                )
-                min_purity = SWITCH_PROMOTED_MIN_PURITY
-                min_context = SWITCH_PROMOTED_MIN_CONTEXT_PURITY
-                min_verification = SWITCH_PROMOTED_MIN_VERIFICATION
+                if parent_prefix == "07":
+                    max_drop = SOCKET_07_STRONG_MAX_VERIFICATION_DROP
+                    min_purity = 0.66 if color_parent_search else SWITCH_PROMOTED_MIN_PURITY
+                    min_context = 0.24 if color_parent_search else SWITCH_PROMOTED_MIN_CONTEXT_PURITY
+                    min_verification = 0.54 if color_parent_search else SWITCH_PROMOTED_MIN_VERIFICATION
+                else:
+                    max_drop = (
+                        SWITCH_12_PROMOTED_MAX_VERIFICATION_DROP
+                        if parent_prefix == "12"
+                        else SWITCH_10_PROMOTED_MAX_VERIFICATION_DROP
+                    )
+                    min_purity = SWITCH_PROMOTED_MIN_PURITY
+                    min_context = SWITCH_PROMOTED_MIN_CONTEXT_PURITY
+                    min_verification = SWITCH_PROMOTED_MIN_VERIFICATION
                 if color_parent_search:
-                    min_purity = 0.50
-                    min_context = 0.16
-                    min_verification = 0.50
+                    min_purity = min(min_purity, 0.50) if parent_prefix != "07" else min_purity
+                    min_context = min(min_context, 0.16) if parent_prefix != "07" else min_context
+                    min_verification = (
+                        min(min_verification, 0.50) if parent_prefix != "07" else min_verification
+                    )
                     max_drop = max(max_drop, SWITCH_12_PROMOTED_MAX_VERIFICATION_DROP)
                 if (
                     promoted_hit.purity < min_purity
@@ -365,5 +385,106 @@ def _maybe_promote_switch_parent_search(
                 if fallback_key is None or candidate_key > fallback_key:
                     fallback_best = promoted_hit
                     fallback_key = candidate_key
+
+    if fallback_best is None and color_socket_child:
+        child_center = _box_center(hit.bbox)
+        parent_ids = [
+            template_id
+            for template_id, template in enumerate(templates)
+            if _template_numeric_prefix(Path(template.path).name) == "07"
+        ]
+        for parent_id in parent_ids:
+            parent_plan_mask = plan_masks.get(parent_id)
+            if parent_plan_mask is None:
+                continue
+            for (
+                variant_template_id,
+                variant_scale,
+                variant_rotation,
+                variant_mirrored,
+            ), parent_variant in variants_lookup.items():
+                if variant_template_id != parent_id:
+                    continue
+                if abs(float(variant_scale) - float(hit.scale)) > 0.11:
+                    continue
+                if int(variant_rotation) != int(hit.rotation):
+                    continue
+                parent_area = max(1, parent_variant.width * parent_variant.height)
+                if parent_area < child_area * 1.30 or parent_area > child_area * 1.90:
+                    continue
+                base_x = int(round(child_center[0] - parent_variant.width / 2.0))
+                base_y = int(round(child_center[1] - parent_variant.height / 2.0))
+                for delta_y in range(-8, 9):
+                    for delta_x in range(-8, 9):
+                        parent_bbox = (
+                            base_x + delta_x,
+                            base_y + delta_y,
+                            parent_variant.width,
+                            parent_variant.height,
+                        )
+                        inter_area, _iou, iom, _center_distance = _bbox_metrics(
+                            hit.bbox,
+                            parent_bbox,
+                        )
+                        if inter_area <= 0 or iom < 0.58:
+                            continue
+                        parent_roi = _roi_mask(parent_plan_mask, parent_bbox)
+                        if (
+                            parent_roi is None
+                            or parent_roi.shape != parent_variant.transformed_mask.shape
+                        ):
+                            continue
+                        try:
+                            local_match = float(
+                                cv2.matchTemplate(
+                                    parent_roi,
+                                    parent_variant.transformed_mask,
+                                    cv2.TM_CCORR_NORMED,
+                                )[0][0]
+                            )
+                        except cv2.error:
+                            continue
+                        if local_match < 0.50:
+                            continue
+                        promoted_hit = CandidateHit(
+                            template_id=parent_id,
+                            scale=parent_variant.scale,
+                            rotation=parent_variant.rotation,
+                            mirrored=variant_mirrored,
+                            transformed_mask=parent_variant.transformed_mask,
+                            content_mask=parent_variant.content_mask,
+                            pixel_count=parent_variant.pixel_count,
+                            content_pixel_count=parent_variant.content_pixel_count,
+                            content_bbox=parent_variant.content_bbox,
+                            bbox=parent_bbox,
+                            match_score=local_match,
+                            dominant_hsv=templates[parent_id].dominant_hsv,
+                            source=f"template_parent_search_{hit.template_id}_to_{parent_id}",
+                            is_text_label=templates[parent_id].is_text_label,
+                            promoted_from_template_id=hit.template_id,
+                        )
+                        if not _validate_template_hit(
+                            promoted_hit,
+                            parent_plan_mask,
+                            plan_image,
+                            plan_hsv=plan_hsv,
+                        ):
+                            continue
+                        if (
+                            promoted_hit.coverage < 0.60
+                            or promoted_hit.purity < 0.66
+                            or promoted_hit.context_purity < 0.24
+                            or promoted_hit.verification_score < hit.verification_score - 0.12
+                        ):
+                            continue
+                        candidate_key = (
+                            float(promoted_hit.verification_score),
+                            float(promoted_hit.coverage),
+                            float(promoted_hit.purity),
+                            float(promoted_hit.match_score),
+                        )
+                        if fallback_key is None or candidate_key > fallback_key:
+                            fallback_best = promoted_hit
+                            fallback_key = candidate_key
 
     return fallback_best or hit

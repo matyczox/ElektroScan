@@ -490,6 +490,10 @@ def _maybe_prefer_tighter_color_template(
         return base_winner
 
     base_area = max(1, base_winner.bbox[2] * base_winner.bbox[3])
+    base_aspect = max(
+        float(base_winner.bbox[2]) / max(1.0, float(base_winner.bbox[3])),
+        float(base_winner.bbox[3]) / max(1.0, float(base_winner.bbox[2])),
+    )
     base_score = _color_template_score(base_winner)
     contenders: list[CandidateHit] = []
     compact_symbol_contenders: list[CandidateHit] = []
@@ -503,6 +507,14 @@ def _maybe_prefer_tighter_color_template(
             continue
 
         hit_area = max(1, hit.bbox[2] * hit.bbox[3])
+        hit_aspect = max(
+            float(hit.bbox[2]) / max(1.0, float(hit.bbox[3])),
+            float(hit.bbox[3]) / max(1.0, float(hit.bbox[2])),
+        )
+        base_aspect = max(
+            float(base_winner.bbox[2]) / max(1.0, float(base_winner.bbox[3])),
+            float(base_winner.bbox[3]) / max(1.0, float(base_winner.bbox[2])),
+        )
         if (
             base_winner.is_text_label
             and hit.is_text_label
@@ -536,16 +548,34 @@ def _maybe_prefer_tighter_color_template(
             and hit.purity >= 0.74
             and hit.context_purity >= 0.32
         )
+        compact_square_over_elongated_symbol = (
+            850 <= hit_area <= 1_900
+            and hit_aspect <= 1.28
+            and base_aspect >= 1.45
+            and hit_area <= base_area * 0.78
+            and inter_area > 0
+            and (iom >= 0.55 or iou >= 0.24 or center_distance <= 0.70)
+            and hit.verification_score + 0.08 >= base_winner.verification_score
+            and hit.match_score + 0.18 >= base_winner.match_score
+            and hit.coverage >= 0.58
+            and hit.purity >= 0.68
+            and hit.context_purity + 0.12 >= base_winner.context_purity
+            and base_winner.coverage < 0.78
+        )
         if hit is not base_winner and not (
             inter_area > 0
             and (iom >= 0.45 or iou >= 0.20 or center_distance <= 0.35)
-        ) and not stronger_tighter_label and not compact_symbol_over_text_label:
+        ) and not (
+            stronger_tighter_label
+            or compact_symbol_over_text_label
+            or compact_square_over_elongated_symbol
+        ):
             continue
 
         if hit.verification_score < 0.56 or hit.coverage < 0.58 or hit.purity < 0.62:
             continue
 
-        if compact_symbol_over_text_label:
+        if compact_symbol_over_text_label or compact_square_over_elongated_symbol:
             compact_symbol_contenders.append(hit)
             contenders.append(hit)
             continue
@@ -595,6 +625,10 @@ def _maybe_prefer_fuller_color_candidate(
         return base_winner
 
     base_area = max(1, base_winner.bbox[2] * base_winner.bbox[3])
+    base_aspect = max(
+        float(base_winner.bbox[2]) / max(1.0, float(base_winner.bbox[3])),
+        float(base_winner.bbox[3]) / max(1.0, float(base_winner.bbox[2])),
+    )
     base_score = _color_template_score(base_winner)
     contenders: list[CandidateHit] = []
 
@@ -618,6 +652,27 @@ def _maybe_prefer_fuller_color_candidate(
             continue
 
         inter_area, iou, iom, center_distance = _bbox_metrics(hit.bbox, base_winner.bbox)
+        hit_aspect = max(
+            float(hit.bbox[2]) / max(1.0, float(hit.bbox[3])),
+            float(hit.bbox[3]) / max(1.0, float(hit.bbox[2])),
+        )
+        base_is_good_compact_symbol = (
+            850 <= base_area <= 1_900
+            and base_aspect <= 1.12
+            and base_winner.coverage >= 0.58
+            and base_winner.purity >= 0.68
+            and base_winner.verification_score >= 0.56
+        )
+        hit_is_elongated_attachment = (
+            hit_aspect >= 1.45
+            and hit_area <= base_area * 2.25
+            and inter_area > 0
+            and (iom >= 0.55 or iou >= 0.24 or center_distance <= 0.70)
+            and hit.coverage < 0.78
+            and hit.verification_score <= base_winner.verification_score + 0.08
+        )
+        if base_is_good_compact_symbol and hit_is_elongated_attachment:
+            continue
         if label_like_competition:
             adds_own_ink_area = hit_area - inter_area
             if not (
@@ -643,6 +698,18 @@ def _maybe_prefer_fuller_color_candidate(
             and hit.coverage >= 0.70
             and hit.purity >= 0.75
             and hit_area <= base_area * 1.80
+        )
+        fuller_socket_parent = (
+            not label_like_competition
+            and hit_area >= base_area * 1.20
+            and hit_area <= base_area * 1.90
+            and inter_area > 0
+            and (iom >= 0.58 or iou >= 0.28 or center_distance <= 0.58)
+            and hit.match_score + 0.14 >= base_winner.match_score
+            and hit.verification_score + 0.10 >= base_winner.verification_score
+            and hit.coverage >= 0.62
+            and hit.purity >= 0.66
+            and hit.context_purity >= 0.28
         )
 
         if label_like_competition:
@@ -706,7 +773,7 @@ def _maybe_prefer_fuller_color_candidate(
                 continue
             if hit.context_purity < 0.16:
                 continue
-            if not fuller_color_symbol:
+            if not (fuller_color_symbol or fuller_socket_parent):
                 if hit.match_score + 0.02 < base_winner.match_score:
                     continue
                 if _color_template_score(hit) + 0.04 < base_score:
@@ -725,6 +792,61 @@ def _maybe_prefer_fuller_color_candidate(
             float(hit.match_score),
             float(hit.coverage),
             float(hit.purity),
+        ),
+    )
+
+
+def _maybe_prefer_coverage_color_text_label(
+    group_hits: list[CandidateHit],
+    base_winner: CandidateHit,
+) -> CandidateHit:
+    """For same-label color variants, prefer the full ink box over a text-only core."""
+
+    if (
+        base_winner.dominant_hsv is None
+        or not base_winner.is_text_label
+        or base_winner.source == "pdf_text"
+    ):
+        return base_winner
+
+    contenders: list[CandidateHit] = []
+    for hit in group_hits:
+        if (
+            hit is base_winner
+            or hit.template_id != base_winner.template_id
+            or hit.dominant_hsv is None
+            or not hit.is_text_label
+            or hit.source == "pdf_text"
+        ):
+            continue
+        if _hue_distance(hit.dominant_hsv[0], base_winner.dominant_hsv[0]) > (
+            COLOR_HUE_TOLERANCE + 6
+        ):
+            continue
+
+        inter_area, iou, iom, center_distance = _bbox_metrics(hit.bbox, base_winner.bbox)
+        if inter_area <= 0 or not (iom >= 0.40 or iou >= 0.18 or center_distance <= 0.68):
+            continue
+        if hit.coverage < base_winner.coverage + 0.12:
+            continue
+        if hit.verification_score + 0.11 < base_winner.verification_score:
+            continue
+        if hit.match_score + 0.08 < base_winner.match_score:
+            continue
+        if hit.content_score < 0.68 or hit.purity < 0.78 or hit.context_purity < 0.50:
+            continue
+        contenders.append(hit)
+
+    if not contenders:
+        return base_winner
+
+    return max(
+        contenders + [base_winner],
+        key=lambda hit: (
+            float(hit.coverage),
+            float(hit.verification_score),
+            float(hit.match_score),
+            float(hit.content_score),
         ),
     )
 
@@ -787,7 +909,22 @@ def _maybe_prefer_direct_color_family_parent(
         ):
             continue
 
-        if hit.verification_score + 0.12 < base_winner.verification_score:
+        base_is_strong_compact = (
+            not base_winner.is_text_label
+            and base_winner.match_score >= 0.64
+            and base_winner.verification_score >= 0.64
+            and base_winner.coverage >= 0.66
+            and base_winner.purity >= 0.78
+            and base_winner.context_purity >= 0.36
+        )
+        if base_is_strong_compact and (
+            hit.verification_score + 0.08 < base_winner.verification_score
+            or hit.coverage < 0.62
+            or hit.purity < 0.72
+        ):
+            continue
+
+        if hit.verification_score + 0.10 < base_winner.verification_score:
             continue
         if hit.match_score + 0.18 < base_winner.match_score:
             continue
@@ -939,10 +1076,6 @@ def _color_fragment_suppression_reason(
         COLOR_HUE_TOLERANCE + 6
     ):
         return None
-    if candidate.source != "template_color_recovery" and _is_strong_color_satellite_candidate(
-        candidate
-    ):
-        return None
 
     candidate_area = max(1, candidate.bbox[2] * candidate.bbox[3])
     stronger_area = max(1, stronger.bbox[2] * stronger.bbox[3])
@@ -966,11 +1099,16 @@ def _color_fragment_suppression_reason(
         candidate.template_id == stronger.template_id
         and 0.70 <= candidate_area / max(1, stronger_area) <= 1.35
         and iom >= 0.28
-        and center_distance <= 0.55
-        and candidate_score + 0.018 < stronger_score
+        and center_distance <= 0.60
+        and candidate_score + 0.005 < stronger_score
     )
     if same_template_duplicate:
         return "color_same_template_duplicate"
+
+    if candidate.source != "template_color_recovery" and _is_strong_color_satellite_candidate(
+        candidate
+    ):
+        return None
 
     same_template_recovery_fragment = (
         candidate.source == "template_color_recovery"
@@ -1216,6 +1354,7 @@ def _select_cluster_winner(
     base_winner = max(group_hits, key=_candidate_rank_key)
     base_winner = _maybe_prefer_tighter_color_template(group_hits, base_winner)
     base_winner = _maybe_prefer_fuller_color_candidate(group_hits, base_winner)
+    base_winner = _maybe_prefer_coverage_color_text_label(group_hits, base_winner)
     if prefer_direct_color_family_parent:
         base_winner = _maybe_prefer_direct_color_family_parent(
             group_hits,
@@ -1298,17 +1437,62 @@ def _is_strong_color_satellite_candidate(hit: CandidateHit) -> bool:
     )
     if area < 700 or area > 2_200 or aspect > 1.85:
         return False
-    return (
+    strong_direct_hit = (
         hit.match_score >= 0.62
         and hit.verification_score >= 0.62
         and hit.coverage >= 0.70
         and hit.purity >= 0.72
         and hit.context_purity >= 0.30
     )
+    strong_verified_full_symbol = (
+        hit.match_score >= 0.44
+        and hit.verification_score >= 0.64
+        and hit.coverage >= 0.68
+        and hit.purity >= 0.74
+        and hit.context_purity >= 0.40
+    )
+    return strong_direct_hit or strong_verified_full_symbol
+
+
+def _is_strong_color_text_label_satellite_candidate(hit: CandidateHit) -> bool:
+    """Keep validated color text labels from disappearing through transitive bridges."""
+
+    if hit.dominant_hsv is None or not hit.is_text_label or hit.source == "pdf_text":
+        return False
+    area = max(1, hit.bbox[2] * hit.bbox[3])
+    aspect = max(
+        float(hit.bbox[2]) / max(1.0, float(hit.bbox[3])),
+        float(hit.bbox[3]) / max(1.0, float(hit.bbox[2])),
+    )
+    if area < 1_200 or area > 4_200 or aspect > 3.40:
+        return False
+    return (
+        hit.match_score >= 0.45
+        and hit.verification_score >= 0.67
+        and hit.coverage >= 0.68
+        and hit.purity >= 0.80
+        and hit.context_purity >= 0.54
+        and hit.content_score >= 0.70
+    )
 
 
 def _is_satellite_candidate(hit: CandidateHit) -> bool:
-    return _is_gray_satellite_candidate(hit) or _is_strong_color_satellite_candidate(hit)
+    return (
+        _is_gray_satellite_candidate(hit)
+        or _is_strong_color_satellite_candidate(hit)
+        or _is_strong_color_text_label_satellite_candidate(hit)
+    )
+
+
+def _satellite_rank_key(hit: CandidateHit) -> tuple[float, ...]:
+    if _is_strong_color_text_label_satellite_candidate(hit):
+        return (
+            float(hit.coverage),
+            float(hit.verification_score),
+            float(hit.match_score),
+            float(hit.content_score),
+        )
+    return _candidate_rank_key(hit)
 
 
 def _select_cluster_satellites(
@@ -1318,7 +1502,7 @@ def _select_cluster_satellites(
     """Return strong compact hits connected only through a bridge candidate."""
 
     satellites: list[CandidateHit] = []
-    for hit in sorted(group_hits, key=_candidate_rank_key, reverse=True):
+    for hit in sorted(group_hits, key=_satellite_rank_key, reverse=True):
         if hit is winner:
             continue
         if not _is_satellite_candidate(hit):
