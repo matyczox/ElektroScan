@@ -305,6 +305,7 @@ h1, h2, h3 {
 
 .project-sort-control {
   position: relative;
+  z-index: 20;
 }
 
 .project-sort-trigger {
@@ -324,7 +325,7 @@ h1, h2, h3 {
 
 .project-sort-menu {
   position: absolute;
-  z-index: 30;
+  z-index: 200;
   top: calc(100% + 6px);
   right: 0;
   left: 0;
@@ -333,13 +334,13 @@ h1, h2, h3 {
   overflow: hidden;
   border: 1px solid rgba(197, 163, 105, 0.3);
   border-radius: var(--radius-sm);
-  background: #111827;
+  background: #0f141f;
   box-shadow: 0 16px 30px rgba(0, 0, 0, 0.35);
 }
 
 .project-sort-menu button {
   border: 0;
-  background: transparent;
+  background: #0f141f;
   color: var(--text-primary);
   padding: 9px 10px;
   font: inherit;

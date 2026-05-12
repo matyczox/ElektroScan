@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import {
   ArrowDownAZ,
+  ChevronDown,
   Clock3,
   FolderOpen,
   History,
@@ -119,7 +120,7 @@ export const ProjectDashboard = ({
   const [search, setSearch] = useState('');
   const [sort, setSort] = useState<ProjectSort>('updated');
   const [isSortMenuOpen, setIsSortMenuOpen] = useState(false);
-  const sortMenuRef = useRef<HTMLSpanElement | null>(null);
+  const sortMenuRef = useRef<HTMLDivElement | null>(null);
   const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
   const [editName, setEditName] = useState('');
   const [editDescription, setEditDescription] = useState('');
@@ -374,7 +375,7 @@ export const ProjectDashboard = ({
             </label>
             <label className="form-field project-sort">
               Sortuj
-              <span className="project-sort-control" ref={sortMenuRef}>
+              <div className="project-sort-control" ref={sortMenuRef}>
                 <ArrowDownAZ size={15} />
                 <button
                   type="button"
@@ -384,7 +385,7 @@ export const ProjectDashboard = ({
                   onClick={() => setIsSortMenuOpen(open => !open)}
                 >
                   <span>{sortLabel}</span>
-                  <span className="project-sort-caret" aria-hidden="true">⌄</span>
+                  <ChevronDown className="project-sort-caret" size={15} aria-hidden="true" />
                 </button>
                 {isSortMenuOpen && (
                   <div className="project-sort-menu" role="listbox" aria-label="Sortuj projekty">
@@ -405,7 +406,7 @@ export const ProjectDashboard = ({
                     ))}
                   </div>
                 )}
-              </span>
+              </div>
             </label>
           </div>
 
