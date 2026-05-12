@@ -492,6 +492,7 @@ def _maybe_prefer_tighter_color_template(
     base_area = max(1, base_winner.bbox[2] * base_winner.bbox[3])
     base_score = _color_template_score(base_winner)
     contenders: list[CandidateHit] = []
+    compact_symbol_contenders: list[CandidateHit] = []
 
     for hit in group_hits:
         if hit.dominant_hsv is None or hit.source == "pdf_text":
@@ -523,13 +524,30 @@ def _maybe_prefer_tighter_color_template(
             and hit.coverage >= 0.70
             and hit.purity >= 0.75
         )
+        compact_symbol_over_text_label = (
+            base_winner.is_text_label
+            and not hit.is_text_label
+            and hit_area <= base_area * 0.78
+            and inter_area > 0
+            and (iom >= 0.20 or center_distance <= 0.75)
+            and hit.match_score >= base_winner.match_score + 0.08
+            and hit.verification_score >= 0.60
+            and hit.coverage >= 0.70
+            and hit.purity >= 0.74
+            and hit.context_purity >= 0.32
+        )
         if hit is not base_winner and not (
             inter_area > 0
             and (iom >= 0.45 or iou >= 0.20 or center_distance <= 0.35)
-        ) and not stronger_tighter_label:
+        ) and not stronger_tighter_label and not compact_symbol_over_text_label:
             continue
 
         if hit.verification_score < 0.56 or hit.coverage < 0.58 or hit.purity < 0.62:
+            continue
+
+        if compact_symbol_over_text_label:
+            compact_symbol_contenders.append(hit)
+            contenders.append(hit)
             continue
 
         hit_score = _color_template_score(hit)
@@ -544,6 +562,17 @@ def _maybe_prefer_tighter_color_template(
 
     if not contenders:
         return base_winner
+
+    if compact_symbol_contenders:
+        return max(
+            compact_symbol_contenders,
+            key=lambda hit: (
+                float(hit.match_score),
+                float(hit.verification_score),
+                float(hit.coverage),
+                float(hit.purity),
+            ),
+        )
 
     return max(
         contenders + [base_winner],
@@ -910,10 +939,16 @@ def _color_fragment_suppression_reason(
         COLOR_HUE_TOLERANCE + 6
     ):
         return None
+    if candidate.source != "template_color_recovery" and _is_strong_color_satellite_candidate(
+        candidate
+    ):
+        return None
 
     candidate_area = max(1, candidate.bbox[2] * candidate.bbox[3])
     stronger_area = max(1, stronger.bbox[2] * stronger.bbox[3])
     inter_area, _iou, iom, center_distance = _bbox_metrics(candidate.bbox, stronger.bbox)
+    candidate_score = _color_template_score(candidate)
+    stronger_score = _color_template_score(stronger)
     x_overlap = _axis_overlap_fraction(
         candidate.bbox[0],
         candidate.bbox[2],
@@ -926,6 +961,16 @@ def _color_fragment_suppression_reason(
         stronger.bbox[1],
         stronger.bbox[3],
     )
+
+    same_template_duplicate = (
+        candidate.template_id == stronger.template_id
+        and 0.70 <= candidate_area / max(1, stronger_area) <= 1.35
+        and iom >= 0.28
+        and center_distance <= 0.55
+        and candidate_score + 0.018 < stronger_score
+    )
+    if same_template_duplicate:
+        return "color_same_template_duplicate"
 
     same_template_recovery_fragment = (
         candidate.source == "template_color_recovery"
@@ -947,6 +992,38 @@ def _color_fragment_suppression_reason(
         if candidate.source == "template_color_recovery":
             return "color_recovery_adjacent_fragment"
         return "color_local_fragment"
+
+    weak_overlapping_color_fragment = (
+        candidate.template_id != stronger.template_id
+        and candidate_area <= stronger_area * 2.35
+        and candidate_area >= stronger_area * 0.55
+        and inter_area > 0
+        and (iom >= 0.30 or center_distance <= 0.92 or x_overlap >= 0.55 or y_overlap >= 0.55)
+        and stronger.coverage >= 0.62
+        and stronger.purity >= 0.60
+        and stronger.verification_score + 0.02 >= candidate.verification_score
+        and stronger.match_score + 0.05 >= candidate.match_score
+        and (
+            (
+                candidate.match_score < 0.50
+                and stronger.match_score >= candidate.match_score + 0.08
+            )
+            or (
+                candidate.coverage < 0.70
+                and stronger.context_purity + 0.10 >= candidate.context_purity
+            )
+            or (
+                candidate.verification_score < 0.60
+                and stronger.match_score >= candidate.match_score + 0.10
+            )
+        )
+    )
+    if weak_overlapping_color_fragment:
+        return (
+            "color_recovery_adjacent_fragment"
+            if candidate.source == "template_color_recovery"
+            else "color_local_fragment"
+        )
 
     weak_template_fragment = (
         candidate.source == "template"
@@ -1209,17 +1286,42 @@ def _is_gray_satellite_candidate(hit: CandidateHit) -> bool:
     return _is_strong_tiny_gray_candidate(hit)
 
 
+def _is_strong_color_satellite_candidate(hit: CandidateHit) -> bool:
+    """Keep compact color symbols from being swallowed by nearby text-label bridges."""
+
+    if hit.dominant_hsv is None or hit.is_text_label or hit.source == "pdf_text":
+        return False
+    area = max(1, hit.bbox[2] * hit.bbox[3])
+    aspect = max(
+        float(hit.bbox[2]) / max(1.0, float(hit.bbox[3])),
+        float(hit.bbox[3]) / max(1.0, float(hit.bbox[2])),
+    )
+    if area < 700 or area > 2_200 or aspect > 1.85:
+        return False
+    return (
+        hit.match_score >= 0.62
+        and hit.verification_score >= 0.62
+        and hit.coverage >= 0.70
+        and hit.purity >= 0.72
+        and hit.context_purity >= 0.30
+    )
+
+
+def _is_satellite_candidate(hit: CandidateHit) -> bool:
+    return _is_gray_satellite_candidate(hit) or _is_strong_color_satellite_candidate(hit)
+
+
 def _select_cluster_satellites(
     group_hits: list[CandidateHit],
     winner: CandidateHit,
 ) -> list[CandidateHit]:
-    """Return strong small gray hits connected only through a bridge candidate."""
+    """Return strong compact hits connected only through a bridge candidate."""
 
     satellites: list[CandidateHit] = []
     for hit in sorted(group_hits, key=_candidate_rank_key, reverse=True):
         if hit is winner:
             continue
-        if not _is_gray_satellite_candidate(hit):
+        if not _is_satellite_candidate(hit):
             continue
         if _overlaps_as_same_object(hit, winner):
             continue

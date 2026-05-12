@@ -57,6 +57,12 @@ def _maybe_promote_socket_06_to_07(
             continue
         child_prefix = _template_numeric_prefix(Path(templates[rule.child_template_id].path).name)
         parent_prefix = _template_numeric_prefix(Path(templates[rule.parent_template_id].path).name)
+        color_hit = hit.dominant_hsv is not None
+        if color_hit:
+            if parent_prefix == "07" and child_prefix != "06":
+                continue
+            if parent_prefix in {"10", "12"}:
+                continue
         if parent_prefix == "07":
             promotion_plan_mask = _cached_dilated_mask(
                 rule.parent_template_id,

@@ -1126,6 +1126,20 @@ def _validate_template_hit(
             )
         )
     )
+    color_full_text_label_geometry = (
+        plan_hsv is not None
+        and hit.is_text_label
+        and color_full_label_source
+        and hit.source != "pdf_text"
+        and hit.scale >= 0.90
+        and 900 <= hit_area <= 3_800
+        and hit_aspect <= 3.20
+        and hit.match_score >= 0.50
+        and coverage >= 0.70
+        and purity >= 0.75
+        and context_purity >= 0.45
+    )
+    color_full_label_geometry = color_full_label_geometry or color_full_text_label_geometry
     color_low_content_text_fragment = False
     if hit.dominant_hsv is not None and hit.is_text_label and hit.content_pixel_count > 0:
         content_ink_ratio = hit.content_pixel_count / max(1, hit.pixel_count)

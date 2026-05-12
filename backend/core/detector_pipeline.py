@@ -542,7 +542,7 @@ def _detect_symbols_pipeline(
         if detector_profile in {"gray", "color"}
         else {}
     )
-    validation_promotions = socket_07_promotions if detector_profile == "gray" else {}
+    validation_promotions = socket_07_promotions if detector_profile in {"gray", "color"} else {}
     parent_ids_by_child: dict[int, set[int]] = {}
     for rules in socket_07_promotions.values():
         for rule in rules:
@@ -942,9 +942,7 @@ def _detect_symbols_pipeline(
         prefiltered_candidates,
         parent_ids_by_child,
         mode=detector_profile,
-        prefer_direct_color_family_parent=(
-            detector_profile != "color" or not has_pdf_text_assist
-        ),
+        prefer_direct_color_family_parent=True,
     )
     pre_parent_ids = {id(hit) for hit in pre_parent_candidates}
     pre_parent_suppressed = [hit for hit in prefiltered_candidates if id(hit) not in pre_parent_ids]
@@ -980,7 +978,7 @@ def _detect_symbols_pipeline(
         variants_lookup=variants_lookup,
         socket_07_promotions=socket_07_promotions,
         plan_hsv=plan_hsv,
-        allow_color_switch_10=(detector_profile != "color" or not has_pdf_text_assist),
+        allow_color_switch_10=True,
         postprocess_workers=postprocess_workers,
         progress_callback=_progress,
     )
@@ -1007,9 +1005,7 @@ def _detect_symbols_pipeline(
         parent_search_candidates,
         parent_ids_by_child,
         mode=detector_profile,
-        prefer_direct_color_family_parent=(
-            detector_profile != "color" or not has_pdf_text_assist
-        ),
+        prefer_direct_color_family_parent=True,
     )
     final_cluster_ids = {id(hit) for hit in final_hits}
     final_cluster_suppressed = [

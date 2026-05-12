@@ -12,20 +12,20 @@
   "extractTemplatesFresh": true,
   "legendMaskMode": "color",
   "legendZone": {
-    "x": 3481,
-    "y": 385,
-    "width": 1341,
-    "height": 1480
+    "x": 3506,
+    "y": 428,
+    "width": 1153,
+    "height": 1430
   },
   "excludedZones": [
     {
-      "x": 3481,
-      "y": 385,
-      "width": 1341,
-      "height": 1480
+      "x": 3506,
+      "y": 428,
+      "width": 1153,
+      "height": 1430
     }
   ],
-  "focus": "06,07,09,10,11,12,13,18,19,20,21",
+  "focus": "03,06,07,09,10,11,12,13,18,19,20,21",
   "centerTolerance": 18,
   "sizeTolerance": 0.4
 }
