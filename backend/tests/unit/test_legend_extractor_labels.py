@@ -4,6 +4,7 @@ import hashlib
 from pathlib import Path
 
 import cv2
+import fitz
 import numpy as np
 
 from core.legend_extractor import (
@@ -333,14 +334,79 @@ def test_table_extraction_uses_external_symbol_gutter_and_visual_index():
 def test_table_extraction_quality_flags_text_column_results():
     symbol = np.full((30, 40, 3), 255, dtype=np.uint8)
     good_symbols = [(symbol, "L1"), (symbol, "L2"), (symbol, "AW1"), (symbol, "EW1")]
+    color_symbol = np.full((30, 40, 3), 255, dtype=np.uint8)
+    cv2.circle(color_symbol, (20, 15), 7, (255, 0, 255), 2)
+    color_fallback_symbols = [
+        (color_symbol, "sym_01"),
+        (color_symbol, "sym_02"),
+        (color_symbol, "sym_03"),
+        (color_symbol, "sym_04"),
+    ]
     bad_symbols = [(symbol, "LEGENDA_oprawy"), (symbol, "sym_02"), (symbol, "sym_03")]
     tiny_single_text = [(symbol, "L7")]
     overgrown_plan_selection = [(symbol, f"L{index}") for index in range(1, 37)]
 
     assert _table_symbols_need_expansion(good_symbols) is False
+    assert _table_symbols_need_expansion(color_fallback_symbols) is False
     assert _table_symbols_need_expansion(bad_symbols) is True
     assert _table_symbols_need_expansion(tiny_single_text) is True
     assert _table_symbols_need_expansion(overgrown_plan_selection) is True
+
+
+def test_large_color_table_selection_trims_grid_and_keeps_symbol_rows(tmp_path):
+    plan_image = np.full((1000, 1800, 3), 255, dtype=np.uint8)
+    table_x0, table_x1 = 700, 1460
+    col_x = 870
+    rows = [50, 120, 220, 320, 420, 520]
+
+    for y in rows:
+        cv2.line(plan_image, (table_x0, y), (table_x1, y), (0, 0, 0), 2)
+    for x in (table_x0, col_x, table_x1):
+        cv2.line(plan_image, (x, rows[0]), (x, rows[-1]), (0, 0, 0), 2)
+    cv2.putText(
+        plan_image,
+        "LEGENDA",
+        (table_x0 + 260, 95),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        1.2,
+        (0, 0, 0),
+        2,
+    )
+
+    for idx, center_y in enumerate((170, 270, 370, 470), start=1):
+        cx = table_x0 + 85
+        cv2.circle(plan_image, (cx, center_y), 13, (255, 0, 255), 3)
+        cv2.line(plan_image, (cx, center_y + 13), (cx, center_y + 46), (255, 0, 255), 3)
+        cv2.line(plan_image, (cx + 13, center_y - 4), (cx + 28, center_y - 18), (255, 0, 255), 3)
+        cv2.putText(
+            plan_image,
+            f"opis {idx}",
+            (col_x + 24, center_y + 10),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.9,
+            (0, 0, 0),
+            2,
+        )
+
+    pdf_path = tmp_path / "blank.pdf"
+    doc = fitz.open()
+    doc.new_page(width=432, height=240)
+    doc.save(pdf_path)
+    doc.close()
+
+    symbols = extract_legend(
+        str(pdf_path),
+        plan_image,
+        output_dir=str(tmp_path / "templates"),
+        dpi=300,
+        legend_rect_px=(0, 0, 1700, 950),
+        mask_mode="color",
+        legend_engine="raster",
+    )
+
+    assert len(symbols) == 4
+    assert [symbol.name for symbol in symbols] == ["sym_01", "sym_02", "sym_03", "sym_04"]
+    assert len(list((tmp_path / "templates").glob("*.png"))) == 4
 
 
 def test_gray_legend_extraction_matches_e8_fixture_geometry(tmp_path):

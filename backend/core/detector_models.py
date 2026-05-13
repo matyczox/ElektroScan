@@ -31,6 +31,7 @@ class Detection:
     content_bbox: tuple[int, int, int, int] | None = None
     content_source: str = ""
     roi_strategy: str = ""
+    visual_bbox: tuple[int, int, int, int] | None = None
 
 
 @dataclass(slots=True)

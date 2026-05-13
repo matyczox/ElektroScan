@@ -314,18 +314,36 @@ def _prefilter_raw_template_hits(candidates: list[CandidateHit]) -> list[Candida
     for candidate in candidates:
         grouped.setdefault(candidate.template_id, []).append(candidate)
 
+    grid_cell_px = 48
     filtered: list[CandidateHit] = []
     for template_hits in grouped.values():
         kept: list[CandidateHit] = []
+        kept_grid: dict[tuple[int, int], list[CandidateHit]] = {}
         for candidate in sorted(template_hits, key=lambda hit: hit.match_score, reverse=True):
-            overlapping_existing = next(
-                (
-                    existing
-                    for existing in kept
-                    if _raw_candidates_overlap_strongly(candidate, existing)
-                ),
-                None,
-            )
+            _x, _y, w, h = candidate.bbox
+            cx, cy = _box_center(candidate.bbox)
+            cell_x = int(cx // grid_cell_px)
+            cell_y = int(cy // grid_cell_px)
+            radius_px = max(1.0, float(np.hypot(w, h)))
+            cell_radius = int(np.ceil(radius_px / grid_cell_px)) + 1
+            overlapping_existing = None
+            for dx in range(-cell_radius, cell_radius + 1):
+                if overlapping_existing is not None:
+                    break
+                for dy in range(-cell_radius, cell_radius + 1):
+                    bucket = kept_grid.get((cell_x + dx, cell_y + dy))
+                    if not bucket:
+                        continue
+                    overlapping_existing = next(
+                        (
+                            existing
+                            for existing in bucket
+                            if _raw_candidates_overlap_strongly(candidate, existing)
+                        ),
+                        None,
+                    )
+                    if overlapping_existing is not None:
+                        break
             if overlapping_existing is not None and not _should_keep_gray_scale_alternative(
                 candidate,
                 overlapping_existing,
@@ -333,6 +351,7 @@ def _prefilter_raw_template_hits(candidates: list[CandidateHit]) -> list[Candida
             ):
                 continue
             kept.append(candidate)
+            kept_grid.setdefault((cell_x, cell_y), []).append(candidate)
         filtered.extend(kept)
 
     filtered.sort(key=lambda hit: (hit.bbox[1], hit.bbox[0], -hit.match_score))
@@ -1027,6 +1046,15 @@ def _maybe_prefer_stronger_same_place_color_label(
         if base_is_fuller_parent_label and not hit_is_parent_label:
             continue
 
+        if hit.is_text_label and base_winner.is_text_label:
+            hit_is_smaller_fragment = hit_area < base_area * 0.92
+            hit_loses_text_payload = hit.content_score + 0.12 < base_winner.content_score
+            hit_loses_local_context = (
+                hit.context_purity + 0.10 < base_winner.context_purity
+            )
+            if hit_is_smaller_fragment and hit_loses_text_payload and hit_loses_local_context:
+                continue
+
         if hit.match_score < 0.62 or hit.verification_score < 0.56:
             continue
         if hit.coverage < 0.62 or hit.purity < 0.58 or hit.context_purity < 0.18:
@@ -1118,7 +1146,7 @@ def _maybe_prefer_direct_color_family_parent(
             and base_winner.context_purity >= 0.36
         )
         if base_is_strong_compact and (
-            hit.verification_score + 0.08 < base_winner.verification_score
+            hit.verification_score + 0.12 < base_winner.verification_score
             or hit.coverage < 0.62
             or hit.purity < 0.72
         ):
@@ -1595,6 +1623,12 @@ def _select_cluster_winner(
     base_winner = _maybe_prefer_fuller_gray_symbol(group_hits, base_winner)
     base_winner = _maybe_prefer_stronger_same_template_color_variant(group_hits, base_winner)
     base_winner = _maybe_prefer_stronger_same_place_color_label(group_hits, base_winner)
+    if prefer_direct_color_family_parent:
+        base_winner = _maybe_prefer_direct_color_family_parent(
+            group_hits,
+            base_winner,
+            parent_ids_by_child,
+        )
     override_candidates: list[CandidateHit] = []
 
     for hit in group_hits:

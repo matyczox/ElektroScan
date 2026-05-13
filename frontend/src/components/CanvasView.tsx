@@ -9,6 +9,7 @@ interface Box {
   y: number;
   width: number;
   height: number;
+  visualBBox?: [number, number, number, number] | null;
   color: string;
   confidence: number;
   verificationScore?: number;
@@ -164,6 +165,14 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
   const [isZooming, setIsZooming] = useState(false);
   const zoomTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const boxRect = (box: Box) => {
+    const visual = box.visualBBox;
+    if (visual && visual.length === 4 && visual[2] > 0 && visual[3] > 0) {
+      return { x: visual[0], y: visual[1], width: visual[2], height: visual[3] };
+    }
+    return { x: box.x, y: box.y, width: box.width, height: box.height };
+  };
+
   useEffect(() => {
     scaleRef.current = scale;
   }, [scale]);
@@ -245,8 +254,9 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
     if (!box) return;
 
     const container = containerRef.current;
-    const centerX = container.clientWidth / 2 - (box.x + box.width / 2) * scale;
-    const centerY = container.clientHeight / 2 - (box.y + box.height / 2) * scale;
+    const rect = boxRect(box);
+    const centerX = container.clientWidth / 2 - (rect.x + rect.width / 2) * scale;
+    const centerY = container.clientHeight / 2 - (rect.y + rect.height / 2) * scale;
 
     setPosition({ x: centerX, y: centerY });
 
@@ -368,12 +378,17 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
 
   const overlapGroupsByBoxId = useMemo(() => {
     const groups = new Map<string, Box[]>();
-    const boxArea = (box: Box) => Math.max(1, box.width * box.height);
+    const boxArea = (box: Box) => {
+      const rect = boxRect(box);
+      return Math.max(1, rect.width * rect.height);
+    };
     const highOverlap = (left: Box, right: Box) => {
-      const x1 = Math.max(left.x, right.x);
-      const y1 = Math.max(left.y, right.y);
-      const x2 = Math.min(left.x + left.width, right.x + right.width);
-      const y2 = Math.min(left.y + left.height, right.y + right.height);
+      const leftRect = boxRect(left);
+      const rightRect = boxRect(right);
+      const x1 = Math.max(leftRect.x, rightRect.x);
+      const y1 = Math.max(leftRect.y, rightRect.y);
+      const x2 = Math.min(leftRect.x + leftRect.width, rightRect.x + rightRect.width);
+      const y2 = Math.min(leftRect.y + leftRect.height, rightRect.y + rightRect.height);
       const inter = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
       if (inter <= 0) return false;
 
@@ -382,18 +397,18 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
       const iou = inter / Math.max(1, leftArea + rightArea - inter);
       const iom = inter / Math.max(1, Math.min(leftArea, rightArea));
       const centerDistance = Math.hypot(
-        (left.x + left.width / 2) - (right.x + right.width / 2),
-        (left.y + left.height / 2) - (right.y + right.height / 2),
+        (leftRect.x + leftRect.width / 2) - (rightRect.x + rightRect.width / 2),
+        (leftRect.y + leftRect.height / 2) - (rightRect.y + rightRect.height / 2),
       );
       const referenceDiagonal = Math.max(
         1,
-        Math.hypot(Math.min(left.width, right.width), Math.min(left.height, right.height)),
+        Math.hypot(Math.min(leftRect.width, rightRect.width), Math.min(leftRect.height, rightRect.height)),
       );
       const almostSameBbox =
-        Math.abs(left.x - right.x) <= 4 &&
-        Math.abs(left.y - right.y) <= 4 &&
-        Math.abs(left.width - right.width) <= 5 &&
-        Math.abs(left.height - right.height) <= 5;
+        Math.abs(leftRect.x - rightRect.x) <= 4 &&
+        Math.abs(leftRect.y - rightRect.y) <= 4 &&
+        Math.abs(leftRect.width - rightRect.width) <= 5 &&
+        Math.abs(leftRect.height - rightRect.height) <= 5;
 
       return almostSameBbox || iou >= 0.82 || (iom >= 0.92 && centerDistance / referenceDiagonal <= 0.18);
     };
@@ -428,14 +443,19 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
   const BOX_LOW_COLOR = '#f59e0b';
   const focusedBox = focusedBoxId ? boxes.find(box => box.id === focusedBoxId) : null;
   const drawableBoxes = [...boxes].sort((left, right) => {
-    const rightArea = right.width * right.height;
-    const leftArea = left.width * left.height;
+    const rightRect = boxRect(right);
+    const leftRect = boxRect(left);
+    const rightArea = rightRect.width * rightRect.height;
+    const leftArea = leftRect.width * leftRect.height;
     if (rightArea !== leftArea) return rightArea - leftArea;
     return (left.confidence ?? 0) - (right.confidence ?? 0);
   });
 
   const formatOverlapGroup = (group?: Box[]) =>
-    group?.length ? group.map(item => `${item.symbolName}@${item.x},${item.y},${item.width},${item.height}`).join(' + ') : '';
+    group?.length ? group.map(item => {
+      const rect = boxRect(item);
+      return `${item.symbolName}@${rect.x},${rect.y},${rect.width},${rect.height}`;
+    }).join(' + ') : '';
 
   const formatDebugValue = (value?: number, digits = 3) =>
     typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : 'n/a';
@@ -491,15 +511,18 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
 
   const buildDebugPayload = (box: Box) => {
     const overlapGroup = overlapGroupsByBoxId.get(box.id);
+    const rect = boxRect(box);
     const nearbyBoxes = boxes
       .filter(candidate => {
-        const centerDx = Math.abs((candidate.x + candidate.width / 2) - (box.x + box.width / 2));
-        const centerDy = Math.abs((candidate.y + candidate.height / 2) - (box.y + box.height / 2));
+        const candidateRect = boxRect(candidate);
+        const centerDx = Math.abs((candidateRect.x + candidateRect.width / 2) - (rect.x + rect.width / 2));
+        const centerDy = Math.abs((candidateRect.y + candidateRect.height / 2) - (rect.y + rect.height / 2));
         return centerDx <= 80 && centerDy <= 80;
       })
-      .map(candidate =>
-        `${candidate.symbolName}@${candidate.x},${candidate.y},${candidate.width},${candidate.height}#${candidate.analysisId ?? analysisContext?.analysisId ?? 'n/a'}`
-      );
+      .map(candidate => {
+        const candidateRect = boxRect(candidate);
+        return `${candidate.symbolName}@${candidateRect.x},${candidateRect.y},${candidateRect.width},${candidateRect.height}#${candidate.analysisId ?? analysisContext?.analysisId ?? 'n/a'}`;
+      });
     const hiddenLayers = box.hiddenLayersUsed?.length
       ? box.hiddenLayersUsed.join(" | ")
       : analysisContext?.hiddenLayersUsed?.length
@@ -520,7 +543,9 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
       : "(none)";
     const lines = [
       `symbol=${box.symbolName}`,
-      `bbox=${box.x},${box.y},${box.width},${box.height}`,
+      `bbox=${rect.x},${rect.y},${rect.width},${rect.height}`,
+      `raw_bbox=${box.x},${box.y},${box.width},${box.height}`,
+      `visual_bbox=${box.visualBBox ? box.visualBBox.join(',') : '(same)'}`,
       `match=${formatDebugValue(box.confidence)}`,
       `verification=${formatDebugValue(box.verificationScore)}`,
       `coverage=${formatDebugValue(box.coverage)}`,
@@ -934,6 +959,7 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
 
           {/* Detection Boxes */}
           {drawableBoxes.map(box => {
+            const rect = boxRect(box);
             const isFocused = focusedBoxId === box.id || pulsingId === box.id;
             const isPulsing = pulsingId === box.id;
             const displayConfidence = box.verificationScore ?? box.confidence;
@@ -953,10 +979,10 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
                 title={`Weryfikacja: ${(displayConfidence * 100).toFixed(0)}%\nMatch template: ${(box.confidence * 100).toFixed(0)}%\nWzorzec: ${box.symbolName}${overlapSummary ? `\nNakladki: ${overlapSummary}` : ''}\nKlik kopiuje debug`}
                 style={{
                   position: 'absolute',
-                  left: box.x,
-                  top: box.y,
-                  width: box.width,
-                  height: box.height,
+                  left: rect.x,
+                  top: rect.y,
+                  width: rect.width,
+                  height: rect.height,
                   border: `${isFocused ? 3 : 2}px solid ${color}`,
                   backgroundColor: isFocused ? color + '25' : 'transparent',
                   boxShadow: isFocused ? `0 0 14px ${color}99` : 'none',
@@ -1009,7 +1035,7 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
                 {copiedBoxId === box.id && (
                   <div style={{
                     position: 'absolute',
-                    top: box.height + 4,
+                    top: rect.height + 4,
                     left: 0,
                     background: 'rgba(15, 23, 42, 0.92)',
                     color: '#fff',

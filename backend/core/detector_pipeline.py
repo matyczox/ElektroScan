@@ -11,6 +11,7 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 import os
+import re
 
 import cv2
 import numpy as np
@@ -64,7 +65,11 @@ from core.detector_pdf import (
 )
 from core.detector_parent_search import search_parent_candidates
 from core.detector_scanning import scan_template_candidates
-from core.detector_templates import _build_socket_07_promotions, _prepare_variants
+from core.detector_templates import (
+    _build_socket_07_promotions,
+    _prepare_variants,
+    _template_numeric_prefix,
+)
 from core.detector_validation import validate_template_candidates
 
 
@@ -256,11 +261,9 @@ def _detect_symbols_pipeline(
             ix2 = min(tx + tw, px + pw)
             iy2 = min(ty + th, py + ph)
             inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
-            if inter <= 0:
-                return False
             template_area = max(1, tw * th)
             pdf_area = max(1, pw * ph)
-            iom = inter / min(template_area, pdf_area)
+            iom = inter / min(template_area, pdf_area) if inter > 0 else 0.0
             tcx = tx + tw / 2.0
             tcy = ty + th / 2.0
             pcx = px + pw / 2.0
@@ -271,11 +274,61 @@ def _detect_symbols_pipeline(
             pdf_center_inside_hit = tx <= pcx <= tx + tw and ty <= pcy <= ty + th
             if template_hit.is_text_label and pdf_hit.is_text_label:
                 return (
-                    hit_center_inside_pdf
+                    inter > 0
+                    and (
+                        hit_center_inside_pdf
                     or (pdf_center_inside_hit and iom >= 0.45)
                     or (iom >= 0.55 and center_distance / ref_distance <= 0.45)
+                    )
                 )
+            if _has_text_class_token(template_hit.template_id) and not template_hit.is_text_label:
+                x_gap = max(tx, px) - min(tx + tw, px + pw)
+                y_gap = max(ty, py) - min(ty + th, py + ph)
+                x_gap = max(0.0, float(x_gap))
+                y_gap = max(0.0, float(y_gap))
+                x_overlap = max(0, min(tx + tw, px + pw) - max(tx, px)) / max(1.0, min(tw, pw))
+                y_overlap = max(0, min(ty + th, py + ph) - max(ty, py)) / max(1.0, min(th, ph))
+                near_side_label = (
+                    x_gap <= max(18.0, float(tw) * 0.16)
+                    and y_gap <= max(8.0, float(th) * 0.16)
+                    and (y_overlap >= 0.25 or abs(tcy - pcy) <= max(18.0, float(th) * 0.38))
+                )
+                near_top_bottom_label = (
+                    y_gap <= max(18.0, float(th) * 0.16)
+                    and x_gap <= max(8.0, float(tw) * 0.12)
+                    and (x_overlap >= 0.25 or abs(tcx - pcx) <= max(18.0, float(tw) * 0.38))
+                )
+                return (
+                    (inter > 0 and iom >= 0.20)
+                    or center_distance / ref_distance <= 0.95
+                    or near_side_label
+                    or near_top_bottom_label
+                )
+            if inter <= 0:
+                return False
             return iom >= 0.35 or center_distance / ref_distance <= 0.70
+
+        def _template_tokens(template_id: int) -> tuple[str, ...]:
+            if not (0 <= template_id < len(templates)):
+                return ()
+            return tuple(str(token).upper() for token in templates[template_id].text_tokens)
+
+        def _numbered_token_families(template_id: int) -> set[str]:
+            families: set[str] = set()
+            for token in _template_tokens(template_id):
+                match = re.fullmatch(r"([A-Z]+)\d+", token)
+                if match:
+                    families.add(match.group(1))
+            return families
+
+        def _is_same_numbered_text_family(left_id: int, right_id: int) -> bool:
+            left_families = _numbered_token_families(left_id)
+            if not left_families:
+                return False
+            return bool(left_families & _numbered_token_families(right_id))
+
+        def _has_text_class_token(template_id: int) -> bool:
+            return bool(_template_tokens(template_id))
 
         hinted = 0
         for hit in template_hits:
@@ -295,9 +348,15 @@ def _detect_symbols_pipeline(
                 pdf_hit.template_id == hit.template_id for pdf_hit in overlapping_pdf_hits
             )
             if has_same_template_hint:
-                hit.context_purity = round(min(1.0, float(hit.context_purity) + 0.08), 4)
+                visual_text_class_hint = _has_text_class_token(hit.template_id) and not hit.is_text_label
+                context_boost = 0.18 if visual_text_class_hint else 0.08
+                verification_boost = 0.24 if visual_text_class_hint else 0.12
+                hit.context_purity = round(
+                    min(1.0, float(hit.context_purity) + context_boost),
+                    4,
+                )
                 hit.verification_score = round(
-                    min(1.0, float(hit.verification_score) + 0.12),
+                    min(1.0, float(hit.verification_score) + verification_boost),
                     4,
                 )
                 if hit.is_text_label:
@@ -309,13 +368,23 @@ def _detect_symbols_pipeline(
                 continue
 
             has_conflicting_text_hint = any(
-                pdf_hit.template_id != hit.template_id and pdf_hit.is_text_label and hit.is_text_label
+                pdf_hit.template_id != hit.template_id
+                and (
+                    (pdf_hit.is_text_label and hit.is_text_label)
+                    or _is_same_numbered_text_family(hit.template_id, pdf_hit.template_id)
+                )
                 for pdf_hit in overlapping_pdf_hits
             )
             if has_conflicting_text_hint:
-                hit.context_purity = round(max(0.0, float(hit.context_purity) - 0.04), 4)
+                visual_text_class_hint = _has_text_class_token(hit.template_id) and not hit.is_text_label
+                context_penalty = 0.16 if visual_text_class_hint else 0.04
+                verification_penalty = 0.28 if visual_text_class_hint else 0.10
+                hit.context_purity = round(
+                    max(0.0, float(hit.context_purity) - context_penalty),
+                    4,
+                )
                 hit.verification_score = round(
-                    max(0.0, float(hit.verification_score) - 0.10),
+                    max(0.0, float(hit.verification_score) - verification_penalty),
                     4,
                 )
                 hit.content_score = round(max(0.0, float(hit.content_score) - 0.18), 4)
@@ -549,6 +618,23 @@ def _detect_symbols_pipeline(
             parent_ids_by_child.setdefault(rule.child_template_id, set()).add(
                 rule.parent_template_id
             )
+    if detector_profile == "color":
+        template_ids_by_prefix: dict[str, list[int]] = {}
+        for template_id, template in enumerate(templates):
+            prefix = _template_numeric_prefix(template.name)
+            if prefix is None:
+                continue
+            template_ids_by_prefix.setdefault(prefix, []).append(template_id)
+        for child_prefix, parent_prefixes in {
+            "06": ("07",),
+            "09": ("07",),
+            "11": ("10", "12"),
+        }.items():
+            for child_id in template_ids_by_prefix.get(child_prefix, []):
+                for parent_prefix in parent_prefixes:
+                    parent_ids_by_child.setdefault(child_id, set()).update(
+                        template_ids_by_prefix.get(parent_prefix, [])
+                    )
     plan_masks_by_template: dict[int, np.ndarray] = {}
     template_by_mask_key: dict[str, TemplateInfo] = {}
     if detector_profile == "color":
@@ -1271,6 +1357,38 @@ def _detect_symbols_pipeline(
             f"clustering:{timings_ms['clustering']:.0f}"
         )
 
+    def _color_visual_bbox(hit: CandidateHit) -> tuple[int, int, int, int] | None:
+        if detector_profile != "color" or hit.source == "pdf_text" or hit.dominant_hsv is None:
+            return None
+        plan_mask = plan_masks_by_template.get(hit.template_id)
+        if plan_mask is None:
+            return None
+        x, y, w, h = [int(value) for value in hit.bbox]
+        image_h, image_w = plan_mask.shape[:2]
+        x0 = max(0, min(image_w, x))
+        y0 = max(0, min(image_h, y))
+        x1 = max(0, min(image_w, x + w))
+        y1 = max(0, min(image_h, y + h))
+        if x1 <= x0 or y1 <= y0:
+            return None
+        roi = plan_mask[y0:y1, x0:x1]
+        ys, xs = np.where(roi > 0)
+        if len(xs) < 4:
+            return None
+        pad = 3
+        vx0 = max(x0, x0 + int(xs.min()) - pad)
+        vy0 = max(y0, y0 + int(ys.min()) - pad)
+        vx1 = min(x1, x0 + int(xs.max()) + 1 + pad)
+        vy1 = min(y1, y0 + int(ys.max()) + 1 + pad)
+        visual_w = vx1 - vx0
+        visual_h = vy1 - vy0
+        if visual_w <= 0 or visual_h <= 0:
+            return None
+        # Avoid replacing a normal symbol box with a single antialiased speck.
+        if visual_w * visual_h < max(16, int(0.03 * w * h)):
+            return None
+        return (vx0, vy0, visual_w, visual_h)
+
     per_template: dict[int, list[Detection]] = {}
     _progress("format_results", 99, "Formatowanie wynikow")
     for hit in final_hits:
@@ -1305,6 +1423,7 @@ def _detect_symbols_pipeline(
             ),
             content_source=hit.source if hit.is_text_label else "",
             roi_strategy=hit.roi_strategy,
+            visual_bbox=_color_visual_bbox(hit),
         )
         per_template.setdefault(hit.template_id, []).append(detection)
 

@@ -14,6 +14,8 @@ import numpy as np
 
 from core import detector_gray as gray_strategy
 from core.detector_config import (
+    COLOR_MAX_PEAKS_PER_VARIANT,
+    COLOR_MAX_TEXT_CONTENT_PEAKS_PER_VARIANT,
     COLOR_NEAR_THRESHOLD_RECOVERY_DELTA,
     COLOR_NEAR_THRESHOLD_RECOVERY_ENABLED,
     COLOR_NEAR_THRESHOLD_RECOVERY_MAX_ASPECT,
@@ -288,8 +290,8 @@ def _select_spatially_fair_peaks(
     selected: list[tuple[int, int, float]] = []
     selected_keys: set[tuple[int, int]] = set()
     for peak in peaks:
-        px, py, _score = peak
-        if all(abs(px - sx) >= min_dx or abs(py - sy) >= min_dy for sx, sy, _ in selected):
+        px, py = peak[0], peak[1]
+        if all(abs(px - sx) >= min_dx or abs(py - sy) >= min_dy for sx, sy, *_ in selected):
             selected.append(peak)
             selected_keys.add((px, py))
             if len(selected) >= limit:
@@ -306,6 +308,26 @@ def _select_spatially_fair_peaks(
 
     selected.sort(key=lambda item: item[2], reverse=True)
     return selected
+
+
+def _cap_color_variant_peaks(
+    peaks: list[tuple[int, int, float]],
+    *,
+    detector_profile: str,
+    limit: int,
+    template_width: int,
+    template_height: int,
+) -> list[tuple[int, int, float]]:
+    """Limit color raw peaks before creating heavy CandidateHit objects."""
+
+    if detector_profile != "color" or limit <= 0 or len(peaks) <= limit:
+        return peaks
+    return _select_spatially_fair_peaks(
+        peaks,
+        limit=limit,
+        template_width=template_width,
+        template_height=template_height,
+    )
 
 
 def scan_template_candidates(
@@ -667,6 +689,14 @@ def scan_template_candidates(
                 too_many_peaks = True
                 break
 
+        variant_peaks = _cap_color_variant_peaks(
+            variant_peaks,
+            detector_profile=detector_profile,
+            limit=int(COLOR_MAX_PEAKS_PER_VARIANT),
+            template_width=variant.width,
+            template_height=variant.height,
+        )
+
         if too_many_peaks:
             variant_peaks.sort(key=lambda item: item[2], reverse=True)
             variant_peaks = variant_peaks[:MAX_PEAKS_PER_VARIANT]
@@ -751,6 +781,14 @@ def scan_template_candidates(
             if len(content_peaks) > MAX_TEXT_CONTENT_PEAKS_PER_VARIANT:
                 too_many_content_peaks = True
                 break
+
+        content_peaks = _cap_color_variant_peaks(
+            content_peaks,
+            detector_profile=detector_profile,
+            limit=int(COLOR_MAX_TEXT_CONTENT_PEAKS_PER_VARIANT),
+            template_width=content_w,
+            template_height=content_h,
+        )
 
         if too_many_content_peaks:
             content_peaks.sort(key=lambda item: item[2], reverse=True)

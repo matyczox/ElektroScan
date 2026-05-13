@@ -26,6 +26,7 @@ from core.detector_masks import (
     _color_mask_for_template,
     _context_purity,
     _ink_mask,
+    _mask_bbox,
     _roi_mask,
     _suppress_long_strokes,
     _validate_template_hit,
@@ -68,6 +69,10 @@ def _mask_data_url(mask: np.ndarray) -> str:
     else:
         image = mask
     return _image_data_url(image)
+
+
+def _empty_mask_like(mask: np.ndarray) -> np.ndarray:
+    return np.zeros(mask.shape[:2], dtype=np.uint8)
 
 
 def _hit_overlap_metrics(
@@ -312,6 +317,30 @@ def inspect_roi(
     roi_image = plan_image[y : y + h, x : x + w]
     roi_raw_mask = _crop(gray_raw_mask, clamped)
     roi_scan_mask = _crop(gray_scan_mask, clamped)
+    roi_color_scan_mask = _empty_mask_like(roi_raw_mask)
+    roi_color_scan_template = None
+    if detector_profile == "color" and candidates:
+        top_template_id = int(candidates[0].get("templateId", -1))
+        if 0 <= top_template_id < len(templates):
+            top_template = templates[top_template_id]
+            _validation_mask, top_scan_mask, top_scan_kind = _scan_mask_for_template(
+                detector_profile=detector_profile,
+                plan_image=plan_image,
+                plan_hsv=plan_hsv,
+                template=top_template,
+                template_id=top_template_id,
+                gray_raw_mask=gray_raw_mask,
+                gray_scan_masks=gray_scan_masks,
+            )
+            roi_scan_mask = _crop(top_scan_mask, clamped)
+            roi_color_scan_mask = roi_scan_mask
+            roi_color_scan_template = {
+                "templateId": top_template_id,
+                "symbolName": top_template.name,
+                "scanMask": top_scan_kind,
+                "dominantHsv": top_template.dominant_hsv,
+                "maskBBox": _mask_bbox(roi_color_scan_mask),
+            }
     roi_dark_raw_mask = (
         _crop(gray_scan_masks.zone_mask, clamped) if gray_scan_masks is not None else roi_raw_mask
     )
@@ -331,6 +360,8 @@ def inspect_roi(
         "rejectedByReason": rejected_by_reason,
         "roiInkPixels": int(cv2.countNonZero(roi_raw_mask)),
         "roiScanPixels": int(cv2.countNonZero(roi_scan_mask)),
+        "roiColorScanPixels": int(cv2.countNonZero(roi_color_scan_mask)),
+        "roiColorScanTemplate": roi_color_scan_template,
         "roiDarkInkPixels": int(cv2.countNonZero(roi_dark_raw_mask)),
         "roiDarkScanPixels": int(cv2.countNonZero(roi_dark_scan_mask)),
         "grayDarkInkThreshold": int(
@@ -347,6 +378,7 @@ def inspect_roi(
         "roiImage": _image_data_url(roi_image),
         "roiRawMask": _mask_data_url(roi_raw_mask),
         "roiScanMask": _mask_data_url(roi_scan_mask),
+        "roiColorScanMask": _mask_data_url(roi_color_scan_mask),
         "roiDarkRawMask": _mask_data_url(roi_dark_raw_mask),
         "roiDarkScanMask": _mask_data_url(roi_dark_scan_mask),
         "candidates": candidates[:top_n],

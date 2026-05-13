@@ -11,6 +11,7 @@ from core.detector_clustering import (
     _box_center,
     _center_inside_box,
     _candidate_rank_key,
+    _select_cluster_winner,
 )
 from core.detector_models import CandidateHit
 
@@ -163,3 +164,100 @@ class TestCandidateRankKey:
         hit = _make_hit(is_text_label=False, verification_score=0.8, content_score=0.99)
         key = _candidate_rank_key(hit)
         assert key[0] == pytest.approx(0.8), "first key element must be verification_score for non-labels"
+
+
+class TestColorFamilyParentSelection:
+    def test_prefers_switch_10_parent_over_local_11_core(self):
+        child_11 = _make_hit(
+            template_id=11,
+            bbox=(1360, 1530, 32, 37),
+            match_score=0.808,
+            verification_score=0.758,
+            coverage=0.921,
+            purity=0.842,
+            context_purity=0.420,
+            dominant_hsv=(60, 255, 221),
+        )
+        parent_10 = _make_hit(
+            template_id=10,
+            bbox=(1354, 1518, 39, 49),
+            match_score=0.751,
+            verification_score=0.708,
+            coverage=0.842,
+            purity=0.819,
+            context_purity=0.395,
+            dominant_hsv=(60, 255, 221),
+        )
+
+        winner = _select_cluster_winner(
+            [child_11, parent_10],
+            parent_ids_by_child={11: {10}},
+        )
+
+        assert winner is parent_10
+
+    def test_prefers_switch_12_parent_even_when_11_has_higher_raw_score(self):
+        child_11 = _make_hit(
+            template_id=11,
+            bbox=(2292, 1546, 37, 32),
+            match_score=0.864,
+            verification_score=0.821,
+            coverage=0.921,
+            purity=0.907,
+            context_purity=0.561,
+            dominant_hsv=(60, 255, 221),
+        )
+        parent_12 = _make_hit(
+            template_id=12,
+            bbox=(2292, 1547, 49, 32),
+            match_score=0.744,
+            verification_score=0.722,
+            coverage=0.861,
+            purity=0.827,
+            context_purity=0.456,
+            dominant_hsv=(60, 255, 221),
+        )
+
+        winner = _select_cluster_winner(
+            [child_11, parent_12],
+            parent_ids_by_child={11: {12}},
+        )
+
+        assert winner is parent_12
+
+
+class TestColorTextLabelSelection:
+    def test_keeps_fuller_text_label_when_tighter_sibling_loses_content_context(self):
+        full_int = _make_hit(
+            template_id=18,
+            bbox=(621, 1136, 66, 32),
+            match_score=0.526,
+            verification_score=0.695,
+            coverage=0.659,
+            purity=0.776,
+            context_purity=0.562,
+            content_score=0.750,
+            dominant_hsv=(60, 255, 221),
+            is_text_label=True,
+            mirrored=True,
+        )
+        tighter_tv = _make_hit(
+            template_id=19,
+            bbox=(623, 1138, 54, 28),
+            match_score=0.716,
+            verification_score=0.605,
+            coverage=0.786,
+            purity=0.869,
+            context_purity=0.374,
+            content_score=0.535,
+            dominant_hsv=(60, 255, 221),
+            is_text_label=True,
+            mirrored=True,
+        )
+
+        winner = _select_cluster_winner(
+            [full_int, tighter_tv],
+            parent_ids_by_child={},
+        )
+
+        assert winner is full_int

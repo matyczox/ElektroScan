@@ -11,12 +11,27 @@ import numpy as np
 from core.detector_config import (
     COLOR_HUE_REJECTION_THRESHOLD,
     COLOR_HUE_TOLERANCE,
+    COLOR_CONTENT_LABEL_MIN_CONTEXT,
+    COLOR_CONTENT_LABEL_MIN_COVERAGE,
+    COLOR_CONTENT_LABEL_MIN_MATCH,
+    COLOR_CONTENT_LABEL_MIN_PURITY,
+    COLOR_ELONGATED_STROKE_MAX_AREA,
+    COLOR_ELONGATED_STROKE_MIN_ASPECT,
+    COLOR_ELONGATED_STROKE_MIN_CONTEXT,
+    COLOR_ELONGATED_STROKE_MIN_MATCH,
+    COLOR_ELONGATED_STROKE_MIN_PURITY,
+    COLOR_MIN_HUE_SIMILARITY,
     COLOR_NEAR_THRESHOLD_RECOVERY_MIN_MATCH,
     COLOR_RECOVERY_MIN_COLOR_SIMILARITY,
     COLOR_RECOVERY_MIN_CONTEXT,
     COLOR_RECOVERY_MIN_COVERAGE,
     COLOR_RECOVERY_MIN_PURITY,
     COLOR_SAT_TOLERANCE,
+    COLOR_TEXT_LABEL_MIN_CONTEXT,
+    COLOR_TEXT_LABEL_MIN_COVERAGE,
+    COLOR_TEXT_LABEL_MIN_MATCH,
+    COLOR_TEXT_LABEL_MIN_PURITY,
+    COLOR_TEXT_LABEL_WEAK_MATCH_MIN_CONTEXT,
     COLOR_VAL_TOLERANCE,
     CONTEXT_MARGIN_RATIO,
     DILATE_KERNEL,
@@ -456,6 +471,45 @@ def _mask_bbox(mask: np.ndarray) -> tuple[int, int, int, int] | None:
     x1 = int(xs.max()) + 1
     y1 = int(ys.max()) + 1
     return (x0, y0, x1 - x0, y1 - y0)
+
+
+def _foreground_span_ratios(mask: np.ndarray) -> tuple[float, float]:
+    bbox = _mask_bbox(mask)
+    if bbox is None or mask.shape[0] <= 0 or mask.shape[1] <= 0:
+        return 0.0, 0.0
+    _x, _y, width, height = bbox
+    return width / max(1, mask.shape[1]), height / max(1, mask.shape[0])
+
+
+def _foreground_path_variance_ratio(mask: np.ndarray) -> float:
+    """Return normalized centerline variance for elongated foreground shapes."""
+
+    bbox = _mask_bbox(mask)
+    if bbox is None:
+        return 0.0
+
+    x, y, width, height = bbox
+    if width <= 0 or height <= 0:
+        return 0.0
+
+    crop = mask[y : y + height, x : x + width]
+    centers: list[float] = []
+    if width >= height:
+        for col in range(width):
+            ys = np.flatnonzero(crop[:, col] > 0)
+            if ys.size:
+                centers.append(float(np.mean(ys)))
+        normalizer = max(1, height)
+    else:
+        for row in range(height):
+            xs = np.flatnonzero(crop[row, :] > 0)
+            if xs.size:
+                centers.append(float(np.mean(xs)))
+        normalizer = max(1, width)
+
+    if len(centers) < 3:
+        return 0.0
+    return float(np.std(np.asarray(centers, dtype=np.float32))) / normalizer
 
 
 def _tight_mask_crop(mask: np.ndarray | None) -> np.ndarray | None:
@@ -1021,6 +1075,10 @@ def _validate_template_hit(
     hit.context_purity = round(context_purity, 4)
     hit_area = max(1, hit.bbox[2] * hit.bbox[3])
     hit_aspect = max(hit.bbox[2] / max(1, hit.bbox[3]), hit.bbox[3] / max(1, hit.bbox[2]))
+    span_x_ratio, span_y_ratio = _foreground_span_ratios(roi)
+    minor_span_ratio = span_y_ratio if hit.bbox[2] >= hit.bbox[3] else span_x_ratio
+    major_span_ratio = span_x_ratio if hit.bbox[2] >= hit.bbox[3] else span_y_ratio
+    path_variance_ratio = _foreground_path_variance_ratio(roi)
     interrupted_label_recovery_seed = (
         hit.dominant_hsv is None
         and hit.source == "template_interrupted_recovery"
@@ -1093,6 +1151,7 @@ def _validate_template_hit(
         return False
     color_full_label_source = (
         hit.source in {"template", "template_color_recovery"}
+        or hit.source == "roi_inspector"
         or hit.source.startswith("template_parent_search_")
         or hit.source.startswith("template_promoted_")
     )
@@ -1158,11 +1217,113 @@ def _validate_template_hit(
         return False
 
     if (
+        hit.dominant_hsv is not None
+        and hit.source != "pdf_text"
+        and early_color_similarity < COLOR_MIN_HUE_SIMILARITY
+    ):
+        _record("color_similarity")
+        return False
+
+    color_straight_stroke_fragment = (
+        hit.dominant_hsv is not None
+        and not hit.is_text_label
+        and hit.source
+        in {"template", "template_near_threshold", "template_color_recovery", "roi_inspector"}
+        and hit_area <= int(COLOR_ELONGATED_STROKE_MAX_AREA)
+        and hit_aspect >= float(COLOR_ELONGATED_STROKE_MIN_ASPECT)
+        and major_span_ratio >= 0.52
+        and minor_span_ratio <= 0.30
+        and hit.match_score < 0.72
+    )
+    if color_straight_stroke_fragment:
+        _record("color_straight_stroke_fragment")
+        return False
+
+    color_flat_elongated_fragment = (
+        hit.dominant_hsv is not None
+        and not hit.is_text_label
+        and hit.source
+        in {"template", "template_near_threshold", "template_color_recovery", "roi_inspector"}
+        and hit_area <= int(COLOR_ELONGATED_STROKE_MAX_AREA)
+        and hit_aspect >= float(COLOR_ELONGATED_STROKE_MIN_ASPECT)
+        and major_span_ratio >= 0.88
+        and minor_span_ratio <= 0.62
+        and path_variance_ratio <= 0.035
+        and hit.match_score < 0.70
+    )
+    if color_flat_elongated_fragment:
+        _record("color_flat_elongated_fragment")
+        return False
+
+    if hit.dominant_hsv is not None and hit.is_text_label and hit.source == "template_content":
+        if (
+            hit.match_score < COLOR_CONTENT_LABEL_MIN_MATCH
+            or coverage < COLOR_CONTENT_LABEL_MIN_COVERAGE
+            or purity < COLOR_CONTENT_LABEL_MIN_PURITY
+            or context_purity < COLOR_CONTENT_LABEL_MIN_CONTEXT
+        ):
+            _record("color_content_fragment")
+            return False
+
+    if (
+        hit.dominant_hsv is not None
+        and hit.is_text_label
+        and hit.source in {"template", "template_near_threshold"}
+    ):
+        if (
+            coverage < COLOR_TEXT_LABEL_MIN_COVERAGE
+            or purity < COLOR_TEXT_LABEL_MIN_PURITY
+            or context_purity < COLOR_TEXT_LABEL_MIN_CONTEXT
+        ):
+            _record("color_text_geometry")
+            return False
+        if (
+            hit.match_score < COLOR_TEXT_LABEL_MIN_MATCH
+            and context_purity < COLOR_TEXT_LABEL_WEAK_MATCH_MIN_CONTEXT
+        ):
+            _record("color_text_weak_match")
+            return False
+
+    color_wavy_low_match_geometry = (
+        hit.dominant_hsv is not None
+        and not hit.is_text_label
+        and hit.source == "roi_inspector"
+        and hit_area <= int(COLOR_ELONGATED_STROKE_MAX_AREA)
+        and hit_aspect >= float(COLOR_ELONGATED_STROKE_MIN_ASPECT)
+        and minor_span_ratio > 0.38
+        and hit.match_score >= 0.45
+        and coverage >= 0.80
+        and purity >= 0.52
+        and context_purity >= 0.16
+    )
+
+    color_elongated_stroke_fragment = (
+        hit.dominant_hsv is not None
+        and not hit.is_text_label
+        and hit.source in {"template", "template_near_threshold"}
+        and hit_area <= int(COLOR_ELONGATED_STROKE_MAX_AREA)
+        and hit_aspect >= float(COLOR_ELONGATED_STROKE_MIN_ASPECT)
+        and not color_wavy_low_match_geometry
+        and (
+            hit.match_score < float(COLOR_ELONGATED_STROKE_MIN_MATCH)
+            or purity < float(COLOR_ELONGATED_STROKE_MIN_PURITY)
+            or (
+                context_purity < float(COLOR_ELONGATED_STROKE_MIN_CONTEXT)
+                and hit.match_score < 0.68
+            )
+        )
+    )
+    if color_elongated_stroke_fragment:
+        _record("color_elongated_stroke_fragment")
+        return False
+
+    if (
         context_purity < NOISY_PARTIAL_CONTEXT_THRESHOLD
         and coverage < NOISY_PARTIAL_COVERAGE_THRESHOLD
         and purity < NOISY_PARTIAL_PURITY_THRESHOLD
         and not strong_color_partial_geometry
         and not color_recovery_geometry
+        and not color_wavy_low_match_geometry
     ):
         _record("noisy_partial")
         return False
@@ -1567,6 +1728,7 @@ def _validate_template_hit(
         and not strong_gray_geometry
         and not color_recovery_geometry
         and not color_full_label_geometry
+        and not color_wavy_low_match_geometry
     ):
         _record("low_match_strict")
         return False

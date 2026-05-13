@@ -69,6 +69,14 @@ interface PdfDiagnostics {
   recommendedProfile?: 'color' | 'gray';
 }
 
+interface LegendEngineStatus {
+  engineRequested?: 'auto' | 'raster' | 'vector_first';
+  engineUsed?: 'raster' | 'vector_first';
+  fallbackReason?: string | null;
+  pageKind?: string;
+  patternCount: number;
+}
+
 interface PreviewMeta {
   previewDpi?: number;
   analysisDpi?: number;
@@ -94,6 +102,21 @@ interface AnalysisSnapshot {
   boxes?: DetectionBox[];
 }
 
+interface ExtractLegendResponse {
+  patterns?: Pattern[];
+  legendExtractedCount?: number;
+  legendAddedIds?: string[];
+  legendZoneUsed?: [number, number, number, number];
+  pdfDiagnostics?: PdfDiagnostics;
+  legendEngineRequested?: LegendEngineStatus['engineRequested'];
+  legendEngineUsed?: LegendEngineStatus['engineUsed'];
+  legendFallbackReason?: string | null;
+  legendPageProfile?: {
+    page_kind?: string;
+    pageKind?: string;
+  } | null;
+}
+
 interface DetectionBox {
   id: string;
   symbolName: string;
@@ -101,6 +124,7 @@ interface DetectionBox {
   y: number;
   width: number;
   height: number;
+  visualBBox?: [number, number, number, number] | null;
   confidence: number;
   color: string;
   verificationScore?: number;
@@ -147,12 +171,21 @@ interface RoiInspection {
   rejectedByReason: Record<string, number>;
   roiInkPixels: number;
   roiScanPixels: number;
+  roiColorScanPixels?: number;
+  roiColorScanTemplate?: {
+    templateId: number;
+    symbolName: string;
+    scanMask: string;
+    dominantHsv?: [number, number, number] | null;
+    maskBBox?: [number, number, number, number] | null;
+  } | null;
   roiDarkInkPixels?: number;
   roiDarkScanPixels?: number;
   grayDarkInkThreshold?: number;
   roiImage?: string;
   roiRawMask?: string;
   roiScanMask?: string;
+  roiColorScanMask?: string;
   roiDarkRawMask?: string;
   roiDarkScanMask?: string;
   candidates: RoiCandidate[];
@@ -190,6 +223,53 @@ interface LegendCorrectionTarget {
   name: string;
 }
 
+const legendEngineLabel = (engine?: string) => {
+  if (engine === 'vector_first') return 'vector-first';
+  if (engine === 'raster') return 'raster';
+  return 'auto';
+};
+
+const legendFallbackLabel = (reason?: string | null) => {
+  if (!reason) return null;
+  if (reason === 'gray_mask_mode') return 'gray path';
+  if (reason === 'legend_image_dominant') return 'scan/image PDF';
+  if (reason === 'insufficient_vector_primitives') return 'za malo wektorow';
+  if (reason === 'insufficient_text_primitives') return 'za malo tekstu PDF';
+  if (reason === 'insufficient_row_anchors') return 'brak stabilnych wierszy';
+  if (reason === 'insufficient_vector_drafts') return 'za malo draftow';
+  if (reason === 'low_vector_draft_confidence') return 'niska pewnosc';
+  if (reason === 'profile_not_vector_ready') return 'profil niegotowy';
+  if (reason.startsWith('vector_exception')) return 'blad vector path';
+  return reason.replaceAll('_', ' ');
+};
+
+const isLegendReviewStatus = (value?: string): value is LegendReviewStatus =>
+  value === 'pending' || value === 'accepted' || value === 'fixed' || value === 'rejected';
+
+const mergeLegendReviewItems = (
+  nextPatterns: Pattern[],
+  previousItems: LegendReviewItem[],
+): LegendReviewItem[] => {
+  const previousById = new Map(previousItems.map(item => [item.id, item]));
+
+  return nextPatterns.map(pattern => {
+    const id = getPatternKey(pattern);
+    const previous = previousById.get(id);
+    const rawStatus = pattern.status;
+    const status: LegendReviewStatus = rawStatus === 'pending'
+      ? 'pending'
+      : previous?.status ?? (isLegendReviewStatus(rawStatus) ? rawStatus : 'pending');
+
+    return {
+      id,
+      name: pattern.name,
+      imgBase64: pattern.imgBase64,
+      status,
+      correctedBBoxPx: pattern.correctedBBoxPx ?? previous?.correctedBBoxPx,
+    };
+  });
+};
+
 function App() {
   const [file, setFile] = useState<File | null>(null);
   const [pdfPreview, setPdfPreview] = useState<string | null>(null);
@@ -210,6 +290,7 @@ function App() {
   const [layers, setLayers] = useState<{name: string, visible: boolean}[]>([]);
   const [analysisContext, setAnalysisContext] = useState<AnalysisContext | null>(null);
   const [detectorProfile, setDetectorProfile] = useState<DetectorProfile>('auto');
+  const [legendEngineStatus, setLegendEngineStatus] = useState<LegendEngineStatus | null>(null);
   const [pdfDiagnostics, setPdfDiagnostics] = useState<PdfDiagnostics | null>(null);
   const [analysisProgress, setAnalysisProgress] = useState<AnalysisProgress | null>(null);
   const [roiInspection, setRoiInspection] = useState<RoiInspection | null>(null);
@@ -262,6 +343,7 @@ function App() {
     setFocusedBoxId(null);
     setAnalysisContext(null);
     setPdfDiagnostics(null);
+    setLegendEngineStatus(null);
     setAnalysisProgress(null);
     setRoiInspection(null);
     setGrayDebugZones(null);
@@ -757,6 +839,7 @@ function App() {
           })),
           hidden_layers: layers.filter(l => !l.visible).map(l => l.name),
           detector_profile: detectorProfile,
+          legend_engine: 'auto',
           legend_zone: legendZone ? {
             page: 0,
             x: Math.round(legendZone.x),
@@ -767,30 +850,28 @@ function App() {
         })
       });
       if (!response.ok) throw new Error('Błąd serwera');
-      const data = await response.json() as { patterns?: Pattern[]; legendZoneUsed?: [number, number, number, number]; pdfDiagnostics?: PdfDiagnostics };
+      const data = await response.json() as ExtractLegendResponse;
       const nextPatterns = data.patterns || [];
-      if (nextPatterns.length === 0) {
+      setLegendEngineStatus({
+        engineRequested: data.legendEngineRequested,
+        engineUsed: data.legendEngineUsed,
+        fallbackReason: data.legendFallbackReason ?? null,
+        pageKind: data.legendPageProfile?.page_kind ?? data.legendPageProfile?.pageKind,
+        patternCount: nextPatterns.length,
+      });
+      const extractedCount = data.legendExtractedCount ?? nextPatterns.length;
+      if (extractedCount === 0) {
         setLegendCorrectionTarget(null);
-        setPatterns([]);
-        setLegendReviewItems([]);
-        setIsLegendReviewOpen(false);
+        if (nextPatterns.length > 0) {
+          setPatterns(nextPatterns);
+          setLegendReviewItems(prev => mergeLegendReviewItems(nextPatterns, prev));
+        }
         setPdfDiagnostics(data.pdfDiagnostics || pdfDiagnostics);
-        alert('Nie znaleziono poprawnych wzorców w zaznaczonej legendzie. Zaznacz wyłącznie tabelę legendy z lewą kolumną symboli i spróbuj ponownie.');
+        alert('Nie znaleziono nowych poprawnych wzorców w zaznaczonej legendzie. Już zaakceptowane wzorce zostały zachowane.');
         return;
       }
       setPatterns(nextPatterns);
-      setLegendReviewItems(
-        nextPatterns.map(pattern => {
-          const id = getPatternKey(pattern);
-          return {
-            id,
-            name: pattern.name,
-            imgBase64: pattern.imgBase64,
-            status: (pattern.status as LegendReviewStatus | undefined) ?? 'pending',
-            correctedBBoxPx: pattern.correctedBBoxPx,
-          };
-        })
-      );
+      setLegendReviewItems(prev => mergeLegendReviewItems(nextPatterns, prev));
       setIsLegendReviewOpen(true);
       setLegendCorrectionTarget(null);
       setPdfDiagnostics(data.pdfDiagnostics || pdfDiagnostics);
@@ -1352,6 +1433,21 @@ function App() {
           <b>{activeProject.name}</b>
           <span>{workspaceFileName || 'brak wgranego PDF'}</span>
         </div>
+        {legendEngineStatus && (
+          <div
+            className={`legend-engine-notice ${
+              legendEngineStatus.engineUsed === 'vector_first' ? 'is-vector' : 'is-raster'
+            }`}
+            title={legendEngineStatus.fallbackReason || undefined}
+          >
+            <b>Legenda: {legendEngineLabel(legendEngineStatus.engineUsed)}</b>
+            {legendEngineStatus.fallbackReason && (
+              <span>{legendFallbackLabel(legendEngineStatus.fallbackReason)}</span>
+            )}
+            <span>{legendEngineStatus.patternCount} wzorcow</span>
+            {legendEngineStatus.pageKind && <span>{legendEngineStatus.pageKind}</span>}
+          </div>
+        )}
       </div>
 
       <div className="app-container">
@@ -1462,15 +1558,31 @@ function App() {
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 8, marginTop: 10 }}>
             {roiInspection.roiImage && <img src={roiInspection.roiImage} alt="roi" style={{ width: '100%', borderRadius: 6, background: '#fff' }} />}
-            {roiInspection.roiRawMask && <img src={roiInspection.roiRawMask} alt="raw mask" style={{ width: '100%', borderRadius: 6, background: '#fff' }} />}
-            {roiInspection.roiScanMask && <img src={roiInspection.roiScanMask} alt="scan mask" style={{ width: '100%', borderRadius: 6, background: '#fff' }} />}
-            {roiInspection.roiDarkScanMask && <img src={roiInspection.roiDarkScanMask} alt="dark scan mask" title="dark scan mask" style={{ width: '100%', borderRadius: 6, background: '#fff' }} />}
+            {roiInspection.roiRawMask && <img src={roiInspection.roiRawMask} alt="raw all-ink mask" title="raw all-ink mask" style={{ width: '100%', borderRadius: 6, background: '#fff' }} />}
+            {(roiInspection.roiColorScanMask || roiInspection.roiScanMask) && (
+              <img
+                src={roiInspection.roiColorScanMask || roiInspection.roiScanMask}
+                alt={roiInspection.profile === 'color' ? 'color scan mask' : 'scan mask'}
+                title={roiInspection.profile === 'color' ? 'color scan mask for top candidate' : 'scan mask'}
+                style={{ width: '100%', borderRadius: 6, background: '#fff' }}
+              />
+            )}
+            {roiInspection.profile === 'gray' && roiInspection.roiDarkScanMask && <img src={roiInspection.roiDarkScanMask} alt="dark scan mask" title="dark scan mask" style={{ width: '100%', borderRadius: 6, background: '#fff' }} />}
           </div>
 
           <div className="text-xs text-muted" style={{ marginTop: 8, lineHeight: 1.45 }}>
             <div>Skale: {roiInspection.usedScales.map(scale => scale.toFixed(2)).join(', ')}</div>
-            <div>Tusz ROI: raw {roiInspection.roiInkPixels}, scan {roiInspection.roiScanPixels}</div>
-            {roiInspection.roiDarkInkPixels !== undefined && (
+            <div>
+              {roiInspection.profile === 'color'
+                ? `Tusz ROI: all-ink ${roiInspection.roiInkPixels}, color-scan ${roiInspection.roiColorScanPixels ?? roiInspection.roiScanPixels}`
+                : `Tusz ROI: raw ${roiInspection.roiInkPixels}, scan ${roiInspection.roiScanPixels}`}
+            </div>
+            {roiInspection.profile === 'color' && roiInspection.roiColorScanTemplate && (
+              <div>
+                Color mask: {roiInspection.roiColorScanTemplate.symbolName} · {roiInspection.roiColorScanTemplate.scanMask}
+              </div>
+            )}
+            {roiInspection.profile === 'gray' && roiInspection.roiDarkInkPixels !== undefined && (
               <div>
                 Czarny tusz (&lt;{roiInspection.grayDarkInkThreshold ?? '?'}): raw {roiInspection.roiDarkInkPixels}, scan {roiInspection.roiDarkScanPixels ?? 0}
               </div>

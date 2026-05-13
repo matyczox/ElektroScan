@@ -343,7 +343,7 @@ def _maybe_promote_switch_parent_search(
 
                 if parent_prefix == "07":
                     max_drop = SOCKET_07_STRONG_MAX_VERIFICATION_DROP
-                    min_purity = 0.66 if color_parent_search else SWITCH_PROMOTED_MIN_PURITY
+                    min_purity = 0.64 if color_parent_search else SWITCH_PROMOTED_MIN_PURITY
                     min_context = 0.24 if color_parent_search else SWITCH_PROMOTED_MIN_CONTEXT_PURITY
                     min_verification = 0.54 if color_parent_search else SWITCH_PROMOTED_MIN_VERIFICATION
                 else:
@@ -407,7 +407,9 @@ def _maybe_promote_switch_parent_search(
                     continue
                 if abs(float(variant_scale) - float(hit.scale)) > 0.11:
                     continue
-                if int(variant_rotation) != int(hit.rotation):
+                rotation_delta = abs((int(variant_rotation) - int(hit.rotation)) % 360)
+                rotation_delta = min(rotation_delta, 360 - rotation_delta)
+                if rotation_delta not in {0, 180}:
                     continue
                 parent_area = max(1, parent_variant.width * parent_variant.height)
                 if parent_area < child_area * 1.30 or parent_area > child_area * 1.90:
@@ -472,7 +474,7 @@ def _maybe_promote_switch_parent_search(
                             continue
                         if (
                             promoted_hit.coverage < 0.60
-                            or promoted_hit.purity < 0.66
+                            or promoted_hit.purity < 0.64
                             or promoted_hit.context_purity < 0.24
                             or promoted_hit.verification_score < hit.verification_score - 0.12
                         ):

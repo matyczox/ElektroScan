@@ -55,7 +55,7 @@ from core.detector_templates import _prepare_variants
 from core.legend_extractor import (
     _clean_ocr_label_text,
     _normalize_layer_name,
-    extract_legend,
+    extract_legend_detailed,
     get_pdf_layers,
     pdf_to_png,
 )
@@ -447,6 +447,40 @@ def _clear_directory_contents(directory: Path) -> None:
             entry.unlink()
 
 
+def _next_template_index(templates_dir: Path) -> int:
+    max_index = 0
+    if templates_dir.exists():
+        for existing in templates_dir.glob("*.png"):
+            match = re.match(r"^(\d+)_", existing.stem)
+            if match:
+                max_index = max(max_index, int(match.group(1)))
+    return max_index + 1
+
+
+def _append_extracted_templates(extraction_dir: Path, templates_dir: Path) -> set[str]:
+    """Move freshly extracted templates into the project without deleting existing ones."""
+
+    templates_dir.mkdir(parents=True, exist_ok=True)
+    next_index = _next_template_index(templates_dir)
+    added_ids: set[str] = set()
+
+    for template_path in sorted(extraction_dir.glob("*.png")):
+        raw_stem = _safe_template_stem(template_path.stem)
+        label = re.sub(r"^\d+_+", "", raw_stem).strip("_") or raw_stem
+
+        while True:
+            dest_stem = f"{next_index:02d}_{label}"
+            dest_path = templates_dir / f"{dest_stem}.png"
+            next_index += 1
+            if not dest_path.exists():
+                break
+
+        shutil.move(str(template_path), dest_path)
+        added_ids.add(dest_stem)
+
+    return added_ids
+
+
 def _safe_template_stem(raw_name: str) -> str:
     """Return a safe template file stem while keeping human-readable labels."""
 
@@ -555,6 +589,11 @@ def _build_hidden_layer_debug(pdf_path: str, hidden_layers: list[str]) -> dict:
 def _normalize_detector_profile(profile: str | None) -> str:
     value = (profile or "auto").strip().lower()
     return value if value in {"auto", "color", "gray"} else "auto"
+
+
+def _normalize_legend_engine(engine: str | None) -> str:
+    value = (engine or "auto").strip().lower()
+    return value if value in {"auto", "raster", "vector_first"} else "auto"
 
 
 def _ink_profile_stats(plan_img: np.ndarray) -> dict:
@@ -1007,6 +1046,8 @@ class ExtractRequest(BaseModel):
     hidden_layers: Optional[List[str]] = []
     legend_zone: Optional[LegendZone] = None
     detector_profile: Optional[str] = "auto"
+    legend_engine: Optional[str] = "auto"
+    include_legend_debug: Optional[bool] = False
 
 
 class RenderRequest(BaseModel):
@@ -1105,6 +1146,8 @@ async def _extract_legend_response(
         _log("Renderowanie planu do ekstrakcji (300 DPI)")
         hidden_layers = body.hidden_layers if body else []
         requested_profile = _normalize_detector_profile(body.detector_profile if body else "auto")
+        requested_legend_engine = _normalize_legend_engine(body.legend_engine if body else "auto")
+        include_legend_debug = bool(body.include_legend_debug) if body else False
         plan_img, _cache_hit = _render_pdf_for_session(
             session_id,
             str(file_path),
@@ -1147,8 +1190,9 @@ async def _extract_legend_response(
 
         _log("Ekstrakcja legendy...")
         templates_dir.mkdir(parents=True, exist_ok=True)
+        added_template_ids: set[str] = set()
         with tempfile.TemporaryDirectory(dir=templates_dir.parent) as extraction_dir:
-            symbols, legend_rect_px = extract_legend(
+            legend_bundle = extract_legend_detailed(
                 str(file_path),
                 plan_img,
                 output_dir=extraction_dir,
@@ -1156,24 +1200,48 @@ async def _extract_legend_response(
                 exclude_rects=exclude_rects,
                 legend_rect_px=legend_rect_px,
                 mask_mode=mask_mode,
-                return_used_rect=True,
+                hidden_layers=hidden_layers,
+                legend_engine=requested_legend_engine,
+                include_debug_primitives=include_legend_debug,
             )
+            symbols = legend_bundle.extracted_symbols
+            legend_rect_px = legend_bundle.used_legend_rect_px_300
 
             if symbols:
-                _clear_directory_contents(templates_dir)
-                for template_path in sorted(Path(extraction_dir).glob("*.png")):
-                    shutil.move(str(template_path), templates_dir / template_path.name)
+                added_template_ids = _append_extracted_templates(
+                    Path(extraction_dir),
+                    templates_dir,
+                )
 
-        extracted_ids = {f"{s.index:02d}_{s.name}" for s in symbols}
+        legend_metadata = {
+            "legendEngineRequested": legend_bundle.engine_requested,
+            "legendEngineUsed": legend_bundle.engine_used,
+            "legendFallbackReason": legend_bundle.fallback_reason,
+            "legendPageProfile": legend_bundle.page_profile,
+            "sceneTransform": legend_bundle.scene_transform,
+        }
+        if include_legend_debug:
+            legend_metadata["legendVectorDrafts"] = legend_bundle.vector_drafts or []
+            legend_metadata["legendVectorPrimitives"] = legend_bundle.vector_primitives or []
+
         if not symbols:
-            _clear_directory_contents(templates_dir)
+            patterns_list = []
+            for template_path in sorted(templates_dir.glob("*.png")):
+                payload = _template_payload_from_path(template_path)
+                if payload is None:
+                    continue
+                payload["status"] = "existing"
+                patterns_list.append(payload)
             return {
-                "patterns": [],
+                "patterns": patterns_list,
+                "legendExtractedCount": 0,
+                "legendAddedIds": [],
                 "legendZoneUsed": legend_rect_px,
                 "legendMaskMode": mask_mode,
                 "detectorProfileRequested": requested_profile,
                 "detectorProfileUsed": resolved_profile,
                 "pdfDiagnostics": pdf_diagnostics,
+                **legend_metadata,
             }
 
         patterns_list = []
@@ -1181,16 +1249,19 @@ async def _extract_legend_response(
             payload = _template_payload_from_path(template_path)
             if payload is None:
                 continue
-            payload["status"] = "pending" if payload["id"] in extracted_ids else "existing"
+            payload["status"] = "pending" if payload["id"] in added_template_ids else "existing"
             patterns_list.append(payload)
 
         return {
             "patterns": patterns_list,
+            "legendExtractedCount": len(added_template_ids),
+            "legendAddedIds": sorted(added_template_ids),
             "legendZoneUsed": legend_rect_px,
             "legendMaskMode": mask_mode,
             "detectorProfileRequested": requested_profile,
             "detectorProfileUsed": resolved_profile,
             "pdfDiagnostics": pdf_diagnostics,
+            **legend_metadata,
         }
 
     except HTTPException:
@@ -1501,6 +1572,7 @@ def _analyze_session(
                     "y": det.y,
                     "width": det.width,
                     "height": det.height,
+                    "visualBBox": det.visual_bbox,
                     "confidence": det.confidence,
                     "color": r.color,
                 }
