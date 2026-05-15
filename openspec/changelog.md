@@ -2,6 +2,40 @@
 
 Ten plik służy do logowania ważnych zmian i decyzji projektowych. Nie zastępuje git log — tu trafia kontekst, który nie jest oczywisty z kodu ani historii commitów.
 
+## 2026-05-15 — Naprawa legendy i eksport wyników do Excela
+
+**Dotyczy:** `backend/main.py`, `backend/core/legend_extractor.py`,
+`frontend/src/App.tsx`, `frontend/src/components/ResultsPanel.tsx`,
+`frontend/src/symbolLabels.ts`, testy, OpenSpec
+
+- Nazwy wzorców legendy są trzymane jako etykiety pokazowe w
+  `.template_labels.json`, bez rename'owania technicznych plików PNG używanych
+  przez detektor.
+- Review legendy, panel wyników i eksport używają przyjaznych nazw z legendy lub
+  ręcznej korekty użytkownika.
+- Doprecyzowano ekstrakcję nazw dla legend tabelarycznych, gray/raster i
+  kolorowych klasycznych przypadków: opisy mają pochodzić z właściwego wiersza,
+  a `GSW/MSW`, `A + kółko`, `B + kwadrat`, `C1/D1` nie mogą mieszać komponentów
+  sąsiednich pozycji.
+- Dodano `POST /api/projects/{project_id}/analysis-export`, który generuje
+  `.xlsx` z zestawieniem elementów i ilości. Eksport liczy aktualne `boxes` z UI,
+  więc uwzględnia odrzucone detekcje i ręczne zmiany klasy symbolu.
+- Zakładka `Kosztorys` w `ResultsPanel` została zastąpiona zakładką `Eksport`.
+  Dawny `CostPanel` zostaje legacy, ale nie jest głównym flow produktu.
+- Dodano testy eksportu backend/frontend:
+  `backend/tests/unit/test_analysis_export.py` i
+  `frontend/src/tests/ResultsPanelExport.test.tsx`.
+
+Weryfikacja lokalna:
+
+- `PYTHONPATH=backend backend/venv/bin/python -m pytest backend/tests/unit/test_analysis_export.py -q`
+- `cd frontend && npm run test -- --run src/tests/ResultsPanelExport.test.tsx`
+- `cd frontend && npm run build`
+
+Szeroki test `backend/tests/unit/test_legend_extractor_labels.py` wymaga
+lokalnych PDF-ów w `test_pdfs/`; bez nich kończy się `FileNotFoundError`, co nie
+dotyczy eksportu XLSX.
+
 ## 2026-05-11 — Projekty stabilne po powrocie i kompletna legenda
 
 **Dotyczy:** `backend/main.py`, `backend/core/legend_extractor.py`,

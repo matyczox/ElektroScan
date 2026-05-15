@@ -1,6 +1,6 @@
 # ElektroScan AI OpenSpec
 
-Aktualizacja: 2026-05-11
+Aktualizacja: 2026-05-15
 
 To jest główny punkt wejścia do dokumentacji projektu. Szczegółowe pliki źródłowe są w katalogu `openspec/`; ten plik trzyma aktualny skrót, zasady pracy i mapę dokumentów.
 
@@ -16,7 +16,7 @@ To jest główny punkt wejścia do dokumentacji projektu. Szczegółowe pliki ź
 
 ## Cel Produktu
 
-ElektroScan AI analizuje plany elektryczne z PDF, pozwala użytkownikowi zaznaczyć legendę, wyciągnąć wzorce symboli, sprawdzić i nazwać je, a następnie wykryć wystąpienia tych symboli na planie. Wyniki służą do korekty projektu i przygotowania danych pod kosztorys.
+ElektroScan AI analizuje plany elektryczne z PDF, pozwala użytkownikowi zaznaczyć legendę, wyciągnąć wzorce symboli, sprawdzić i nazwać je, a następnie wykryć wystąpienia tych symboli na planie. Wyniki służą do korekty projektu oraz eksportu zestawienia ilości elementów do Excela.
 
 ## Aktualny Przepływ Użytkownika
 
@@ -29,19 +29,20 @@ ElektroScan AI analizuje plany elektryczne z PDF, pozwala użytkownikowi zaznacz
 7. Może zaakceptować, odrzucić, przyciąć, dodać brakujący wzorzec albo poprawić nazwę.
 8. Po sprawdzeniu wzorców może uruchomić analizę planu.
 9. Wyniki wracają w prawym panelu, gdzie można rozwijać grupy, zmieniać nazwy/klasy i korygować detekcje.
+10. W zakładce `Eksport` użytkownik pobiera plik `.xlsx` z aktualnym zestawieniem elementów i ilości.
 
 Powrót do projektu ma przywracać podgląd PDF, warstwy, legendę, wzorce i ostatnią analizę. Wyjście z projektu nie powinno anulować trwającej analizy ani kasować wyniku.
 
 ## Najważniejsze Moduły
 
-- `backend/main.py` - API FastAPI, auth, projekty, upload/preview, legendy, analiza, template management.
+- `backend/main.py` - API FastAPI, auth, projekty, upload/preview, legendy, analiza, eksport XLSX, template management.
 - `backend/core/legend_extractor.py` - ekstrakcja legendy z zaznaczenia, warianty tabelaryczne i klasyczne, OCR opisów, grupowanie symboli, normalizacja nazw.
 - `backend/core/detector.py` - silnik template matching dla planu.
 - `backend/core/detector_pdf.py` - pomocnicze warstwy PDF, tekst i strefy wykluczeń.
 - `frontend/src/App.tsx` - główny stan aplikacji, auth, projekty, sesje, projektowy flow analizy.
 - `frontend/src/components/CanvasView.tsx` - podgląd PDF, zaznaczanie stref, zoom, overlay wyników.
 - `frontend/src/components/LegendReviewPanel.tsx` - weryfikacja i korekta wzorców legendy.
-- `frontend/src/components/ResultsPanel.tsx` - panel wyników i korekty po analizie.
+- `frontend/src/components/ResultsPanel.tsx` - panel wyników, korekty po analizie i eksportu XLSX.
 - `frontend/src/symbolLabels.ts` - heurystyki przyjaznego nazewnictwa symboli po stronie UI.
 
 ## Dane I Przechowywanie
@@ -58,6 +59,21 @@ Projektowe dane są rozdzielone po `project_id`:
 - stan sesji/projektu.
 
 Legacy/globalne endpointy nadal istnieją dla kompatybilności, ale nowe funkcje powinny używać endpointów projektowych.
+
+## Eksport Wyników Do Excela
+
+Eksport jest projektowym endpointem backendu i operuje na aktualnym stanie UI,
+nie tylko na surowym snapshocie analizy. Frontend wysyła bieżące `results`,
+`boxes`, `analysisContext` i `symbolLabels`, dzięki czemu plik uwzględnia:
+
+- odrzucone fałszywe detekcje,
+- ręczne zmiany klasy symbolu,
+- przyjazne nazwy wzorców z legendy,
+- agregację kilku wzorców pod tę samą nazwę elementu.
+
+Backend generuje prawdziwy plik `.xlsx` bez dodatkowych zależności i zwraca go z
+`Content-Disposition`. To zastępuje dawny kosztorys ilość × cena; obecny produkt
+ma eksportować liczby elementów, nie liczyć ceny.
 
 ## Legenda I Nazewnictwo
 
@@ -93,6 +109,8 @@ Po zmianach funkcjonalnych minimalny zestaw kontroli:
 - `PYTHONPATH=backend backend/venv/bin/python -m pytest backend/tests/unit`
 - `cd frontend && npm run test -- --run`
 - `cd frontend && npm run build`
+- eksport XLSX: `backend/tests/unit/test_analysis_export.py` oraz
+  `frontend/src/tests/ResultsPanelExport.test.tsx`
 - API health: `curl -s http://127.0.0.1:8000/api/health`
 - Frontend: `curl -I http://127.0.0.1:5173/`
 

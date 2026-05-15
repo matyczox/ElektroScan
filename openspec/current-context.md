@@ -90,6 +90,12 @@ cd frontend && npm run build
 - Po powrocie do projektu po pracy w innym projekcie frontend odtwarza ostatnią
   zakończoną analizę dla aktualnej sesji PDF ze snapshotu
   `/api/projects/{project_id}/analysis-runs/{analysis_id}`.
+- Wyniki analizy można eksportować do Excela przez zakładkę `Eksport` w prawym
+  panelu. Frontend wysyła aktualne `results`, `boxes`, `analysisContext` i
+  `symbolLabels` do `POST /api/projects/{project_id}/analysis-export`, więc
+  `.xlsx` uwzględnia korekty widoczne w UI: odrzucone detekcje, zmianę klasy
+  symbolu i przyjazne nazwy z legendy. Dawny kosztorys ilość × cena nie jest
+  już głównym flow produktu.
 - Powrót do projektu z zaznaczoną legendą ma pozwalać od razu analizować plan,
   jeżeli wzorce legendy są już sprawdzone. Czarny canvas po powrocie do projektu
   był regresją i powinien być traktowany jako blocker.
@@ -130,6 +136,10 @@ cd frontend && npm run build
   komponentach, żeby indeks tekstowy i grafika tego samego symbolu zostały razem,
   a sąsiednie wiersze nie podkradały sobie nazw. Przypadki kontrolne:
   `GSW`/`MSW` mają poprawne opisy, `A + kółko` jest osobno od `B + kwadrat`.
+- Nazwy pokazowe wzorców są trzymane obok PNG w `.template_labels.json`. ID pliku
+  wzorca pozostaje techniczne i stabilne dla detektora, a etykieta pokazowa jest
+  używana w review, wynikach i eksporcie XLSX. Nie rename'ować PNG tylko po to,
+  żeby zmienić nazwę elementu w UI.
 - Nazwy typu `nieznany_symbol` są traktowane jako fallback/legacy. Backend i
   frontend próbują je humanizować, ale stare zapisane wzorce mogą wymagać
   ponownego wyciągnięcia legendy albo ręcznej zmiany nazwy.

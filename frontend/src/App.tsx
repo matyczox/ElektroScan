@@ -316,6 +316,9 @@ function App() {
   const hasLegendReview = legendReviewItems.length > 0;
   const isLegendReviewComplete = !hasLegendReview || legendReviewCompleted === legendReviewItems.length;
   const activeProjectId = activeProject?.id ?? null;
+  const patternLabelMap = Object.fromEntries(
+    patterns.map(pattern => [pattern.id ?? pattern.name, pattern.name])
+  );
 
   const projectPath = (path: string) => {
     if (!activeProjectId) throw new Error('Nie wybrano projektu.');
@@ -1631,12 +1634,14 @@ function App() {
         <ResultsPanel
           results={results}
           boxes={boxes}
+          analysisContext={analysisContext}
           focusedBoxId={focusedBoxId}
           onFocusBox={id => setFocusedBoxId(prev => prev === id ? null : id)}
           onRejectBox={handleRejectBox}
           onChangeBoxSymbol={handleChangeBoxSymbol}
           onRenameSymbol={handleRenameResultSymbol}
           symbolNames={patterns.map(p => p.id ?? p.name)}
+          symbolLabels={patternLabelMap}
           projectId={activeProject.id}
           onTemplateUploaded={() => fetchTemplates(activeProject.id)}
         />

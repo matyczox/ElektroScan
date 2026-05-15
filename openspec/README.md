@@ -57,7 +57,8 @@ openspec/current-context.md. Projekt ma auth, dashboard projektów i endpointy
 projektowe /api/projects/{project_id}/...; legacy endpointy bez project_id są
 tylko fallbackiem dev. Nie hardcoduj koordynat ani nazw symboli pod jeden PDF.
 Legenda działa przez zaznaczenie, review wzorców, OCR opisów i ręczną korektę.
-Detektor ma rozdzielone wejścia color/gray i wspólny pipeline. Do diagnozy
-używaj Inspektora ROI oraz testów, nie przywracaj starego panelu debugCandidates
-jako domyślnej funkcji UI.
+Detektor ma rozdzielone wejścia color/gray i wspólny pipeline. Po analizie
+wyniki eksportuje się do `.xlsx` z zakładki Eksport w prawym panelu; plik ma
+liczyć aktualne boxy po korektach UI. Do diagnozy używaj Inspektora ROI oraz
+testów, nie przywracaj starego panelu debugCandidates jako domyślnej funkcji UI.
 ```

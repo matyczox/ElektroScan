@@ -74,4 +74,25 @@ describe('LegendReviewPanel', () => {
 
     expect(screen.getByRole('textbox')).toHaveValue('GNIAZDO 1-F Z BOLCEM OCHRONNYM 16A IP20');
   });
+
+  it('keeps distinct rozdzielnica descriptions readable', () => {
+    renderPanel([
+      {
+        id: '01_TM',
+        name: 'rozdzielnica_glowna_mieszkaniowa',
+        imgBase64: 'data:image/png;base64,abc123',
+        status: 'pending',
+      },
+      {
+        id: '02_TAB',
+        name: 'rozdzielnica_administracyjna_budynku',
+        imgBase64: 'data:image/png;base64,def456',
+        status: 'pending',
+      },
+    ]);
+
+    const inputs = screen.getAllByRole('textbox');
+    expect(inputs[0]).toHaveValue('rozdzielnica glowna mieszkaniowa');
+    expect(inputs[1]).toHaveValue('rozdzielnica administracyjna budynku');
+  });
 });

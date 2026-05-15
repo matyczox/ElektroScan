@@ -1,6 +1,6 @@
-﻿import React, { useState, useEffect, useRef } from 'react';
-import { Layers, ChevronDown, ChevronRight, X, Calculator, Upload, Edit3, Save } from 'lucide-react';
-import { apiFetch, projectApiPath } from '../api';
+﻿import React, { useState, useRef } from 'react';
+import { Layers, ChevronDown, ChevronRight, X, Upload, Edit3, Save, Download } from 'lucide-react';
+import { apiFetch, projectApiPath, readApiError } from '../api';
 import { formatSymbolLabel } from '../symbolLabels';
 
 interface Box {
@@ -35,15 +35,24 @@ interface ResultGroup {
   color: string;
 }
 
+interface AnalysisContext {
+  analysisId?: string;
+  generatedAtUtc?: string;
+  sessionId?: string;
+  sourcePdf?: string;
+}
+
 interface ResultsPanelProps {
   results: ResultGroup[];
   boxes: Box[];
+  analysisContext?: AnalysisContext | null;
   focusedBoxId?: string | null;
   onFocusBox?: (id: string) => void;
   onRejectBox: (id: string) => void;
   onChangeBoxSymbol?: (id: string, symbolName: string) => void;
   onRenameSymbol?: (currentName: string, nextName: string) => Promise<string | void> | string | void;
   symbolNames?: string[];
+  symbolLabels?: Record<string, string>;
   projectId?: string;
   onTemplateUploaded?: () => void;
 }
@@ -51,34 +60,26 @@ interface ResultsPanelProps {
 export const ResultsPanel: React.FC<ResultsPanelProps> = ({
   results,
   boxes,
+  analysisContext,
   focusedBoxId,
   onFocusBox,
   onRejectBox,
   onChangeBoxSymbol,
   onRenameSymbol,
   symbolNames = [],
+  symbolLabels = {},
   projectId,
   onTemplateUploaded,
 }) => {
-  const [activeTab, setActiveTab] = useState<'correction' | 'cost'>('correction');
+  const [activeTab, setActiveTab] = useState<'correction' | 'export'>('correction');
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
-  const [prices, setPrices] = useState<Record<string, number>>({});
   const uploadRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [renamingGroup, setRenamingGroup] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
   const [renameBusyGroup, setRenameBusyGroup] = useState<string | null>(null);
-
-  // Init prices for new results
-  useEffect(() => {
-    setPrices(prev => {
-      const next = { ...prev };
-      results.forEach(r => {
-        if (next[r.name] === undefined) next[r.name] = 0;
-      });
-      return next;
-    });
-  }, [results]);
+  const getSymbolDisplayName = (name: string) => symbolLabels[name] || formatSymbolLabel(name);
 
   const toggleGroup = (name: string) => {
     setExpandedGroups(prev => {
@@ -99,10 +100,31 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
     boxesBySymbol[b.symbolName].push(b);
   });
 
-  const totalSum = results.reduce((acc, r) => {
-    const activeCount = (boxesBySymbol[r.name] || []).length;
-    return acc + activeCount * (prices[r.name] || 0);
-  }, 0);
+  const exportRows = Array.from(
+    results.reduce((map, group) => {
+      const activeCount = filteredBoxes.length > 0
+        ? (boxesBySymbol[group.name] || []).length
+        : group.count;
+      if (activeCount <= 0) return map;
+      const displayName = getSymbolDisplayName(group.name);
+      const key = displayName.trim().toLocaleLowerCase('pl-PL');
+      const existing = map.get(key);
+      if (existing) {
+        existing.count += activeCount;
+        existing.symbolNames.push(group.name);
+      } else {
+        map.set(key, {
+          displayName,
+          count: activeCount,
+          color: group.color,
+          symbolNames: [group.name],
+        });
+      }
+      return map;
+    }, new Map<string, { displayName: string; count: number; color: string; symbolNames: string[] }>())
+      .values()
+  );
+  const exportTotal = exportRows.reduce((sum, row) => sum + row.count, 0);
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files || e.target.files.length === 0) return;
@@ -131,7 +153,7 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
 
   const beginRename = (name: string) => {
     setRenamingGroup(name);
-    setRenameDraft(formatSymbolLabel(name));
+    setRenameDraft(getSymbolDisplayName(name));
   };
 
   const saveRename = async (currentName: string) => {
@@ -139,19 +161,60 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
     if (!nextName || !onRenameSymbol) return;
     setRenameBusyGroup(currentName);
     try {
-      const renamedName = await onRenameSymbol(currentName, nextName);
-      const priceKey = typeof renamedName === 'string' && renamedName ? renamedName : nextName;
-      setPrices(prev => {
-        const next = { ...prev, [priceKey]: prev[currentName] ?? prev[priceKey] ?? 0 };
-        delete next[currentName];
-        return next;
-      });
+      await onRenameSymbol(currentName, nextName);
       setRenamingGroup(null);
       setRenameDraft('');
     } catch (error) {
       alert((error as Error).message || 'Nie udało się zmienić nazwy symbolu.');
     } finally {
       setRenameBusyGroup(null);
+    }
+  };
+
+  const exportFileName = () => {
+    const sourcePdf = analysisContext?.sourcePdf?.replace(/\.[^.]+$/, '') || 'wyniki';
+    const safeName = sourcePdf.replace(/[\\/:*?"<>|]+/g, '_').trim() || 'wyniki';
+    return `elektroscan_${safeName.slice(0, 80)}_wyniki.xlsx`;
+  };
+
+  const filenameFromHeader = (header: string | null) => {
+    if (!header) return exportFileName();
+    const utfMatch = header.match(/filename\*=UTF-8''([^;]+)/i);
+    if (utfMatch?.[1]) return decodeURIComponent(utfMatch[1]);
+    const asciiMatch = header.match(/filename="?([^";]+)"?/i);
+    return asciiMatch?.[1] || exportFileName();
+  };
+
+  const handleExportExcel = async () => {
+    if (!projectId || exportTotal <= 0) return;
+    setExporting(true);
+    try {
+      const response = await apiFetch(projectApiPath(projectId, '/analysis-export'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          results,
+          boxes: filteredBoxes,
+          analysisContext,
+          symbolLabels,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(await readApiError(response, 'Nie udało się wyeksportować wyników.'));
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filenameFromHeader(response.headers.get('Content-Disposition'));
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      alert((error as Error).message || 'Nie udało się wyeksportować wyników.');
+    } finally {
+      setExporting(false);
     }
   };
 
@@ -174,7 +237,7 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
 
         {/* Tabs */}
         <div style={{ display: 'flex', borderBottom: '1px solid var(--border-light)', gap: 2 }}>
-          {(['correction', 'cost'] as const).map(tab => (
+          {(['correction', 'export'] as const).map(tab => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
@@ -193,7 +256,7 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
                 transition: 'all 0.2s',
               }}
             >
-              {tab === 'correction' ? 'Korekta' : 'Kosztorys'}
+              {tab === 'correction' ? 'Korekta' : 'Eksport'}
             </button>
           ))}
         </div>
@@ -293,7 +356,7 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
                       ) : (
                         <span
                           className="text-xs"
-                          title={group.name}
+                          title={getSymbolDisplayName(group.name)}
                           style={{
                             flex: 1,
                             fontWeight: 700,
@@ -302,7 +365,7 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
                             lineHeight: 1.3,
                           }}
                         >
-                          {formatSymbolLabel(group.name)}
+                          {getSymbolDisplayName(group.name)}
                         </span>
                       )}
                       {onRenameSymbol && (
@@ -422,7 +485,7 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
                                   }}
                                 >
                                   {allSymbolNames.map(name => (
-                                    <option key={name} value={name}>{formatSymbolLabel(name)}</option>
+                                    <option key={name} value={name}>{getSymbolDisplayName(name)}</option>
                                   ))}
                                 </select>
                               )}
@@ -457,55 +520,59 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
             </div>
           )}
 
-          {/* KOSZTORYS TAB */}
-          {activeTab === 'cost' && (
+          {/* EKSPORT TAB */}
+          {activeTab === 'export' && (
             <>
               <div style={{ padding: 16, flex: 1, display: 'flex', flexDirection: 'column', gap: 12 }}>
-                {results.map((group) => {
-                  const activeCount = (boxesBySymbol[group.name] || []).length;
-                  return (
-                    <div key={group.name} className="estimate-card">
-                      <div className="estimate-card-stripe" style={{ backgroundColor: group.color }} />
-                      <div className="estimate-card-content">
-                        <div className="estimate-card-title" title={group.name}>
-                          {formatSymbolLabel(group.name)}
+                <button
+                  className="btn-secondary flex-row gap-2"
+                  style={{ width: '100%', justifyContent: 'center' }}
+                  onClick={() => void handleExportExcel()}
+                  disabled={!projectId || exporting || exportTotal <= 0}
+                >
+                  <Download size={15} />
+                  {exporting ? 'Eksportowanie...' : 'Eksportuj XLSX'}
+                </button>
+
+                {exportRows.map(row => (
+                  <div key={row.displayName} className="estimate-card">
+                    <div className="estimate-card-stripe" style={{ backgroundColor: row.color }} />
+                    <div className="estimate-card-content">
+                      <div className="estimate-card-title" title={row.displayName}>
+                        {row.displayName}
+                      </div>
+                      <div className="estimate-inputs">
+                        <div className="estimate-input-group">
+                          <label className="estimate-input-label">ILOŚĆ</label>
+                          <input
+                            type="number"
+                            className="estimate-input"
+                            value={row.count}
+                            readOnly
+                          />
                         </div>
-                        <div className="estimate-inputs">
-                          <div className="estimate-input-group">
-                            <label className="estimate-input-label">ILOŚĆ</label>
-                            <input
-                              type="number"
-                              className="estimate-input"
-                              value={activeCount}
-                              readOnly
-                            />
-                          </div>
-                          <div className="estimate-input-group">
-                            <label className="estimate-input-label">CENA NETTO (PLN)</label>
-                            <input
-                              type="number"
-                              className="estimate-input"
-                              value={prices[group.name] || 0}
-                              onChange={e => {
-                                const val = parseFloat(e.target.value);
-                                setPrices(prev => ({ ...prev, [group.name]: isNaN(val) ? 0 : val }));
-                              }}
-                            />
-                          </div>
+                        <div className="estimate-input-group">
+                          <label className="estimate-input-label">WZORCE</label>
+                          <input
+                            className="estimate-input"
+                            value={row.symbolNames.join(', ')}
+                            readOnly
+                            title={row.symbolNames.join(', ')}
+                          />
                         </div>
                       </div>
                     </div>
-                  );
-                })}
+                  </div>
+                ))}
               </div>
 
               <div className="estimate-total-footer">
                 <div className="flex-row gap-2">
-                  <Calculator size={16} color="var(--text-muted)" />
-                  <span className="text-xs text-muted" style={{ textTransform: 'uppercase' }}>Suma Całkowita</span>
+                  <Layers size={16} color="var(--text-muted)" />
+                  <span className="text-xs text-muted" style={{ textTransform: 'uppercase' }}>Razem</span>
                 </div>
                 <span style={{ fontSize: 18, fontWeight: 700, color: 'var(--accent-gold)' }}>
-                  {totalSum.toFixed(2)} PLN
+                  {exportTotal} szt.
                 </span>
               </div>
             </>

@@ -37,7 +37,7 @@ Aktualny cel jakościowy:
 
 ```text
 backend/
-  main.py                        # FastAPI, auth, projekty, upload, legenda, analiza
+  main.py                        # FastAPI, auth, projekty, upload, legenda, analiza, eksport XLSX
   auth_store.py                  # SQLite, użytkownicy, sesje auth, projekty
   requirements.txt
   data/
@@ -76,16 +76,19 @@ frontend/
       ProjectDashboard.tsx       # projekty, historia analiz, konto, sesje
       CanvasView.tsx             # render planu, strefy, zoom, overlay wyników
       LegendReviewPanel.tsx      # review wzorców, crop, rename, reject/accept
-      ResultsPanel.tsx           # lista wyników, rename, korekta klas i boxów
+      ResultsPanel.tsx           # lista wyników, rename, korekta klas/boxów, eksport XLSX
       Sidebar.tsx                # upload, legenda, analiza, lista wzorców
       PatternModal.tsx           # modal edycji/usunięcia pojedynczego wzorca
-      CostPanel.tsx              # kosztorys wykonawczy (ilość × cena PLN)
+      CostPanel.tsx              # legacy panel kosztorysu; obecny flow używa eksportu XLSX z ResultsPanel
 ```
 
 ## Opis Modułów Backendu
 
 ### main.py
-FastAPI. Obsługuje: upload PDF, render preview, ekstrakcję legendy, analizę, zarządzanie wzorcami (templates), snapshoty debug. Odpowiada za formatowanie odpowiedzi dla frontendu i asynchroniczny zapis snapshotów przez `SNAPSHOT_EXECUTOR`.
+FastAPI. Obsługuje: upload PDF, render preview, ekstrakcję legendy, analizę,
+eksport XLSX, zarządzanie wzorcami (templates), snapshoty debug. Odpowiada za
+formatowanie odpowiedzi dla frontendu i asynchroniczny zapis snapshotów przez
+`SNAPSHOT_EXECUTOR`.
 
 Po dodaniu logowania nowe endpointy projektowe są preferowaną ścieżką pracy:
 `/api/projects/{project_id}/...`. Legacy endpointy bez `project_id` zostają jako
@@ -182,7 +185,10 @@ Analiza planu jest blokowana, dopóki są wzorce `pending`.
 ### ResultsPanel.tsx
 Lista finalnych wyników pogrupowanych po symbolu. Pozwala rozwijać grupy,
 zmieniać nazwę/klasę, usuwać fałszywe detekcje i korzystać z przyjaznych nazw
-z `symbolLabels.ts`.
+z `symbolLabels.ts`. Zakładka `Eksport` wysyła aktualny stan `results`, `boxes`,
+`analysisContext` i `symbolLabels` do backendu, a backend zwraca `.xlsx` z
+zestawieniem ilości elementów. Dzięki temu eksport uwzględnia ręczne korekty w
+UI.
 
 ### Sidebar.tsx
 Upload PDF, ekstrakcja legendy, uruchomienie analizy, wybór warstw. Lista załadowanych wzorców z miniaturą i przyciskiem edycji (otwiera PatternModal). Przycisk czyszczenia całej bazy wzorców.
@@ -191,7 +197,9 @@ Upload PDF, ekstrakcja legendy, uruchomienie analizy, wybór warstw. Lista zała
 Modal do edycji nazwy wzorca lub jego usunięcia. Otwierany z Sidebar przy kliknięciu ikony edycji przy wzorcu.
 
 ### CostPanel.tsx
-Panel kosztorysu. Dla każdego symbolu z wyników: ilość (readonly) + pole ceny netto PLN. Suma na dole. Stan cen żyje tylko w React — nie jest persystowany ani wysyłany do backendu.
+Legacy panel kosztorysu. Dla aktualnego demo główną ścieżką nie jest już
+wycena ilość × cena PLN, tylko eksport `.xlsx` z ilościami elementów przez
+`ResultsPanel`. Nie rozwijać CostPanel jako produktu bez osobnej decyzji.
 
 ## Pipeline Detekcji (Krok po Kroku)
 

@@ -383,14 +383,16 @@ frontend/src/tests/
   setup.ts
   CostPanel.test.tsx
   PatternModal.test.tsx
-  ResultsPanel.test.tsx
+  LegendReviewPanel.test.tsx
+  ResultsPanelExport.test.tsx
 ```
 
 **Priorytety:**
 
-1. `CostPanel.test.tsx` — render, zmiana ceny, suma całkowita (czysta logika, zero deps zewnętrznych)
+1. `ResultsPanelExport.test.tsx` — eksport `.xlsx` z aktualnych wyników po korektach UI
 2. `PatternModal.test.tsx` — render, kliknięcie Usuń, kliknięcie Zapisz
-3. `ResultsPanel.test.tsx` — render listy wyników, zmiana klasy
+3. `LegendReviewPanel.test.tsx` — review wzorców, nazwy pokazowe, akceptacja/odrzucenie
+4. `CostPanel.test.tsx` — legacy kosztorys, zostaje tylko dla regresji starego komponentu
 
 **Komendy:**
 ```bash
@@ -578,7 +580,8 @@ jobs:
 ### Krok 4 — Testy frontend
 
 1. Dodaj vitest, testing-library, `setup.ts`.
-2. Zacznij od `CostPanel.test.tsx` — zero deps zewnętrznych.
+2. Dla obecnego flow pilnuj `ResultsPanelExport.test.tsx`; `CostPanel.test.tsx`
+   jest legacy i nie opisuje już głównej ścieżki produktu.
 
 ### Krok 5 — GitHub Actions
 

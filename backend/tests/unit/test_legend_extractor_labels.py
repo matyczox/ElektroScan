@@ -10,22 +10,33 @@ import numpy as np
 from core.legend_extractor import (
     _clean_ocr_label_text,
     _color_classic_row_symbol_bboxes,
+    _build_color_table_display_drafts,
     _expand_legend_rect_to_table,
     _extract_left_gutter_table_legend_raw,
     _extract_table_legend_raw,
     _get_classic_row_label_text,
     _gray_row_symbol_bboxes,
     _get_row_label_text,
+    _get_table_description_label_text,
     extract_legend,
     pdf_to_png,
     _read_visual_symbol_code,
     _table_symbols_need_expansion,
     _trim_selection_to_table_grid,
 )
+from core.legend_scene_transform import build_scene_transform
 
 
 def test_clean_ocr_label_text_canonicalizes_noisy_electrical_labels():
     assert _clean_ocr_label_text("ROZDZIELNICA") == "ROZDZIELNICA"
+    assert (
+        _clean_ocr_label_text("rozdzielnica glowna mieszkaniowa")
+        == "rozdzielnica glowna mieszkaniowa"
+    )
+    assert (
+        _clean_ocr_label_text("rozdzielnica administracyjna budynku")
+        == "rozdzielnica administracyjna budynku"
+    )
     assert (
         _clean_ocr_label_text("GNIAZDO 1-F Z BOLCEM OCHRONNYM, 16A, IP20")
         == "GNIAZDO 1-F Z BOLCEM OCHRONNYM 16A IP20"
@@ -65,6 +76,30 @@ def test_row_label_text_uses_description_from_same_table_row():
     )
 
     assert label == "Oprawa_LED"
+
+
+def test_table_description_label_prefers_final_product_column():
+    text_words = [
+        (122.0, 61.0, 134.0, 75.0, "A1", 0, 1, 0),
+        (180.0, 61.0, 220.0, 75.0, "BEE", 0, 1, 1),
+        (224.0, 61.0, 268.0, 75.0, "LIGHT", 0, 1, 2),
+        (330.0, 61.0, 386.0, 75.0, "ASTER", 0, 1, 3),
+        (390.0, 61.0, 412.0, 75.0, "CC", 0, 1, 4),
+        (416.0, 61.0, 448.0, 75.0, "IP65", 0, 1, 5),
+    ]
+
+    label = _get_table_description_label_text(
+        text_words,
+        x_start=0,
+        y_start=0,
+        scale=1.0,
+        row_top_px=50,
+        row_bottom_px=86,
+        col_boundaries=[100, 160, 300, 520],
+        legend_width_px=540,
+    )
+
+    assert label == "ASTER_CC_IP65"
 
 
 def test_row_label_text_returns_none_without_same_row_text():
@@ -286,6 +321,77 @@ def test_table_selection_trims_surrounding_plan_margin():
     assert y <= 14
     assert x + w >= 296
     assert y + h >= 166
+
+
+def test_color_table_display_labels_use_description_column_inside_broad_selection():
+    scale = 300 / 72
+    plan_image = np.full((900, 1700, 3), 255, dtype=np.uint8)
+    table_x0, table_x1 = 700, 1540
+    symbol_col_x = 870
+    rows = [40, 90, 170, 250, 330, 410]
+    labels = [
+        "oprawa oswietleniowa 24W",
+        "oprawa oswietleniowa 28W",
+        "oprawa awaryjna LED",
+        "panel wideodomofon",
+    ]
+
+    for y in rows:
+        cv2.line(plan_image, (table_x0, y), (table_x1, y), (0, 0, 0), 2)
+    for x in (table_x0, symbol_col_x, table_x1):
+        cv2.line(plan_image, (x, rows[0]), (x, rows[-1]), (0, 0, 0), 2)
+
+    for index, (row_top, row_bottom) in enumerate(zip(rows[1:-1], rows[2:]), start=1):
+        center_y = (row_top + row_bottom) // 2
+        cv2.rectangle(
+            plan_image,
+            (table_x0 + 42, center_y - 13),
+            (table_x0 + 88, center_y + 13),
+            (0, 0, 255),
+            3,
+        )
+        cv2.putText(
+            plan_image,
+            f"L{index}",
+            (table_x0 + 100, center_y + 8),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (0, 0, 255),
+            2,
+        )
+
+    # A second grid without colored legend ink should not win over the real table.
+    for y in (580, 640, 700):
+        cv2.line(plan_image, (900, y), (1540, y), (0, 0, 0), 2)
+    for x in (900, 1120, 1540):
+        cv2.line(plan_image, (x, 580), (x, 700), (0, 0, 0), 2)
+
+    doc = fitz.open()
+    page = doc.new_page(width=plan_image.shape[1] / scale, height=plan_image.shape[0] / scale)
+    for row_top, row_bottom, label in zip(rows[1:-1], rows[2:], labels):
+        center_y = (row_top + row_bottom) / 2
+        page.insert_text(
+            fitz.Point((symbol_col_x + 28) / scale, (center_y + 6) / scale),
+            label,
+            fontsize=8,
+        )
+
+    transform = build_scene_transform(page, dpi=300)
+    drafts = _build_color_table_display_drafts(
+        page,
+        plan_image,
+        (0, 0, plan_image.shape[1], plan_image.shape[0]),
+        transform,
+        expected_count=len(labels),
+    )
+
+    assert [draft.name_draft for draft in drafts] == [
+        "oprawa_oswietleniowa_24W",
+        "oprawa_oswietleniowa_28W",
+        "oprawa_awaryjna_LED",
+        "panel_wideodomofon",
+    ]
+    doc.close()
 
 
 def test_visual_symbol_code_reads_short_cad_like_label():

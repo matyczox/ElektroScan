@@ -38,6 +38,8 @@ Prawie jak testy jednostkowe architektury:
   projektu nie mogą mieszać się z innym.
 - Powrót do projektu ma przywracać preview PDF, warstwy, legendę, wzorce i
   ostatnią analizę, jeśli istnieje.
+- Eksport XLSX ma odzwierciedlać aktualny stan korekt w UI, nie wyłącznie surowy
+  snapshot pierwszej analizy.
 - Warstwa PDF może pomagać przy renderze/warstwach, ale nie może być jedynym źródłem prawdy o symbolach.
 - Template matching musi być obrazowy i odporny na PDF jako skan/zdjęcie.
 - HITL poprawia wynik analizy, ale nie tworzy ukrytego globalnego uczenia pod jeden rzut.
@@ -61,6 +63,22 @@ ekstrakcji, ale użytkownik musi móc je poprawić ręcznie.
 Nie rozwiązujemy problemów legend przez mapy typu "czwarty element zawsze jest
 B" ani przez współrzędne konkretnego planu. Poprawki mają wynikać z geometrii
 tabel, grupowania komponentów, OCR/PDF text i relacji wierszy.
+
+## Decyzja 2026-05-15: Eksport XLSX Zastępuje Kosztorys
+
+Obecny demo/product flow ma eksportować zestawienie ilości elementów do Excela,
+a nie liczyć kosztorys w UI. `ResultsPanel` ma zakładkę `Eksport`, która wysyła
+do backendu aktualny stan korekt: `results`, `boxes`, `analysisContext` i
+`symbolLabels`. Backend generuje `.xlsx` i agreguje techniczne ID wzorców po
+przyjaznej nazwie elementu.
+
+Konsekwencje:
+
+- jeśli użytkownik odrzuci box albo zmieni jego klasę, eksport musi to policzyć,
+- nazwy w pliku mają pochodzić z legendy lub ręcznej zmiany nazwy, nie z
+  technicznych fallbacków typu `sym_01`,
+- endpoint eksportu jest projektowy: `POST /api/projects/{project_id}/analysis-export`,
+- `CostPanel` zostaje legacy i nie jest rozwijany bez nowej decyzji produktowej.
 
 ## Decyzja 2026-04-30: Inspektor ROI Jest Lokalna Prawda Dla Gray
 
@@ -132,4 +150,4 @@ Ten projekt to hybrydowy detektor symboli technicznych oparty o template matchin
 - HITL/debug pokazuje miejsca niepewne, nie tylko finalne wyniki.
 - Kod rozdzielony na moduły core.
 - Narzędzia diagnostyczne (`compare_analysis_snapshot`, `summarize_analysis_performance`).
-- CostPanel i zarządzanie wzorcami przez UI bez operacji na plikach ręcznie.
+- Eksport XLSX wyników i zarządzanie wzorcami przez UI bez operacji na plikach ręcznie.

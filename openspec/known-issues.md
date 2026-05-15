@@ -15,6 +15,12 @@ Znane problemy nie są powodem do panicznego overfitu. Podejście: zebrać dane,
   komponentów i tekstu.
 - Powrót do projektu musi odtwarzać canvas, wzorce i analizę. Czarny ekran po
   powrocie albo zablokowana analiza przy sprawdzonej legendzie to regresja.
+- Eksport XLSX musi być liczony po bieżących boxach z UI. Jeżeli użytkownik
+  odrzuci fałszywe trafienie albo zmieni klasę detekcji, plik nie może wracać do
+  surowych wartości ze snapshotu.
+- Kilka technicznych wzorców z tą samą etykietą elementu powinno być w eksporcie
+  zsumowane w jeden wiersz. W przeciwnym razie klient zobaczy zdublowane pozycje
+  zamiast liczby danego elementu.
 
 ## Legendy — Przypadki Do Pilnowania
 

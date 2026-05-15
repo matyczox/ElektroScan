@@ -63,6 +63,13 @@ npm run test -- --run
 npm run build
 ```
 
+Po zmianach w eksporcie:
+
+```bash
+PYTHONPATH=backend backend/venv/bin/python -m pytest backend/tests/unit/test_analysis_export.py -q
+cd frontend && npm run test -- --run src/tests/ResultsPanelExport.test.tsx
+```
+
 Po zmianach w Dockerfile albo zależnościach:
 
 ```bash
@@ -84,9 +91,16 @@ docker compose up -d
 9. Uruchamia `Analizuj Plan`.
 10. Koryguje wynik w prawym panelu: rozwija grupy, zmienia nazwę/klasę lub usuwa
     fałszywe detekcje.
+11. Przechodzi do zakładki `Eksport` i pobiera `.xlsx` z aktualnym zestawieniem
+    elementów oraz ilości.
 
 Wyjście z projektu do listy projektów ma zachować stan. Powrót ma odtworzyć
 preview PDF, warstwy, zaznaczoną legendę, sprawdzone wzorce i ostatnią analizę.
+
+Eksport XLSX zastępuje dawny kosztorys. Plik ma być liczony z aktualnego stanu
+UI po korektach, a nie tylko z pierwszej odpowiedzi backendu. Przed eksportem
+użytkownik może odrzucić fałszywe boxy albo zmienić klasę detekcji; plik powinien
+pokazać dokładnie te ilości, które widać w panelu wyników.
 
 ## Aktualny Flow Legendy
 

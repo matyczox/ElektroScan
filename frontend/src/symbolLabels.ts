@@ -14,6 +14,17 @@ export const formatSymbolLabel = (name: string) => {
   const phase = phaseRaw === '5' ? '3' : phaseRaw;
 
   if (compact.includes('ROZDZ')) {
+    const hasDescriptor = containsAny(compact, [
+      'GLOWNA',
+      'GŁOWNA',
+      'ADMINISTRACYJNA',
+      'MIESZKANIOWA',
+      'BUDYNKU',
+      'LOKALNA',
+      'PIETROWA',
+      'PIĘTROWA',
+    ]);
+    if (hasDescriptor) return label;
     return 'ROZDZIELNICA';
   }
 

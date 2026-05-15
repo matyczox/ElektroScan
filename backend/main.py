@@ -1,4 +1,5 @@
 import base64
+import io
 import json
 import math
 import os
@@ -7,19 +8,22 @@ import shutil
 import tempfile
 import time
 import uuid
+import zipfile
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 from typing import List, Optional
+from urllib.parse import quote
+from xml.sax.saxutils import escape as xml_escape
 
 import cv2
 import fitz
 import numpy as np
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from auth_store import (
     archive_project_for_user,
@@ -82,6 +86,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition"],
 )
 
 
@@ -101,6 +106,7 @@ TEMPLATES_DIR = BASE_DIR / "templates"
 ANALYSIS_DIR = BASE_DIR / "analysis_debug"
 DATA_DIR = BASE_DIR / "data"
 PROJECTS_DIR = DATA_DIR / "projects"
+TEMPLATE_LABELS_FILENAME = ".template_labels.json"
 SESSION_META_SUFFIX = ".meta.json"
 SESSION_COOKIE_NAME = "elektroscan_session"
 SESSION_TTL_DAYS = int(os.getenv("ELEKTROSCAN_SESSION_TTL_DAYS", "30"))
@@ -457,14 +463,83 @@ def _next_template_index(templates_dir: Path) -> int:
     return max_index + 1
 
 
-def _append_extracted_templates(extraction_dir: Path, templates_dir: Path) -> set[str]:
+def _template_labels_path(templates_dir: Path) -> Path:
+    return templates_dir / TEMPLATE_LABELS_FILENAME
+
+
+def _load_template_labels(templates_dir: Path) -> dict[str, str]:
+    labels_path = _template_labels_path(templates_dir)
+    if not labels_path.exists():
+        return {}
+    try:
+        payload = json.loads(labels_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {
+        str(key): str(value).strip()
+        for key, value in payload.items()
+        if str(key).strip() and str(value).strip()
+    }
+
+
+def _write_template_labels(templates_dir: Path, labels: dict[str, str]) -> None:
+    templates_dir.mkdir(parents=True, exist_ok=True)
+    clean_labels = {
+        str(key): str(value).strip()
+        for key, value in labels.items()
+        if str(key).strip() and str(value).strip()
+    }
+    labels_path = _template_labels_path(templates_dir)
+    if clean_labels:
+        labels_path.write_text(
+            json.dumps(clean_labels, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+    else:
+        labels_path.unlink(missing_ok=True)
+
+
+def _clean_template_display_label(raw_label: str | None) -> str | None:
+    label = " ".join(str(raw_label or "").replace("_", " ").split())
+    if not label:
+        return None
+    if sum(1 for char in label if char.isalnum()) < 2:
+        return None
+    return label[:180].strip() or None
+
+
+def _set_template_display_label(templates_dir: Path, template_id: str, label: str | None) -> None:
+    labels = _load_template_labels(templates_dir)
+    clean_label = _clean_template_display_label(label)
+    if clean_label:
+        labels[template_id] = clean_label
+    else:
+        labels.pop(template_id, None)
+    _write_template_labels(templates_dir, labels)
+
+
+def _delete_template_display_label(templates_dir: Path, template_id: str) -> None:
+    labels = _load_template_labels(templates_dir)
+    if template_id in labels:
+        labels.pop(template_id, None)
+        _write_template_labels(templates_dir, labels)
+
+
+def _append_extracted_templates(
+    extraction_dir: Path,
+    templates_dir: Path,
+    display_labels: list[str] | None = None,
+) -> set[str]:
     """Move freshly extracted templates into the project without deleting existing ones."""
 
     templates_dir.mkdir(parents=True, exist_ok=True)
     next_index = _next_template_index(templates_dir)
     added_ids: set[str] = set()
+    labels = _load_template_labels(templates_dir)
 
-    for template_path in sorted(extraction_dir.glob("*.png")):
+    for label_index, template_path in enumerate(sorted(extraction_dir.glob("*.png"))):
         raw_stem = _safe_template_stem(template_path.stem)
         label = re.sub(r"^\d+_+", "", raw_stem).strip("_") or raw_stem
 
@@ -477,8 +552,40 @@ def _append_extracted_templates(extraction_dir: Path, templates_dir: Path) -> se
 
         shutil.move(str(template_path), dest_path)
         added_ids.add(dest_stem)
+        display_label = None
+        if display_labels and label_index < len(display_labels):
+            display_label = _clean_template_display_label(display_labels[label_index])
+        labels[dest_stem] = display_label or _display_template_name(raw_stem)
+
+    _write_template_labels(templates_dir, labels)
 
     return added_ids
+
+
+def _legend_display_labels_from_drafts(
+    vector_drafts: list[dict] | None,
+    expected_count: int,
+) -> list[str] | None:
+    if not vector_drafts or expected_count <= 0:
+        return None
+
+    def sort_key(draft: dict) -> tuple[float, float]:
+        row_bbox = draft.get("row_bbox_pt") or draft.get("bbox_pt") or [0, 0, 0, 0]
+        bbox = draft.get("bbox_pt") or row_bbox
+        try:
+            return (float(row_bbox[1]), float(bbox[0]))
+        except Exception:
+            return (0.0, 0.0)
+
+    labels: list[str] = []
+    for draft in sorted(vector_drafts, key=sort_key):
+        if not isinstance(draft, dict):
+            continue
+        label = _clean_template_display_label(draft.get("name_draft"))
+        if label:
+            labels.append(label)
+
+    return labels if len(labels) == expected_count else None
 
 
 def _safe_template_stem(raw_name: str) -> str:
@@ -511,6 +618,12 @@ def _display_template_name(stem: str) -> str:
     return cleaned or label
 
 
+def _display_template_name_for_path(file_path: Path, labels: dict[str, str] | None = None) -> str:
+    label_map = labels if labels is not None else _load_template_labels(file_path.parent)
+    clean_label = _clean_template_display_label(label_map.get(file_path.stem))
+    return clean_label or _display_template_name(file_path.stem)
+
+
 def _template_path_for_id(template_id: str, templates_dir: Path = TEMPLATES_DIR) -> Path | None:
     """Find a template by exact stem, with a suffix fallback for legacy responses."""
 
@@ -523,7 +636,7 @@ def _template_path_for_id(template_id: str, templates_dir: Path = TEMPLATES_DIR)
     return suffix_matches[0] if suffix_matches else None
 
 
-def _template_payload_from_path(file_path: Path) -> dict | None:
+def _template_payload_from_path(file_path: Path, labels: dict[str, str] | None = None) -> dict | None:
     img = cv2.imread(str(file_path))
     if img is None:
         return None
@@ -531,9 +644,297 @@ def _template_payload_from_path(file_path: Path) -> dict | None:
     img_b64 = base64.b64encode(buffer).decode("utf-8")
     return {
         "id": file_path.stem,
-        "name": _display_template_name(file_path.stem),
+        "name": _display_template_name_for_path(file_path, labels),
         "imgBase64": f"data:image/png;base64,{img_b64}",
     }
+
+
+def _export_label_for_symbol(
+    symbol_name: str,
+    labels: dict[str, str],
+) -> str:
+    clean_label = _clean_template_display_label(labels.get(symbol_name))
+    return clean_label or _display_template_name(symbol_name)
+
+
+def _build_analysis_export_rows(
+    body: "AnalysisExportRequest",
+    templates_dir: Path,
+) -> list[dict]:
+    labels = _load_template_labels(templates_dir)
+    for key, value in (body.symbol_labels or {}).items():
+        clean_label = _clean_template_display_label(value)
+        if clean_label:
+            labels[str(key)] = clean_label
+
+    counts_by_symbol: OrderedDict[str, int] = OrderedDict()
+    colors_by_symbol: dict[str, str] = {}
+
+    if body.boxes:
+        for box in body.boxes:
+            symbol_name = str(box.symbol_name or "").strip()
+            if not symbol_name:
+                continue
+            counts_by_symbol[symbol_name] = counts_by_symbol.get(symbol_name, 0) + 1
+            if box.color:
+                colors_by_symbol.setdefault(symbol_name, box.color)
+    else:
+        for result in body.results:
+            symbol_name = str(result.name or "").strip()
+            if not symbol_name:
+                continue
+            count = max(0, int(result.count or 0))
+            counts_by_symbol[symbol_name] = counts_by_symbol.get(symbol_name, 0) + count
+            if result.color:
+                colors_by_symbol.setdefault(symbol_name, result.color)
+
+    aggregated: OrderedDict[str, dict] = OrderedDict()
+    for symbol_name, count in counts_by_symbol.items():
+        if count <= 0:
+            continue
+        element_name = _export_label_for_symbol(symbol_name, labels)
+        aggregate_key = " ".join(element_name.casefold().split())
+        if aggregate_key not in aggregated:
+            aggregated[aggregate_key] = {
+                "element": element_name,
+                "count": 0,
+                "templateIds": [],
+                "color": colors_by_symbol.get(symbol_name),
+            }
+        aggregated[aggregate_key]["count"] += count
+        if symbol_name not in aggregated[aggregate_key]["templateIds"]:
+            aggregated[aggregate_key]["templateIds"].append(symbol_name)
+
+    return list(aggregated.values())
+
+
+def _xlsx_col_name(index: int) -> str:
+    letters = ""
+    while index > 0:
+        index, remainder = divmod(index - 1, 26)
+        letters = chr(65 + remainder) + letters
+    return letters
+
+
+def _xlsx_cell_ref(row_index: int, col_index: int) -> str:
+    return f"{_xlsx_col_name(col_index)}{row_index}"
+
+
+def _xml_attr(value: object) -> str:
+    return xml_escape(str(value), {'"': "&quot;"})
+
+
+def _xlsx_cell(row_index: int, col_index: int, value: object, style: int = 0) -> str:
+    ref = _xlsx_cell_ref(row_index, col_index)
+    style_attr = f' s="{style}"' if style else ""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return f'<c r="{ref}"{style_attr}><v>{value}</v></c>'
+    text = xml_escape("" if value is None else str(value))
+    return (
+        f'<c r="{ref}" t="inlineStr"{style_attr}>'
+        f'<is><t xml:space="preserve">{text}</t></is></c>'
+    )
+
+
+def _format_export_datetime(raw_value: object) -> str:
+    raw = str(raw_value or "").strip()
+    if not raw:
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    except ValueError:
+        return raw
+
+
+def _xlsx_sheet_xml(sheet_rows: list[list[tuple[object, int]]], data_rows_count: int) -> str:
+    max_row = max(1, len(sheet_rows))
+    max_col = max((len(row) for row in sheet_rows), default=4)
+    dimension = f"A1:{_xlsx_cell_ref(max_row, max_col)}"
+    rows_xml = []
+    for row_index, row in enumerate(sheet_rows, start=1):
+        row_attrs = ' ht="24" customHeight="1"' if row_index == 1 else ""
+        cells_xml = "".join(
+            _xlsx_cell(row_index, col_index, value, style)
+            for col_index, (value, style) in enumerate(row, start=1)
+        )
+        rows_xml.append(f'<row r="{row_index}"{row_attrs}>{cells_xml}</row>')
+
+    data_end_row = 6 + max(0, data_rows_count)
+    auto_filter_ref = f"A6:D{max(6, data_end_row)}"
+
+    return f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <dimension ref="{dimension}"/>
+  <sheetViews>
+    <sheetView workbookViewId="0">
+      <pane ySplit="6" topLeftCell="A7" activePane="bottomLeft" state="frozen"/>
+    </sheetView>
+  </sheetViews>
+  <sheetFormatPr defaultRowHeight="18"/>
+  <cols>
+    <col min="1" max="1" width="8" customWidth="1"/>
+    <col min="2" max="2" width="54" customWidth="1"/>
+    <col min="3" max="3" width="12" customWidth="1"/>
+    <col min="4" max="4" width="34" customWidth="1"/>
+  </cols>
+  <sheetData>
+    {''.join(rows_xml)}
+  </sheetData>
+  <autoFilter ref="{auto_filter_ref}"/>
+  <mergeCells count="1"><mergeCell ref="A1:D1"/></mergeCells>
+  <pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/>
+</worksheet>'''
+
+
+def _xlsx_styles_xml() -> str:
+    return '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="5">
+    <font><sz val="11"/><color theme="1"/><name val="Calibri"/></font>
+    <font><b/><sz val="16"/><color rgb="FF1F2937"/><name val="Calibri"/></font>
+    <font><b/><sz val="11"/><color rgb="FF6B7280"/><name val="Calibri"/></font>
+    <font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font>
+    <font><b/><sz val="11"/><color rgb="FF1F2937"/><name val="Calibri"/></font>
+  </fonts>
+  <fills count="4">
+    <fill><patternFill patternType="none"/></fill>
+    <fill><patternFill patternType="gray125"/></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FFC6A87C"/><bgColor indexed="64"/></patternFill></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FFE5E7EB"/><bgColor indexed="64"/></patternFill></fill>
+  </fills>
+  <borders count="2">
+    <border><left/><right/><top/><bottom/><diagonal/></border>
+    <border>
+      <left style="thin"><color rgb="FFD1D5DB"/></left>
+      <right style="thin"><color rgb="FFD1D5DB"/></right>
+      <top style="thin"><color rgb="FFD1D5DB"/></top>
+      <bottom style="thin"><color rgb="FFD1D5DB"/></bottom>
+      <diagonal/>
+    </border>
+  </borders>
+  <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+  <cellXfs count="7">
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
+    <xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0"/>
+    <xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0"/>
+    <xf numFmtId="0" fontId="3" fillId="2" borderId="1" xfId="0" applyFill="1" applyBorder="1"><alignment horizontal="center"/></xf>
+    <xf numFmtId="1" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1"><alignment horizontal="center"/></xf>
+    <xf numFmtId="0" fontId="4" fillId="3" borderId="1" xfId="0" applyFill="1" applyBorder="1"/>
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1"><alignment wrapText="1" vertical="top"/></xf>
+  </cellXfs>
+  <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
+  <dxfs count="0"/>
+  <tableStyles count="0" defaultTableStyle="TableStyleMedium2" defaultPivotStyle="PivotStyleLight16"/>
+</styleSheet>'''
+
+
+def _build_analysis_export_xlsx(
+    *,
+    project: dict,
+    rows: list[dict],
+    analysis_context: dict | None = None,
+) -> bytes:
+    context = analysis_context or {}
+    source_pdf = context.get("sourcePdf") or ""
+    analysis_id = context.get("analysisId") or ""
+    generated_at = _format_export_datetime(context.get("generatedAtUtc"))
+    total_count = sum(int(row.get("count") or 0) for row in rows)
+
+    sheet_rows: list[list[tuple[object, int]]] = [
+        [("ElektroScan AI - zestawienie elementów", 1)],
+        [("Projekt", 2), (project.get("name") or project.get("id") or "", 0)],
+        [("PDF", 2), (source_pdf, 0)],
+        [("Analiza", 2), (generated_at, 0)],
+        [("ID analizy", 2), (analysis_id, 0)],
+        [("Lp.", 3), ("Element", 3), ("Ilość", 3), ("Wzorce", 3)],
+    ]
+
+    for index, row in enumerate(rows, start=1):
+        sheet_rows.append(
+            [
+                (index, 4),
+                (row.get("element", ""), 6),
+                (int(row.get("count") or 0), 4),
+                (", ".join(row.get("templateIds") or []), 6),
+            ]
+        )
+
+    sheet_rows.append(
+        [
+            ("", 5),
+            ("Razem", 5),
+            (total_count, 5),
+            ("", 5),
+        ]
+    )
+
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    sheet_xml = _xlsx_sheet_xml(sheet_rows, data_rows_count=len(rows))
+    workbook_xml = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets><sheet name="Wyniki" sheetId="1" r:id="rId1"/></sheets>
+</workbook>'''
+    workbook_rels_xml = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>'''
+    rels_xml = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>
+</Relationships>'''
+    content_types_xml = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+  <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
+  <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>
+</Types>'''
+    core_xml = f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <dc:creator>ElektroScan AI</dc:creator>
+  <cp:lastModifiedBy>ElektroScan AI</cp:lastModifiedBy>
+  <dcterms:created xsi:type="dcterms:W3CDTF">{now_iso}</dcterms:created>
+  <dcterms:modified xsi:type="dcterms:W3CDTF">{now_iso}</dcterms:modified>
+</cp:coreProperties>'''
+    app_xml = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">
+  <Application>ElektroScan AI</Application>
+  <DocSecurity>0</DocSecurity>
+  <ScaleCrop>false</ScaleCrop>
+  <HeadingPairs><vt:vector size="2" baseType="variant"><vt:variant><vt:lpstr>Worksheets</vt:lpstr></vt:variant><vt:variant><vt:i4>1</vt:i4></vt:variant></vt:vector></HeadingPairs>
+  <TitlesOfParts><vt:vector size="1" baseType="lpstr"><vt:lpstr>Wyniki</vt:lpstr></vt:vector></TitlesOfParts>
+</Properties>'''
+
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", content_types_xml)
+        archive.writestr("_rels/.rels", rels_xml)
+        archive.writestr("docProps/core.xml", core_xml)
+        archive.writestr("docProps/app.xml", app_xml)
+        archive.writestr("xl/workbook.xml", workbook_xml)
+        archive.writestr("xl/_rels/workbook.xml.rels", workbook_rels_xml)
+        archive.writestr("xl/styles.xml", _xlsx_styles_xml())
+        archive.writestr("xl/worksheets/sheet1.xml", sheet_xml)
+    return output.getvalue()
+
+
+def _export_filename(project: dict, analysis_context: dict | None = None) -> str:
+    context = analysis_context or {}
+    raw_name = context.get("sourcePdf") or project.get("name") or "wyniki"
+    stem = Path(str(raw_name)).stem
+    safe = re.sub(r"[^\w.-]+", "_", stem, flags=re.UNICODE).strip("._")
+    if not safe:
+        safe = "wyniki"
+    return f"elektroscan_{safe[:80]}_wyniki.xlsx"
 
 
 def _slowest_stages(timings_ms: dict[str, float], limit: int = 8) -> list[dict]:
@@ -1208,9 +1609,14 @@ async def _extract_legend_response(
             legend_rect_px = legend_bundle.used_legend_rect_px_300
 
             if symbols:
+                display_labels = _legend_display_labels_from_drafts(
+                    legend_bundle.vector_drafts,
+                    len(symbols),
+                )
                 added_template_ids = _append_extracted_templates(
                     Path(extraction_dir),
                     templates_dir,
+                    display_labels=display_labels,
                 )
 
         legend_metadata = {
@@ -1226,8 +1632,9 @@ async def _extract_legend_response(
 
         if not symbols:
             patterns_list = []
+            labels = _load_template_labels(templates_dir)
             for template_path in sorted(templates_dir.glob("*.png")):
-                payload = _template_payload_from_path(template_path)
+                payload = _template_payload_from_path(template_path, labels)
                 if payload is None:
                     continue
                 payload["status"] = "existing"
@@ -1245,8 +1652,9 @@ async def _extract_legend_response(
             }
 
         patterns_list = []
+        labels = _load_template_labels(templates_dir)
         for template_path in sorted(templates_dir.glob("*.png")):
-            payload = _template_payload_from_path(template_path)
+            payload = _template_payload_from_path(template_path, labels)
             if payload is None:
                 continue
             payload["status"] = "pending" if payload["id"] in added_template_ids else "existing"
@@ -1306,6 +1714,30 @@ class AnalyzeRequest(BaseModel):
     detector_profile: Optional[str] = "auto"
     legend_zone: Optional[LegendZone] = None
     plan_zone: Optional[LegendZone] = None
+
+
+class AnalysisExportResult(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    name: str = ""
+    count: int = 0
+    color: Optional[str] = None
+
+
+class AnalysisExportBox(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+
+    symbol_name: str = Field(default="", alias="symbolName")
+    color: Optional[str] = None
+
+
+class AnalysisExportRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+
+    results: list[AnalysisExportResult] = Field(default_factory=list)
+    boxes: list[AnalysisExportBox] = Field(default_factory=list)
+    analysis_context: dict = Field(default_factory=dict, alias="analysisContext")
+    symbol_labels: dict[str, str] = Field(default_factory=dict, alias="symbolLabels")
 
 
 class RoiInspectRequest(BaseModel):
@@ -1735,6 +2167,32 @@ def api_project_analyze(
     )
 
 
+@app.post("/api/projects/{project_id}/analysis-export")
+def api_project_analysis_export(
+    project_id: str,
+    body: AnalysisExportRequest,
+    user: dict = Depends(require_user),
+):
+    project = _project_or_404(project_id, user)
+    rows = _build_analysis_export_rows(body, _project_templates_dir(project_id))
+    if not rows:
+        raise HTTPException(status_code=400, detail="Brak wyników analizy do eksportu.")
+
+    workbook = _build_analysis_export_xlsx(
+        project=project,
+        rows=rows,
+        analysis_context=body.analysis_context,
+    )
+    filename = _export_filename(project, body.analysis_context)
+    return Response(
+        content=workbook,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
+        },
+    )
+
+
 def _inspect_roi_response(
     session_id: str,
     body: RoiInspectRequest,
@@ -1945,9 +2403,10 @@ async def api_get_templates():
 
 def _templates_response(templates_dir: Path) -> dict:
     patterns_list = []
+    labels = _load_template_labels(templates_dir)
     if templates_dir.exists():
         for file_path in sorted(templates_dir.glob("*.png")):
-            payload = _template_payload_from_path(file_path)
+            payload = _template_payload_from_path(file_path, labels)
             if payload is not None:
                 patterns_list.append(payload)
     return {"patterns": patterns_list}
@@ -2038,12 +2497,7 @@ async def _crop_template_response(
             raise HTTPException(status_code=400, detail="Zaznaczenie wzorca jest puste.")
 
         old_path = _template_path_for_id(template_name, templates_dir)
-        if body.name:
-            target_stem = _renamed_template_stem(
-                old_path.stem if old_path is not None else template_name,
-                body.name,
-            )
-        elif old_path is not None:
+        if old_path is not None:
             target_stem = old_path.stem
         else:
             target_stem = _safe_template_stem(template_name)
@@ -2063,6 +2517,10 @@ async def _crop_template_response(
 
         if old_path is not None and old_path != target_path:
             old_path.unlink(missing_ok=True)
+            _delete_template_display_label(templates_dir, old_path.stem)
+
+        if body.name:
+            _set_template_display_label(templates_dir, target_stem, body.name)
 
         payload = _template_payload_from_path(target_path)
         if payload is None:
@@ -2111,13 +2569,8 @@ def _update_template_response(
         payload = _template_payload_from_path(target)
         return {"message": "Brak zmian.", "pattern": payload}
 
-    new_stem = _renamed_template_stem(target.stem, body.name)
-    new_path = templates_dir / f"{new_stem}.png"
-    if new_path != target and new_path.exists():
-        raise HTTPException(status_code=409, detail=f"Wzorzec '{new_stem}' już istnieje.")
-
-    target.rename(new_path)
-    payload = _template_payload_from_path(new_path)
+    _set_template_display_label(templates_dir, target.stem, body.name)
+    payload = _template_payload_from_path(target)
     if payload is None:
         raise HTTPException(status_code=500, detail="Nie udało się odczytać wzorca po zmianie.")
     return {"message": f"Wzorzec zmieniony na '{payload['name']}'.", "pattern": payload}
@@ -2161,6 +2614,7 @@ def _delete_template_response(template_name: str, templates_dir: Path) -> dict:
         raise HTTPException(status_code=404, detail="Nie znaleziono wzorca.")
 
     target.unlink()
+    _delete_template_display_label(templates_dir, target.stem)
     return {"message": f"Wzorzec '{template_name}' usunięty."}
 
 

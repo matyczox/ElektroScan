@@ -52,6 +52,7 @@ PATCH /api/projects/{project_id}
 DELETE /api/projects/{project_id}
 GET /api/projects/{project_id}/analysis-runs
 GET /api/projects/{project_id}/analysis-runs/{analysis_id}
+POST /api/projects/{project_id}/analysis-export
 ```
 
 Projekt jest właścicielskim workspace użytkownika. Dane robocze projektu żyją
@@ -76,6 +77,33 @@ Historia analiz jest zapisywana po udanym
 `POST /api/projects/{project_id}/analyze` i dostępna przez `/analysis-runs`.
 Frontend odtwarza ostatnią zakończoną analizę dla aktualnego `latestSessionId`
 przez `GET /api/projects/{project_id}/analysis-runs/{analysis_id}`.
+
+Eksport wyników:
+
+- `POST /api/projects/{project_id}/analysis-export` zwraca plik `.xlsx` jako
+  `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`.
+- Body jest wysyłane z frontendu po korektach:
+
+```json
+{
+  "results": [{ "name": "01_TM", "count": 10, "color": "#ef4444" }],
+  "boxes": [{ "symbolName": "01_TM", "color": "#ef4444" }],
+  "analysisContext": {
+    "analysisId": "...",
+    "sourcePdf": "plan.pdf",
+    "generatedAtUtc": "..."
+  },
+  "symbolLabels": {
+    "01_TM": "rozdzielnica glowna mieszkaniowa"
+  }
+}
+```
+
+Jeżeli `boxes` istnieją, backend liczy ilości po nich, żeby uwzględnić odrzucone
+detekcje i ręczne zmiany klasy symbolu. Gdy `boxes` jest puste, fallbackiem są
+liczby z `results`. Nazwy są mapowane przez `.template_labels.json` oraz
+`symbolLabels`, a kilka technicznych wzorców z tą samą etykietą jest agregowane
+w jeden wiersz.
 
 ### Upload i Sesja
 
@@ -215,6 +243,7 @@ GET    /api/projects/{project_id}/layers
 POST   /api/projects/{project_id}/render-preview
 POST   /api/projects/{project_id}/extract-legend
 POST   /api/projects/{project_id}/analyze
+POST   /api/projects/{project_id}/analysis-export
 POST   /api/projects/{project_id}/inspect-roi
 POST   /api/projects/{project_id}/gray-debug-zones
 GET    /api/projects/{project_id}/templates
@@ -268,6 +297,7 @@ Kliknięcie boxa w CanvasView kopiuje payload do schowka. Zawiera:
 - Usunąć fałszywy finalny box.
 - Zmienić klasę finalnego boxa.
 - Zmienić nazwę grupy wyników w prawym panelu.
+- Wyeksportować aktualne zestawienie ilości do `.xlsx` w zakładce `Eksport`.
 - Dodać ręczny box z toolbaru/trybu dodawania, jeżeli flow UI to udostępnia.
 - Użyć Inspektora ROI do diagnostyki lokalnego obszaru.
 
@@ -279,11 +309,16 @@ Kliknięcie boxa w CanvasView kopiuje payload do schowka. Zawiera:
 - Przycisk czyszczenia wzorców używa endpointu projektowego albo legacy
   `DELETE /api/templates`, zależnie od trybu.
 
-## Kosztorys Wykonawczy (CostPanel)
+## Eksport Wyników (ResultsPanel)
 
-Panel po prawej stronie UI. Dla każdego symbolu z wyników detekcji:
-- Ilość wykrytych instancji (readonly z wyników).
-- Pole ceny netto PLN (edytowalne).
-- Suma całkowita na dole.
+Zakładka `Eksport` w prawym panelu pokazuje aktualne ilości po korektach i
+wywołuje `POST /api/projects/{project_id}/analysis-export`. Plik `.xlsx`
+zawiera minimum:
 
-Stan cen żyje tylko w React — nie jest persystowany ani wysyłany do backendu. Nie jest częścią silnika detekcji; to narzędzie pomocnicze do wstępnego kosztorysu.
+- nazwę projektu i PDF,
+- identyfikator/czas analizy, jeśli jest dostępny,
+- tabelę `Lp.`, `Element`, `Ilość`, `Wzorce`,
+- wiersz `Razem`.
+
+Dawny `CostPanel` z ceną netto PLN zostaje legacy. Stan cen nie jest
+persystowany i nie jest aktualnym produkcyjnym flow.
