@@ -57,6 +57,24 @@ def test_red_color_mask_excludes_black_and_purple_annotations():
     assert cv2.countNonZero(mask[10:30, 70:95]) == 0
 
 
+def test_saturated_template_mask_excludes_neighboring_label_hue():
+    hsv = np.array(
+        [
+            [
+                [150, 255, 255],  # reviewed magenta symbol color
+                [135, 255, 255],  # nearby purple label color
+            ]
+        ],
+        dtype=np.uint8,
+    )
+    plan_image = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+
+    mask = _color_mask_for_template(plan_image, (150, 255, 255), dilate=False, hsv_image=hsv)
+
+    assert mask[0, 0] > 0
+    assert mask[0, 1] == 0
+
+
 def test_color_roi_inspector_reports_template_color_scan_mask(tmp_path):
     template_image = _red_plan(width=40, height=30)
     template_image[6:24, 6:30] = (0, 0, 255)

@@ -391,16 +391,23 @@ def _color_mask_for_template(
     """Create a color-specific binary mask aligned to the template hue."""
 
     h, s, v = dominant_hsv
+    hue_tolerance = COLOR_HUE_TOLERANCE
+    if s >= 160 and v >= 120:
+        # Digital-born electrical plans tend to use flat, highly saturated
+        # palette colors. A broad hue window lets unrelated purple labels
+        # leak into magenta symbol masks, so keep saturated template masks
+        # close to the reviewed legend color.
+        hue_tolerance = min(hue_tolerance, 10)
     lower1 = np.array(
         [
-            max(0, h - COLOR_HUE_TOLERANCE),
+            max(0, h - hue_tolerance),
             max(0, s - COLOR_SAT_TOLERANCE),
             max(0, v - COLOR_VAL_TOLERANCE),
         ]
     )
     upper1 = np.array(
         [
-            min(180, h + COLOR_HUE_TOLERANCE),
+            min(180, h + hue_tolerance),
             min(255, s + COLOR_SAT_TOLERANCE),
             min(255, v + COLOR_VAL_TOLERANCE),
         ]
@@ -409,13 +416,13 @@ def _color_mask_for_template(
     hsv = hsv_image if hsv_image is not None else cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(hsv, lower1, upper1)
 
-    if h - COLOR_HUE_TOLERANCE < 0:
-        lower2 = np.array([180 + h - COLOR_HUE_TOLERANCE, lower1[1], lower1[2]])
+    if h - hue_tolerance < 0:
+        lower2 = np.array([180 + h - hue_tolerance, lower1[1], lower1[2]])
         upper2 = np.array([180, upper1[1], upper1[2]])
         mask = cv2.bitwise_or(mask, cv2.inRange(hsv, lower2, upper2))
-    elif h + COLOR_HUE_TOLERANCE > 180:
+    elif h + hue_tolerance > 180:
         lower2 = np.array([0, lower1[1], lower1[2]])
-        upper2 = np.array([h + COLOR_HUE_TOLERANCE - 180, upper1[1], upper1[2]])
+        upper2 = np.array([h + hue_tolerance - 180, upper1[1], upper1[2]])
         mask = cv2.bitwise_or(mask, cv2.inRange(hsv, lower2, upper2))
 
     if dilate:

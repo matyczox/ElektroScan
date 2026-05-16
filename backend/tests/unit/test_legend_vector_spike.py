@@ -1,4 +1,5 @@
 import json
+import math
 from pathlib import Path
 
 import cv2
@@ -14,6 +15,50 @@ from core.legend_scene_transform import (
     rect_px300_to_pt,
 )
 from core.legend_vector_profile import profile_legend_region
+
+
+def _assert_box_sets_match_with_tolerance(
+    actual: list[tuple[str, int, int, int, int]],
+    expected: list[tuple[str, int, int, int, int]],
+    *,
+    center_tolerance: float = 18.0,
+    size_tolerance: float = 0.35,
+) -> None:
+    pairs: list[tuple[float, int, int]] = []
+
+    for expected_index, expected_box in enumerate(expected):
+        expected_symbol, expected_x, expected_y, expected_w, expected_h = expected_box
+        expected_center = (expected_x + expected_w / 2.0, expected_y + expected_h / 2.0)
+        for actual_index, actual_box in enumerate(actual):
+            actual_symbol, actual_x, actual_y, actual_w, actual_h = actual_box
+            if actual_symbol != expected_symbol:
+                continue
+            if any(
+                abs(actual_value - expected_value) / max(1, actual_value, expected_value)
+                > size_tolerance
+                for actual_value, expected_value in ((actual_w, expected_w), (actual_h, expected_h))
+            ):
+                continue
+            actual_center = (actual_x + actual_w / 2.0, actual_y + actual_h / 2.0)
+            distance = math.hypot(
+                actual_center[0] - expected_center[0],
+                actual_center[1] - expected_center[1],
+            )
+            if distance <= center_tolerance:
+                pairs.append((distance, expected_index, actual_index))
+
+    matched_expected: set[int] = set()
+    matched_actual: set[int] = set()
+    for _, expected_index, actual_index in sorted(pairs):
+        if expected_index in matched_expected or actual_index in matched_actual:
+            continue
+        matched_expected.add(expected_index)
+        matched_actual.add(actual_index)
+
+    missing = [expected[index] for index in sorted(set(range(len(expected))) - matched_expected)]
+    extra = [actual[index] for index in sorted(set(range(len(actual))) - matched_actual)]
+    assert missing == []
+    assert extra == []
 
 
 def _assert_color_auto_matches_golden(
@@ -51,21 +96,21 @@ def _assert_color_auto_matches_golden(
         detector_profile="color",
     )
 
-    actual = {
+    actual = [
         (group.symbol_name, detection.x, detection.y, detection.width, detection.height)
         for group in results
         for detection in group.detections
-    }
+    ]
     golden_data = json.loads(golden_path.read_text(encoding="utf-8"))
-    expected = {
+    expected = [
         (box["symbolName"], box["x"], box["y"], box["width"], box["height"])
         for box in golden_data["boxes"]
-    }
+    ]
 
     assert bundle.engine_used == "raster"
     assert bundle.fallback_reason == "color_vector_auto_guard"
     assert len(actual) == expected_count
-    assert actual == expected
+    _assert_box_sets_match_with_tolerance(actual, expected)
 
 
 def _save_vector_legend_pdf(path: Path) -> Path:

@@ -11,6 +11,7 @@ from core.detector_clustering import (
     _box_center,
     _center_inside_box,
     _candidate_rank_key,
+    _cluster_candidates,
     _select_cluster_winner,
 )
 from core.detector_models import CandidateHit
@@ -261,3 +262,44 @@ class TestColorTextLabelSelection:
         )
 
         assert winner is full_int
+
+
+class TestColorClusterSatellites:
+    def test_keeps_strong_adjacent_medium_color_symbol_through_bridge_cluster(self):
+        winner = _make_hit(
+            template_id=22,
+            bbox=(0, 40, 58, 53),
+            match_score=0.89,
+            verification_score=0.84,
+            coverage=0.92,
+            purity=0.91,
+            context_purity=0.59,
+            dominant_hsv=(150, 255, 230),
+        )
+        adjacent_full_symbol = _make_hit(
+            template_id=21,
+            bbox=(40, 50, 58, 52),
+            match_score=0.74,
+            verification_score=0.74,
+            coverage=0.91,
+            purity=0.74,
+            context_purity=0.57,
+            dominant_hsv=(150, 255, 230),
+        )
+        bridge = _make_hit(
+            template_id=21,
+            bbox=(20, 45, 58, 52),
+            match_score=0.54,
+            verification_score=0.56,
+            coverage=0.62,
+            purity=0.72,
+            context_purity=0.44,
+            dominant_hsv=(150, 255, 230),
+        )
+
+        clustered = _cluster_candidates([winner, adjacent_full_symbol, bridge])
+
+        clustered_ids = {id(hit) for hit in clustered}
+        assert id(winner) in clustered_ids
+        assert id(adjacent_full_symbol) in clustered_ids
+        assert id(bridge) not in clustered_ids

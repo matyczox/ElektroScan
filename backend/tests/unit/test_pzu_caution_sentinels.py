@@ -70,11 +70,21 @@ def test_pzu_caution_fixture_uses_full_caution_baseline_and_reviewed_templates()
 
     assert manifest["caution"] is True
     assert manifest["sentinelOnly"] is False
-    assert manifest["snapshotCompareGate"] is False
+    assert manifest["snapshotCompareGate"] is True
     assert manifest["extractTemplatesFresh"] is False
     assert manifest["focus"] == "*"
     assert len(list((fixture_dir / "templates").glob("*.png"))) == 29
     assert golden["metadata"]["releaseGate"] is False
+    assert golden["metadata"]["snapshotCompareGate"] is True
     assert golden["metadata"]["sentinelOnly"] is False
     assert len(golden["boxes"]) > 300
     assert len(golden["manualSentinels"]) >= 8
+    visual_text_families = {"L", "AW", "EW", "TB"}
+    visual_pdf_text_boxes = [
+        box
+        for box in golden["boxes"]
+        if box.get("source") == "pdf_text"
+        and str(box.get("symbolName", "")).split("_", 1)[-1].rstrip("0123456789")
+        in visual_text_families
+    ]
+    assert visual_pdf_text_boxes == []

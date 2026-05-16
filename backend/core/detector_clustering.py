@@ -84,6 +84,53 @@ def _box_center(box: tuple[int, int, int, int]) -> tuple[float, float]:
     return (x + w / 2.0, y + h / 2.0)
 
 
+def _is_separate_vertical_color_stack(hit_a: CandidateHit, hit_b: CandidateHit) -> bool:
+    """Keep compact same-hue symbols separate when they form a vertical stack."""
+
+    if hit_a.dominant_hsv is None or hit_b.dominant_hsv is None:
+        return False
+    if hit_a.is_text_label or hit_b.is_text_label:
+        return False
+    if _hue_distance(hit_a.dominant_hsv[0], hit_b.dominant_hsv[0]) > (
+        COLOR_HUE_TOLERANCE + 6
+    ):
+        return False
+
+    area_a = max(1, hit_a.bbox[2] * hit_a.bbox[3])
+    area_b = max(1, hit_b.bbox[2] * hit_b.bbox[3])
+    if max(area_a, area_b) > 4_500:
+        return False
+
+    aspect_a = max(hit_a.bbox[2], hit_a.bbox[3]) / max(1, min(hit_a.bbox[2], hit_a.bbox[3]))
+    aspect_b = max(hit_b.bbox[2], hit_b.bbox[3]) / max(1, min(hit_b.bbox[2], hit_b.bbox[3]))
+    if max(aspect_a, aspect_b) > 1.75:
+        return False
+
+    inter_area, _iou, iom, _center_distance = _bbox_metrics(hit_a.bbox, hit_b.bbox)
+    if inter_area <= 0 or iom >= 0.58:
+        return False
+
+    x_overlap = _axis_overlap_fraction(
+        hit_a.bbox[0],
+        hit_a.bbox[2],
+        hit_b.bbox[0],
+        hit_b.bbox[2],
+    )
+    y_overlap = _axis_overlap_fraction(
+        hit_a.bbox[1],
+        hit_a.bbox[3],
+        hit_b.bbox[1],
+        hit_b.bbox[3],
+    )
+    if x_overlap < 0.40 or y_overlap >= 0.48:
+        return False
+
+    _ax, ay, _aw, ah = hit_a.bbox
+    _bx, by, _bw, bh = hit_b.bbox
+    center_gap_y = abs((ay + ah / 2.0) - (by + bh / 2.0))
+    return center_gap_y >= min(ah, bh) * 0.58
+
+
 def _center_inside_box(
     center: tuple[float, float],
     box: tuple[int, int, int, int],
@@ -110,6 +157,9 @@ def _should_cluster(hit_a: CandidateHit, hit_b: CandidateHit) -> bool:
     centers_nested = _center_inside_box(center_a, hit_b.bbox) or _center_inside_box(
         center_b, hit_a.bbox
     )
+
+    if _is_separate_vertical_color_stack(hit_a, hit_b):
+        return False
 
     if (
         hit_a.dominant_hsv is not None
@@ -1346,6 +1396,9 @@ def _color_fragment_suppression_reason(
         and (candidate.is_text_label or _is_color_label_like_shape(candidate))
         and (stronger.is_text_label or _is_color_label_like_shape(stronger))
     )
+    if _is_separate_vertical_color_stack(candidate, stronger):
+        return None
+
     same_template_duplicate = (
         candidate.template_id == stronger.template_id
         and 0.70 <= candidate_area / max(1, stronger_area) <= 1.35
@@ -1748,6 +1801,27 @@ def _is_strong_color_satellite_candidate(hit: CandidateHit) -> bool:
     return strong_direct_hit or strong_verified_full_symbol
 
 
+def _is_strong_medium_color_symbol_candidate(hit: CandidateHit) -> bool:
+    """Keep a full adjacent color symbol that is larger than the compact-symbol guard."""
+
+    if hit.dominant_hsv is None or hit.source == "pdf_text" or hit.is_text_label:
+        return False
+    area = max(1, hit.bbox[2] * hit.bbox[3])
+    aspect = max(
+        float(hit.bbox[2]) / max(1.0, float(hit.bbox[3])),
+        float(hit.bbox[3]) / max(1.0, float(hit.bbox[2])),
+    )
+    if area < 2_200 or area > 3_600 or aspect > 1.55:
+        return False
+    return (
+        hit.match_score >= 0.62
+        and hit.verification_score >= 0.62
+        and hit.coverage >= 0.70
+        and hit.purity >= 0.70
+        and hit.context_purity >= 0.45
+    )
+
+
 def _is_strong_color_text_label_satellite_candidate(hit: CandidateHit) -> bool:
     """Keep validated color text labels from disappearing through transitive bridges."""
 
@@ -1839,6 +1913,7 @@ def _is_satellite_candidate(hit: CandidateHit) -> bool:
     return (
         _is_gray_satellite_candidate(hit)
         or _is_strong_color_satellite_candidate(hit)
+        or _is_strong_medium_color_symbol_candidate(hit)
         or _is_strong_color_text_label_satellite_candidate(hit)
         or _is_color_parent_label_satellite_candidate(hit)
     )
@@ -1846,6 +1921,14 @@ def _is_satellite_candidate(hit: CandidateHit) -> bool:
 
 def _satellite_rank_key(hit: CandidateHit) -> tuple[float, ...]:
     if _is_strong_color_satellite_candidate(hit):
+        return (
+            float(hit.verification_score),
+            float(hit.match_score),
+            float(hit.coverage),
+            float(hit.purity),
+            float(hit.context_purity),
+        )
+    if _is_strong_medium_color_symbol_candidate(hit):
         return (
             float(hit.verification_score),
             float(hit.match_score),

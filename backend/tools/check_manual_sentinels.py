@@ -92,7 +92,21 @@ def _matches_location(check: dict[str, Any], box: dict[str, Any]) -> bool:
         cx = (x0 + x1) / 2.0
         cy = (y0 + y1) / 2.0
         rx0, ry0, rx1, ry1 = roi
-        return rx0 <= cx <= rx1 and ry0 <= cy <= ry1
+        if rx0 <= cx <= rx1 and ry0 <= cy <= ry1:
+            return True
+
+        # Elongated symbols often have centers just outside a hand-marked ROI
+        # even when the visual symbol clearly overlaps the sentinel area.
+        ix0 = max(x0, rx0)
+        iy0 = max(y0, ry0)
+        ix1 = min(x1, rx1)
+        iy1 = min(y1, ry1)
+        inter = max(0.0, ix1 - ix0) * max(0.0, iy1 - iy0)
+        if inter <= 0:
+            return False
+        box_area = max(1.0, (x1 - x0) * (y1 - y0))
+        roi_area = max(1.0, (rx1 - rx0) * (ry1 - ry0))
+        return inter / min(box_area, roi_area) >= float(check.get("minOverlap", 0.35))
 
     near = _near_point(check)
     if near is None:

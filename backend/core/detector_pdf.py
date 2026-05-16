@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 
 import fitz
 import numpy as np
@@ -75,6 +76,26 @@ def _quad_rotation(quad: fitz.Quad) -> int:
         return 0
 
 
+def _word_matches_token(word_text: str, token: str) -> bool:
+    """Exact PDF-token match for short labels.
+
+    MuPDF search_for() is substring based, so searching for "L3" also finds
+    "RL3" / "SL3". For detector labels we need full token semantics.
+    """
+
+    clean_word = str(word_text or "").strip().upper()
+    clean_token = str(token or "").strip().upper()
+    if not clean_word or not clean_token:
+        return False
+    if clean_word == clean_token:
+        return True
+    # Keep punctuation-separated spellings like "TB1.1" out of short label
+    # fallback unless the normalized full token is exactly the template token.
+    normalized_word = re.sub(r"[^A-Z0-9]+", "", clean_word)
+    normalized_token = re.sub(r"[^A-Z0-9]+", "", clean_token)
+    return bool(normalized_word and normalized_word == normalized_token)
+
+
 def _collect_pdf_text_hits(
     pdf_path: str,
     templates: list[TemplateInfo],
@@ -104,16 +125,11 @@ def _collect_pdf_text_hits(
             if cache_key in token_rect_cache:
                 return token_rect_cache[cache_key]
 
-            quads = page.search_for(token, quads=True)
-            if quads:
-                token_rect_cache[cache_key] = list(quads)
-                return token_rect_cache[cache_key]
-
             matches: list[fitz.Rect] = []
             for word in page_words:
                 if len(word) < 5:
                     continue
-                if str(word[4]).upper() == cache_key:
+                if _word_matches_token(str(word[4]), cache_key):
                     matches.append(fitz.Rect(word[0], word[1], word[2], word[3]))
 
             token_rect_cache[cache_key] = matches
