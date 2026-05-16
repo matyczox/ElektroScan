@@ -14,7 +14,12 @@ backend bez czytania kilku tysiecy linii naraz.
 - `detector_masks.py` buduje maski koloru/szarego tuszu i metryki fragmentow.
 - `detector_pdf.py` czyta pomocniczy tekst PDF; tekst nie jest prawda wizualna.
 - `detector_context.py` trzyma czyste helpery tokenow, bboxow i trace input.
+- `detector_pdf_policy.py` decyduje, ktore PDF text fallbacki moga zostac
+  finalnymi hitami, a ktore tylko evidence/debug.
+- `detector_color_resolvers.py` trzyma color-family postprocess: label resolver,
+  magenta, TB11/long-L i weak short-L cleanup.
 - `detector_postprocess.py` trzyma finalne operacje po wyborze hitow.
+- `detector_trace.py` zapisuje opcjonalny trace kandydatow dla ROI/symboli.
 
 ## Invariants
 
@@ -43,5 +48,5 @@ backend bez czytania kilku tysiecy linii naraz.
 ```powershell
 py -3.11 backend\tools\run_local_golden_regression.py --fixture pzu_bydgoszcz_el02_color --fixture pw_e_01_rev2_color --fixture pw_e_02_rev2_color
 py -3.11 -m pytest backend\tests -q
-npm run build
+npm run build  # w frontend\
 ```
