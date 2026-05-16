@@ -1,0 +1,34 @@
+{
+  "name": "pzu_bydgoszcz_el02_color",
+  "enabled": true,
+  "caution": true,
+  "sentinelOnly": false,
+  "snapshotCompareGate": false,
+  "notes": "PZU Bydgoszcz EL_02 color caution fixture. Uses manually reviewed project templates; this is not release-gating truth and does not auto-promote PZU output to accepted golden. Full boxes are diagnostic; manual sentinels are the gate.",
+  "pdfPath": "test_pdfs/PZU_ZDROWIE_BYDGOSZCZ - EL_02 - R00 - O\u015aWIETLENIE (1).PDF",
+  "templatesDir": "templates",
+  "golden": "../../golden/pzu_bydgoszcz_el02_color_caution.json",
+  "detectorProfile": "color",
+  "expectedProfile": "color",
+  "templateCount": 29,
+  "extractTemplatesFresh": false,
+  "legendMaskMode": "color",
+  "legendZone": {
+    "x": 4953,
+    "y": 3795,
+    "width": 1060,
+    "height": 1088
+  },
+  "excludedZones": [
+    {
+      "x": 4953,
+      "y": 3795,
+      "width": 1060,
+      "height": 1088
+    }
+  ],
+  "manualReviewPolicy": "caution_full_baseline_plus_manual_sentinels",
+  "focus": "*",
+  "centerTolerance": 24,
+  "sizeTolerance": 0.5
+}

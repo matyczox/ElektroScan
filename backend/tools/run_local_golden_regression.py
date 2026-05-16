@@ -18,6 +18,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from compare_analysis_snapshot import compare_snapshots  # noqa: E402
+from check_manual_sentinels import evaluate_sentinels  # noqa: E402
 from core.detector import detect_symbols  # noqa: E402
 from core.detector_templates import load_templates  # noqa: E402
 from core.legend_extractor import extract_legend, pdf_to_png  # noqa: E402
@@ -260,6 +261,7 @@ def _run_fixture(
                 f"total={stage_trace.get('totalCandidates')}"
             )
 
+    golden_payload = _read_json(golden_path)
     focus = tuple(part.strip() for part in str(manifest.get("focus", "")).split(",") if part.strip())
     compare_started = time.perf_counter()
     report = compare_snapshots(
@@ -269,15 +271,26 @@ def _run_fixture(
         center_tolerance=float(manifest.get("centerTolerance", 18)),
         size_tolerance=float(manifest.get("sizeTolerance", 0.35)),
     )
-    compare_elapsed = time.perf_counter() - compare_started
-    print(report)
-    print(f"Runner compare: {compare_elapsed:.3f}s")
-
-    failed = (
+    snapshot_compare_gate = bool(
+        manifest.get(
+            "snapshotCompareGate",
+            golden_payload.get("metadata", {}).get("snapshotCompareGate", True),
+        )
+    )
+    compare_failed = snapshot_compare_gate and (
         "Missing focus boxes: 0" not in report
         or "Extra focus boxes: 0" not in report
         or "Class conflicts near golden focus boxes: 0" not in report
     )
+    sentinels_ok, sentinels_report = evaluate_sentinels(golden_payload, _read_json(output_path))
+    compare_elapsed = time.perf_counter() - compare_started
+    print(report)
+    if not snapshot_compare_gate:
+        print("Snapshot compare gate: report-only caution fixture")
+    print(sentinels_report)
+    print(f"Runner compare: {compare_elapsed:.3f}s")
+
+    failed = compare_failed or not sentinels_ok
     perf_record = {
         "name": name,
         "passed": not failed,

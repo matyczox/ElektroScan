@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from compare_analysis_snapshot import compare_snapshots
+from check_manual_sentinels import evaluate_sentinels
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -248,6 +249,7 @@ def _run_fixture(
     print(f"Analyze: boxes={len(result.get('boxes') or [])} profile={used} elapsed={elapsed:.1f}s")
     print(f"Candidate: {candidate_path}")
 
+    golden_payload = _read_json(golden_path)
     focus = tuple(str(manifest.get("focus", "")).split(","))
     focus = tuple(item.strip() for item in focus if item.strip())
     compare_report = compare_snapshots(
@@ -258,13 +260,24 @@ def _run_fixture(
         size_tolerance=float(manifest.get("sizeTolerance", 0.5)),
     )
     print(compare_report)
+    snapshot_compare_gate = bool(
+        manifest.get(
+            "snapshotCompareGate",
+            golden_payload.get("metadata", {}).get("snapshotCompareGate", True),
+        )
+    )
+    if not snapshot_compare_gate:
+        print("Snapshot compare gate: report-only caution fixture")
+
+    sentinels_ok, sentinels_report = evaluate_sentinels(golden_payload, result)
+    print(sentinels_report)
 
     bad_markers = (
         "Missing focus boxes: 0",
         "Extra focus boxes: 0",
         "Class conflicts near golden focus boxes: 0",
     )
-    passed = all(marker in compare_report for marker in bad_markers)
+    passed = (not snapshot_compare_gate or all(marker in compare_report for marker in bad_markers)) and sentinels_ok
     print(f"RESULT {name}: {'PASS' if passed else 'FAIL'}")
     return passed
 

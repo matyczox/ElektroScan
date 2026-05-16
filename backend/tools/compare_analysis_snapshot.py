@@ -31,6 +31,8 @@ def _prefix(symbol_name: str) -> str:
 
 
 def _is_focus(symbol_name: str, focus_prefixes: tuple[str, ...]) -> bool:
+    if "*" in focus_prefixes or "all" in focus_prefixes:
+        return True
     return _prefix(symbol_name) in focus_prefixes
 
 
