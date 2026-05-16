@@ -5,6 +5,13 @@ pliki `backend/analysis_debug/`; te sa tymczasowe i zostaja poza gitem.
 
 ## Aktualne Goldeny
 
+- `pw_e_01_rev2_color_demo.json` - zaakceptowany kolorowy baseline PW-E-01,
+  profil `color`; release gate dla color path.
+- `pw_e_02_rev2_color_caution.json` - zaakceptowany kolorowy baseline PW-E-02,
+  profil `color`; release gate dla color path.
+- `pzu_bydgoszcz_el02_color_caution.json` - PZU Bydgoszcz EL_02, profil
+  `color`; caution baseline z manual sentinels. Snapshot pomaga diagnozowac
+  zmiany, ale release blokuje tylko zestaw sentinelowy.
 - `viking_bronisze_e8_gray_first_pdf_100pct.json` - pierwszy zaakceptowany
   szary PDF: `VIKING-BRONISZE-ELE-Rzuty-E8.pdf`, profil `gray`.
 - `viking_bronisze_e9_gray_second_pdf_idealny.json` - drugi zaakceptowany
@@ -15,6 +22,18 @@ pliki `backend/analysis_debug/`; te sa tymczasowe i zostaja poza gitem.
   pragmatyczny baseline 90-95%, nie jako overfit do 100%.
 
 ## Porownywanie
+
+Lokalne regresje bez UI/backend servera:
+
+```powershell
+py -3.11 backend\tools\run_local_golden_regression.py --fixture pzu_bydgoszcz_el02_color --fixture pw_e_01_rev2_color --fixture pw_e_02_rev2_color
+```
+
+Oczekiwany stan po stabilizacji color path:
+
+- `pzu_bydgoszcz_el02_color`: `318/318`, wszystkie manual sentinels fixed.
+- `pw_e_01_rev2_color`: `151/151`.
+- `pw_e_02_rev2_color`: `134/134`.
 
 Najwygodniej odpalic caly runner przez dzialajacy backend:
 
@@ -68,6 +87,9 @@ Inspektorze ROI. Nie aktualizuj goldena tylko dlatego, ze progi sie przesunely.
 ## Zasady
 
 - Nie commituj `backend/analysis_debug/`.
+- Nie commituj `backend/tests/output/`.
+- PZU traktuj jako caution/sentinel baseline, nie jako automatyczna prawde dla
+  wszystkich kolorowych PDF.
 - Nie uzywaj goldena Viking gray jako dowodu, ze wszystkie szare PDF dzialaja.
 - Nie mieszaj strojenia gray z kolorowym silnikiem.
 - Nie naprawiaj prawych blokow tytulowych/tekstowych progami detektora. Tam

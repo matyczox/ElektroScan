@@ -42,6 +42,17 @@ from core.detector_config import (
     SCALES,
     _safe_cpu_count,
 )
+from core.detector_context import (
+    DetectionTemplateContext,
+    bbox_iom,
+    center_distance,
+    center_inside,
+    expanded_box,
+    hue_close,
+    token_family,
+    trace_points_from_value,
+    trace_values_from_value,
+)
 from core.detector_diagnostics import (
     build_candidate_stage_counts,
     build_hit_flow_profile,
@@ -64,7 +75,12 @@ from core.detector_pdf import (
     _estimate_legend_exclude_rect,
     _estimate_title_block_exclude_rects,
 )
+from core.detector_pdf_policy import (
+    apply_color_pdf_text_class_hints,
+    filter_pdf_text_fallbacks,
+)
 from core.detector_parent_search import search_parent_candidates
+from core.detector_postprocess import dedupe_final_hits
 from core.detector_scanning import scan_template_candidates
 from core.detector_templates import (
     _build_socket_07_promotions,
@@ -135,358 +151,31 @@ def _detect_symbols_pipeline(
     if not isinstance(trace_input, dict):
         trace_input = {}
 
-    def _trace_values(value: object) -> list[str]:
-        if value is None:
-            return []
-        if isinstance(value, str):
-            return [part.strip() for part in value.replace(";", ",").split(",") if part.strip()]
-        if isinstance(value, (list, tuple, set)):
-            return [str(part).strip() for part in value if str(part).strip()]
-        return [str(value).strip()] if str(value).strip() else []
-
-    def _trace_points(value: object) -> list[tuple[float, float]]:
-        raw_values: list[object]
-        if value is None:
-            raw_values = []
-        elif isinstance(value, str):
-            raw_values = [part.strip() for part in value.split(";") if part.strip()]
-        elif isinstance(value, (list, tuple, set)):
-            raw_values = list(value)
-        else:
-            raw_values = [value]
-
-        points: list[tuple[float, float]] = []
-        for item in raw_values:
-            if isinstance(item, (list, tuple)) and len(item) >= 2:
-                points.append((float(item[0]), float(item[1])))
-                continue
-            parts = str(item).replace(":", ",").split(",")
-            if len(parts) >= 2:
-                points.append((float(parts[0].strip()), float(parts[1].strip())))
-        return points
-
-    trace_symbols = set(_trace_values(trace_input.get("symbols") or trace_input.get("symbol")))
-    trace_symbols.update(_trace_values(os.getenv("ELEKTROSCAN_TRACE_SYMBOLS")))
-    trace_points = _trace_points(trace_input.get("points") or trace_input.get("point"))
-    trace_points.extend(_trace_points(os.getenv("ELEKTROSCAN_TRACE_POINTS")))
+    trace_symbols = set(trace_values_from_value(trace_input.get("symbols") or trace_input.get("symbol")))
+    trace_symbols.update(trace_values_from_value(os.getenv("ELEKTROSCAN_TRACE_SYMBOLS")))
+    trace_points = trace_points_from_value(trace_input.get("points") or trace_input.get("point"))
+    trace_points.extend(trace_points_from_value(os.getenv("ELEKTROSCAN_TRACE_POINTS")))
     trace_radius = float(trace_input.get("radius") or os.getenv("ELEKTROSCAN_TRACE_RADIUS", 80))
     trace_max_items = int(trace_input.get("maxItems") or os.getenv("ELEKTROSCAN_TRACE_MAX_ITEMS", 40))
     candidate_trace_enabled = bool(trace_symbols or trace_points)
     candidate_trace: dict[str, dict] = {}
 
-    def _template_tokens(template_id: int) -> tuple[str, ...]:
-        if not (0 <= template_id < len(templates)):
-            return ()
-        return tuple(str(token).upper() for token in templates[template_id].text_tokens)
-
-    def _template_primary_token(template_id: int) -> str:
-        tokens = _template_tokens(template_id)
-        return tokens[0] if tokens else ""
-
-    def _token_family(token: str) -> str:
-        match = re.fullmatch(r"([A-Z]+)\d*", str(token or "").upper())
-        return match.group(1) if match else ""
-
-    def _template_token_family(template_id: int) -> str:
-        return _token_family(_template_primary_token(template_id))
-
-    def _template_name(template_id: int) -> str:
-        if not (0 <= template_id < len(templates)):
-            return ""
-        return templates[template_id].name
-
-    def _is_visual_pdf_text_blocked(template_id: int) -> bool:
-        return _template_token_family(template_id) in {"L", "AW", "EW", "TB"}
-
-    def _l_label_group(template_id: int) -> str:
-        name = _template_name(template_id).upper()
-        if re.fullmatch(r"0[1-6]_L[1-6]", name):
-            return "block"
-        if name in {"07_L7", "10_L10", "11_L11", "12_L12", "13_L13"}:
-            return "long"
-        return ""
-
-    def _is_magenta_family_template(template_id: int) -> bool:
-        template = templates[template_id] if 0 <= template_id < len(templates) else None
-        return (
-            template is not None
-            and template.dominant_hsv is not None
-            and 135 <= int(template.dominant_hsv[0]) <= 165
-            and re.match(r"^\d+_sym_\d+", template.name) is not None
-        )
-
-    def _magenta_template_code(template_id: int) -> int | None:
-        match = re.match(r"^\d+_sym_(\d+)", _template_name(template_id))
-        return int(match.group(1)) if match else None
-
-    def _is_tb11_wave_template(template_id: int) -> bool:
-        return _template_name(template_id).startswith("28_TB11")
-
-    def _center_distance(
-        left: tuple[int, int, int, int],
-        right: tuple[int, int, int, int],
-    ) -> float:
-        lx, ly, lw, lh = left
-        rx, ry, rw, rh = right
-        return float(np.hypot((lx + lw / 2.0) - (rx + rw / 2.0), (ly + lh / 2.0) - (ry + rh / 2.0)))
-
-    def _center_inside(
-        inner: tuple[int, int, int, int],
-        outer: tuple[int, int, int, int],
-        *,
-        pad: float = 0.0,
-    ) -> bool:
-        ix, iy, iw, ih = inner
-        ox, oy, ow, oh = outer
-        cx = ix + iw / 2.0
-        cy = iy + ih / 2.0
-        return (ox - pad) <= cx <= (ox + ow + pad) and (oy - pad) <= cy <= (oy + oh + pad)
-
-    def _bbox_iom(
-        left: tuple[int, int, int, int],
-        right: tuple[int, int, int, int],
-    ) -> float:
-        lx, ly, lw, lh = left
-        rx, ry, rw, rh = right
-        ix1 = max(lx, rx)
-        iy1 = max(ly, ry)
-        ix2 = min(lx + lw, rx + rw)
-        iy2 = min(ly + lh, ry + rh)
-        inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
-        return inter / max(1, min(lw * lh, rw * rh))
-
-    def _hue_close(left: tuple[int, int, int] | None, right: tuple[int, int, int] | None) -> bool:
-        if left is None or right is None:
-            return False
-        delta = abs(int(left[0]) - int(right[0]))
-        return min(delta, 180 - delta) <= 18
-
-    def _expanded_box(
-        bbox: tuple[int, int, int, int],
-        *,
-        pad_x: float,
-        pad_y: float,
-    ) -> tuple[int, int, int, int]:
-        x, y, w, h = bbox
-        px = int(round(pad_x))
-        py = int(round(pad_y))
-        return (x - px, y - py, w + 2 * px, h + 2 * py)
-
-    def _filter_pdf_text_fallbacks(
-        pdf_hits: list[CandidateHit],
-        template_hits: list[CandidateHit],
-    ) -> tuple[list[CandidateHit], list[CandidateHit]]:
-        """Keep color PDF text only where the visual detector has no local hit."""
-
-        if detector_profile != "color" or not pdf_hits or not template_hits:
-            return pdf_hits, []
-
-        def _template_overlaps_pdf_text(template_hit: CandidateHit, pdf_hit: CandidateHit) -> bool:
-            tx, ty, tw, th = template_hit.bbox
-            px, py, pw, ph = pdf_hit.bbox
-            ix1 = max(tx, px)
-            iy1 = max(ty, py)
-            ix2 = min(tx + tw, px + pw)
-            iy2 = min(ty + th, py + ph)
-            iw = max(0, ix2 - ix1)
-            ih = max(0, iy2 - iy1)
-            inter = iw * ih
-            if inter <= 0:
-                return False
-
-            template_area = max(1, tw * th)
-            pdf_area = max(1, pw * ph)
-            union = template_area + pdf_area - inter
-            iou = inter / max(1, union)
-            iom = inter / min(template_area, pdf_area)
-
-            tcx = tx + tw / 2.0
-            tcy = ty + th / 2.0
-            pcx = px + pw / 2.0
-            pcy = py + ph / 2.0
-            center_distance = float(np.hypot(tcx - pcx, tcy - pcy))
-            ref_distance = max(1.0, min(float(np.hypot(tw, th)), float(np.hypot(pw, ph))))
-            normalized_center_distance = center_distance / ref_distance
-            template_center_inside_pdf = px <= tcx <= px + pw and py <= tcy <= py + ph
-
-            pdf_center_inside_template = tx <= pcx <= tx + tw and ty <= pcy <= ty + th
-
-            return (
-                iou >= 0.12
-                or (iom >= 0.32 and normalized_center_distance <= 0.80)
-                or (template_center_inside_pdf and iom >= 0.22)
-                or (pdf_center_inside_template and iom >= 0.22)
-            )
-
-        local_template_hits = [
-            hit
-            for hit in template_hits
-            if hit.source != "pdf_text"
-            and hit.dominant_hsv is not None
-            and hit.verification_score >= 0.38
-            and hit.coverage >= 0.45
-            and hit.purity >= 0.45
-        ]
-        if not local_template_hits:
-            return pdf_hits, []
-
-        kept: list[CandidateHit] = []
-        removed: list[CandidateHit] = []
-        for pdf_hit in pdf_hits:
-            if _is_visual_pdf_text_blocked(pdf_hit.template_id):
-                removed.append(pdf_hit)
-                continue
-            has_template_fallback = any(
-                _template_overlaps_pdf_text(template_hit, pdf_hit)
-                for template_hit in local_template_hits
-            )
-            if has_template_fallback:
-                removed.append(pdf_hit)
-            else:
-                kept.append(pdf_hit)
-        return kept, removed
-
-    def _apply_color_pdf_text_class_hints(
-        template_hits: list[CandidateHit],
-        pdf_hits: list[CandidateHit],
-    ) -> int:
-        """Use PDF text only as a non-final class hint for local color ties."""
-
-        if detector_profile != "color" or not template_hits or not pdf_hits:
-            return 0
-
-        def _pdf_text_overlap(template_hit: CandidateHit, pdf_hit: CandidateHit) -> bool:
-            tx, ty, tw, th = template_hit.bbox
-            px, py, pw, ph = pdf_hit.bbox
-            ix1 = max(tx, px)
-            iy1 = max(ty, py)
-            ix2 = min(tx + tw, px + pw)
-            iy2 = min(ty + th, py + ph)
-            inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
-            template_area = max(1, tw * th)
-            pdf_area = max(1, pw * ph)
-            iom = inter / min(template_area, pdf_area) if inter > 0 else 0.0
-            tcx = tx + tw / 2.0
-            tcy = ty + th / 2.0
-            pcx = px + pw / 2.0
-            pcy = py + ph / 2.0
-            center_distance = float(np.hypot(tcx - pcx, tcy - pcy))
-            ref_distance = max(1.0, min(float(np.hypot(tw, th)), float(np.hypot(pw, ph))))
-            hit_center_inside_pdf = px <= tcx <= px + pw and py <= tcy <= py + ph
-            pdf_center_inside_hit = tx <= pcx <= tx + tw and ty <= pcy <= ty + th
-            if template_hit.is_text_label and pdf_hit.is_text_label:
-                return (
-                    inter > 0
-                    and (
-                        hit_center_inside_pdf
-                    or (pdf_center_inside_hit and iom >= 0.45)
-                    or (iom >= 0.55 and center_distance / ref_distance <= 0.45)
-                    )
-                )
-            if _has_text_class_token(template_hit.template_id) and not template_hit.is_text_label:
-                x_gap = max(tx, px) - min(tx + tw, px + pw)
-                y_gap = max(ty, py) - min(ty + th, py + ph)
-                x_gap = max(0.0, float(x_gap))
-                y_gap = max(0.0, float(y_gap))
-                x_overlap = max(0, min(tx + tw, px + pw) - max(tx, px)) / max(1.0, min(tw, pw))
-                y_overlap = max(0, min(ty + th, py + ph) - max(ty, py)) / max(1.0, min(th, ph))
-                near_side_label = (
-                    x_gap <= max(18.0, float(tw) * 0.16)
-                    and y_gap <= max(8.0, float(th) * 0.16)
-                    and (y_overlap >= 0.25 or abs(tcy - pcy) <= max(18.0, float(th) * 0.38))
-                )
-                near_top_bottom_label = (
-                    y_gap <= max(18.0, float(th) * 0.16)
-                    and x_gap <= max(8.0, float(tw) * 0.12)
-                    and (x_overlap >= 0.25 or abs(tcx - pcx) <= max(18.0, float(tw) * 0.38))
-                )
-                return (
-                    (inter > 0 and iom >= 0.20)
-                    or center_distance / ref_distance <= 0.95
-                    or near_side_label
-                    or near_top_bottom_label
-                )
-            if inter <= 0:
-                return False
-            return iom >= 0.35 or center_distance / ref_distance <= 0.70
-
-        def _numbered_token_families(template_id: int) -> set[str]:
-            families: set[str] = set()
-            for token in _template_tokens(template_id):
-                match = re.fullmatch(r"([A-Z]+)\d+", token)
-                if match:
-                    families.add(match.group(1))
-            return families
-
-        def _is_same_numbered_text_family(left_id: int, right_id: int) -> bool:
-            left_families = _numbered_token_families(left_id)
-            if not left_families:
-                return False
-            return bool(left_families & _numbered_token_families(right_id))
-
-        def _has_text_class_token(template_id: int) -> bool:
-            return bool(_template_tokens(template_id))
-
-        hinted = 0
-        for hit in template_hits:
-            if hit.source == "pdf_text" or hit.dominant_hsv is None:
-                continue
-            overlapping_pdf_hits = [
-                pdf_hit
-                for pdf_hit in pdf_hits
-                if pdf_hit.dominant_hsv is not None
-                and abs(int(hit.dominant_hsv[0]) - int(pdf_hit.dominant_hsv[0])) <= 18
-                and _pdf_text_overlap(hit, pdf_hit)
-            ]
-            if not overlapping_pdf_hits:
-                continue
-
-            has_same_template_hint = any(
-                pdf_hit.template_id == hit.template_id for pdf_hit in overlapping_pdf_hits
-            )
-            if has_same_template_hint:
-                visual_text_class_hint = _has_text_class_token(hit.template_id) and not hit.is_text_label
-                context_boost = 0.18 if visual_text_class_hint else 0.08
-                verification_boost = 0.24 if visual_text_class_hint else 0.12
-                hit.context_purity = round(
-                    min(1.0, float(hit.context_purity) + context_boost),
-                    4,
-                )
-                hit.verification_score = round(
-                    min(1.0, float(hit.verification_score) + verification_boost),
-                    4,
-                )
-                if hit.is_text_label:
-                    hit.content_score = round(
-                        min(1.0, float(hit.content_score) + 0.18),
-                        4,
-                    )
-                hinted += 1
-                continue
-
-            has_conflicting_text_hint = any(
-                pdf_hit.template_id != hit.template_id
-                and (
-                    (pdf_hit.is_text_label and hit.is_text_label)
-                    or _is_same_numbered_text_family(hit.template_id, pdf_hit.template_id)
-                )
-                for pdf_hit in overlapping_pdf_hits
-            )
-            if has_conflicting_text_hint:
-                visual_text_class_hint = _has_text_class_token(hit.template_id) and not hit.is_text_label
-                context_penalty = 0.16 if visual_text_class_hint else 0.04
-                verification_penalty = 0.28 if visual_text_class_hint else 0.10
-                hit.context_purity = round(
-                    max(0.0, float(hit.context_purity) - context_penalty),
-                    4,
-                )
-                hit.verification_score = round(
-                    max(0.0, float(hit.verification_score) - verification_penalty),
-                    4,
-                )
-                hit.content_score = round(max(0.0, float(hit.content_score) - 0.18), 4)
-                hinted += 1
-        return hinted
+    template_context = DetectionTemplateContext(templates)
+    _template_tokens = template_context.template_tokens
+    _template_primary_token = template_context.template_primary_token
+    _token_family = token_family
+    _template_token_family = template_context.template_token_family
+    _template_name = template_context.template_name
+    _is_visual_pdf_text_blocked = template_context.is_visual_pdf_text_blocked
+    _l_label_group = template_context.l_label_group
+    _is_magenta_family_template = template_context.is_magenta_family_template
+    _magenta_template_code = template_context.magenta_template_code
+    _is_tb11_wave_template = template_context.is_tb11_wave_template
+    _center_distance = center_distance
+    _center_inside = center_inside
+    _bbox_iom = bbox_iom
+    _hue_close = hue_close
+    _expanded_box = expanded_box
 
     def _apply_color_label_disambiguation(
         accepted_hits: list[CandidateHit],
@@ -1852,27 +1541,6 @@ def _detect_symbols_pipeline(
             output.append(hit)
         return output, suppressed
 
-    def _dedupe_final_hits(
-        final_hits: list[CandidateHit],
-    ) -> tuple[list[CandidateHit], int]:
-        deduped: dict[tuple[int, tuple[int, int, int, int]], CandidateHit] = {}
-
-        def quality(hit: CandidateHit) -> tuple[float, ...]:
-            return (
-                float(hit.verification_score),
-                float(hit.match_score),
-                float(hit.coverage),
-                float(hit.purity),
-                float(hit.context_purity),
-            )
-
-        for hit in final_hits:
-            key = (hit.template_id, hit.bbox)
-            previous = deduped.get(key)
-            if previous is None or quality(hit) > quality(previous):
-                deduped[key] = hit
-        return list(deduped.values()), len(final_hits) - len(deduped)
-
     def _trace_symbol_matches(symbol_name: str) -> bool:
         if not trace_symbols:
             return True
@@ -2455,7 +2123,12 @@ def _detect_symbols_pipeline(
     validated_hits = validation_result.validated_hits
     rejection_reasons = validation_result.rejection_reasons
     validation_workers = validation_result.validation_workers
-    color_pdf_text_hinted = _apply_color_pdf_text_class_hints(validated_hits, pdf_candidates)
+    color_pdf_text_hinted = apply_color_pdf_text_class_hints(
+        validated_hits,
+        pdf_candidates,
+        detector_profile=detector_profile,
+        template_tokens=_template_tokens,
+    )
     label_disambiguation_count, label_rescued_hits = _apply_color_label_disambiguation(
         validated_hits,
         validation_result.rejected_hits,
@@ -2465,9 +2138,11 @@ def _detect_symbols_pipeline(
     if label_rescued_hits:
         validated_hits.extend(label_rescued_hits)
         _record_candidate_trace("label_disambiguation_rescued", label_rescued_hits)
-    pdf_candidates, removed_pdf_text_fallbacks = _filter_pdf_text_fallbacks(
+    pdf_candidates, removed_pdf_text_fallbacks = filter_pdf_text_fallbacks(
         pdf_candidates,
         validated_hits,
+        detector_profile=detector_profile,
+        is_visual_pdf_text_blocked=_is_visual_pdf_text_blocked,
     )
     validated_candidates.extend(pdf_candidates)
     diagnostics["promoted_targeted_hits"] += validation_result.promoted_targeted_hits
@@ -2657,7 +2332,7 @@ def _detect_symbols_pipeline(
         final_hits, weak_short_l_suppressed = _suppress_weak_short_l_fragments(
             final_hits,
         )
-        final_hits, duplicate_final_suppressed = _dedupe_final_hits(final_hits)
+        final_hits, duplicate_final_suppressed = dedupe_final_hits(final_hits)
         diagnostics["color_magenta_reclassed"] = color_magenta_reclassed
         diagnostics["color_magenta_local_rescued"] = color_magenta_local_rescued
         diagnostics["color_family_rescued"] = color_family_rescued
