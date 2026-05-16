@@ -11,7 +11,11 @@ backend bez czytania kilku tysiecy linii naraz.
 - `detector_validation.py` sprawdza kandydatow po masce, coverage, purity i
   verification.
 - `detector_clustering.py` wybiera lokalnych winnerow i tlumi konflikty.
-- `detector_masks.py` buduje maski koloru/szarego tuszu i metryki fragmentow.
+- `detector_masks.py` jest kompatybilnosciowa fasada starych importow.
+- `detector_mask_builders.py` buduje maski HSV/ink, maski per kolor i scan ROI.
+- `detector_shape_metrics.py` trzyma metryki binarnych masek: bbox, centroid,
+  context purity, content mask i label content score.
+- `detector_hit_validation.py` trzyma policy walidacji pojedynczego kandydata.
 - `detector_pdf.py` czyta pomocniczy tekst PDF; tekst nie jest prawda wizualna.
 - `detector_context.py` trzyma czyste helpery tokenow, bboxow i trace input.
 - `detector_pdf_policy.py` decyduje, ktore PDF text fallbacki moga zostac
