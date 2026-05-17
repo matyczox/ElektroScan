@@ -1,0 +1,70 @@
+{
+  "name": "pzu_bydgoszcz_el01_gniazda_color",
+  "enabled": true,
+  "caution": true,
+  "sentinelOnly": false,
+  "snapshotCompareGate": true,
+  "notes": "PZU Bydgoszcz EL_01 GNIAZDA color caution fixture. Uses manually reviewed project templates and the 204-box frontend export after manual review. This is not accepted release-gating truth and must not justify coordinate-specific detector rules.",
+  "pdfPath": "test_pdfs/PZU_ZDROWIE_BYDGOSZCZ - EL_01 - R00 - GNIAZDA.PDF",
+  "templatesDir": "templates",
+  "golden": "../../golden/pzu_bydgoszcz_el01_gniazda_color_caution.json",
+  "detectorProfile": "color",
+  "expectedProfile": "color",
+  "templateCount": 24,
+  "extractTemplatesFresh": false,
+  "legendMaskMode": "color",
+  "excludedZones": [
+    {
+      "x": 5888,
+      "y": 118,
+      "width": 995,
+      "height": 1129
+    },
+    {
+      "x": 5865,
+      "y": 2469,
+      "width": 857,
+      "height": 860
+    },
+    {
+      "x": 5949,
+      "y": 3389,
+      "width": 1184,
+      "height": 1694
+    },
+    {
+      "x": 3705,
+      "y": 3757,
+      "width": 2395,
+      "height": 1199
+    },
+    {
+      "x": 220,
+      "y": 68,
+      "width": 1266,
+      "height": 4104
+    },
+    {
+      "x": 238,
+      "y": 3326,
+      "width": 3478,
+      "height": 1656
+    },
+    {
+      "x": 3709,
+      "y": 3322,
+      "width": 2246,
+      "height": 451
+    },
+    {
+      "x": 5874,
+      "y": 1356,
+      "width": 1004,
+      "height": 1145
+    }
+  ],
+  "manualReviewPolicy": "caution_full_snapshot_manual_checked_from_frontend_export",
+  "focus": "*",
+  "centerTolerance": 24,
+  "sizeTolerance": 0.5
+}

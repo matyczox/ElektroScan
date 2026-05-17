@@ -1170,6 +1170,126 @@ h1, h2, h3 {
   box-shadow: 0 0 15px currentColor !important;
 }
 
+/* ── Manual detection editor ── */
+.manual-box-panel {
+  position: absolute;
+  left: 18px;
+  bottom: 18px;
+  width: min(380px, calc(100% - 36px));
+  z-index: 65;
+  background: rgba(20, 20, 23, 0.96);
+  border: 1px solid rgba(198, 168, 124, 0.38);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-panel);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.manual-box-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.manual-box-title {
+  font-size: 14px;
+  font-weight: 800;
+  color: var(--accent-gold);
+}
+
+.manual-box-subtitle {
+  color: var(--text-muted);
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+.manual-box-grid,
+.box-edit-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.box-edit-grid-wide {
+  grid-template-columns: 1fr 1fr;
+}
+
+.manual-box-field,
+.box-edit-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.manual-box-field span,
+.box-edit-field span {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.manual-box-field input,
+.manual-box-field select,
+.manual-box-field textarea,
+.box-edit-field input,
+.box-edit-field select,
+.box-edit-field textarea {
+  width: 100%;
+  box-sizing: border-box;
+  background: rgba(0,0,0,0.35);
+  border: 1px solid var(--border-light);
+  color: var(--text-primary);
+  border-radius: 4px;
+  padding: 7px 8px;
+  font: inherit;
+  font-size: 12px;
+}
+
+.manual-box-field textarea,
+.box-edit-field textarea {
+  resize: vertical;
+  min-height: 70px;
+  line-height: 1.35;
+}
+
+.manual-box-field input:focus,
+.manual-box-field select:focus,
+.manual-box-field textarea:focus,
+.box-edit-field input:focus,
+.box-edit-field select:focus,
+.box-edit-field textarea:focus {
+  outline: none;
+  border-color: var(--accent-gold);
+}
+
+.manual-box-actions {
+  display: grid;
+  grid-template-columns: 1fr 1.35fr;
+  gap: 8px;
+}
+
+.manual-box-actions .btn-primary,
+.manual-box-actions .btn-secondary {
+  width: 100%;
+  padding: 9px 12px;
+  min-height: 38px;
+}
+
+.box-edit-panel {
+  margin: 0;
+  padding: 10px 14px 12px 53px;
+  border-bottom: 1px solid var(--border-light);
+  background: rgba(255, 255, 255, 0.025);
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
 /* ── Utilities ── */
 .text-orange { color: var(--accent-orange); }
 .text-sm { font-size: 13px; }

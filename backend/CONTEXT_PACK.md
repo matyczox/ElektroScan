@@ -43,6 +43,13 @@ behavior-focused: do not add project-specific detector rules here.
 - `backend/DEBUG_PLAYBOOK.md`: command cookbook and manual review flow.
 - `backend/tests/golden/pzu_bydgoszcz_el02_color_caution.json`: PZU caution
   snapshot plus manual sentinels.
+- `backend/tests/fixtures/pzu_bydgoszcz_el01_gniazda_color/case_pack.json`:
+  active diagnostic case pack for the current EL_01 GNIAZDA PDF. It is not a
+  golden; use it to generate crops and collect expected/manual-check ROIs
+  before changing detector logic.
+- `backend/tools/build_pdf_case_report.py`: renders case-pack ROI crops and,
+  when given a candidate JSON/templates directory, adds nearby boxes and ROI
+  inspector candidates.
 
 ## Regression Commands
 
@@ -53,3 +60,9 @@ npm run build
 ```
 
 Run `npm run build` from `frontend\`.
+
+Current EL_01 case report:
+
+```powershell
+py -3.11 backend\tools\build_pdf_case_report.py backend\tests\fixtures\pzu_bydgoszcz_el01_gniazda_color\case_pack.json --output-dir backend\tests\output\pzu_el01_case_report
+```

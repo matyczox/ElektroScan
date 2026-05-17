@@ -28,12 +28,23 @@ interface Box {
   sourcePdf?: string;
   hiddenLayersUsed?: string[];
   reason?: string;
+  note?: string;
+  reviewStatus?: 'unchecked' | 'accepted' | 'wrong' | 'manual_check';
   relatedFinal?: {
     symbolName?: string;
     bbox?: [number, number, number, number];
     verificationScore?: number;
     source?: string;
   };
+}
+
+interface ManualDraft {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  symbolName: string;
+  note: string;
 }
 
 interface ExcludedZone {
@@ -101,6 +112,7 @@ interface CanvasViewProps {
   isGrayDebugLoading?: boolean;
   symbolNames?: string[];
   onAddManualBox?: (box: Omit<Box, 'id' | 'color'> & { symbolName: string }) => void;
+  onUpdateBox?: (id: string, patch: Partial<Box>) => void;
   onRejectBox?: (id: string) => void;
   legendTemplateCropTarget?: { id: string; name: string } | null;
   onLegendTemplateCrop?: (x: number, y: number, w: number, h: number) => void;
@@ -155,9 +167,7 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
 
   // Tryb ręcznego dodawania symbolu
   const [isManualMode, setIsManualMode] = useState(false);
-  const [manualPos, setManualPos] = useState<{ x: number, y: number } | null>(null);
-  const [manualSymbol, setManualSymbol] = useState('');
-  const [manualSize, setManualSize] = useState(40);
+  const [manualDraft, setManualDraft] = useState<ManualDraft | null>(null);
 
   // Pulsowanie wybranej ramki
   const [pulsingId, setPulsingId] = useState<string | null>(null);
@@ -334,8 +344,17 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
     }
     if (isManualMode && !legendTemplateCropTarget) {
       const coords = getCanvasCoordinates(e.clientX, e.clientY);
-      setManualPos(coords);
-      if (symbolNames.length > 0 && !manualSymbol) setManualSymbol(symbolNames[0]);
+      const fallbackSymbol = manualDraft?.symbolName || symbolNames[0] || '';
+      const fallbackWidth = manualDraft?.width || 40;
+      const fallbackHeight = manualDraft?.height || 40;
+      setManualDraft({
+        x: Math.round(coords.x - fallbackWidth / 2),
+        y: Math.round(coords.y - fallbackHeight / 2),
+        width: fallbackWidth,
+        height: fallbackHeight,
+        symbolName: fallbackSymbol,
+        note: manualDraft?.note || '',
+      });
       return;
     }
     if (activeDrawMode !== 'none') {
@@ -557,6 +576,8 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
       `mirrored=${box.mirrored ? 'true' : 'false'}`,
       `source=${box.source ?? 'template'}`,
       `reason=${box.reason ?? 'accepted_detection'}`,
+      `review_status=${box.reviewStatus ?? 'unchecked'}`,
+      `note=${box.note?.trim() || '(none)'}`,
       `related_final=${box.relatedFinal ? `${box.relatedFinal.symbolName ?? 'n/a'}@${(box.relatedFinal.bbox ?? []).join(',')}#${formatDebugValue(box.relatedFinal.verificationScore)}` : '(none)'}`,
       `analysis_id=${box.analysisId ?? analysisContext?.analysisId ?? 'n/a'}`,
       `analysis_generated_utc=${box.analysisGeneratedUtc ?? analysisContext?.generatedAtUtc ?? 'n/a'}`,
@@ -592,16 +613,19 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
 
 
   const confirmManualBox = () => {
-    if (!manualPos || !manualSymbol) return;
+    if (!manualDraft?.symbolName) return;
     onAddManualBox?.({
-      symbolName: manualSymbol,
-      x: Math.round(manualPos.x - manualSize / 2),
-      y: Math.round(manualPos.y - manualSize / 2),
-      width: manualSize,
-      height: manualSize,
+      symbolName: manualDraft.symbolName,
+      x: Math.round(manualDraft.x),
+      y: Math.round(manualDraft.y),
+      width: Math.max(1, Math.round(manualDraft.width)),
+      height: Math.max(1, Math.round(manualDraft.height)),
       confidence: 1.0,
+      source: 'manual',
+      note: manualDraft.note.trim(),
+      reviewStatus: 'accepted',
     });
-    setManualPos(null);
+    setManualDraft(null);
     setIsManualMode(false);
   };
 
@@ -1068,71 +1092,14 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
             }} />
           )}
 
-          {/* Ręczne dodawanie - Modal */}
-          {manualPos && (
-            <div
-              style={{
-                position: 'absolute',
-                left: manualPos.x,
-                top: manualPos.y,
-                transform: `scale(${1 / scale}) translate(10px, 10px)`,
-                background: 'var(--bg-secondary)',
-                border: '1px solid var(--border-light)',
-                borderRadius: 8,
-                padding: 12,
-                zIndex: 100,
-                boxShadow: '0 4px 12px rgba(0,0,0,0.5)',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: 8,
-                width: 200,
-                cursor: 'default',
-              }}
-              onClick={e => e.stopPropagation()}
-              onMouseDown={e => e.stopPropagation()}
-            >
-              <h4 style={{ margin: 0, fontSize: 12, color: 'var(--accent-gold)' }}>Dodaj symbol</h4>
-              <select 
-                value={manualSymbol} 
-                onChange={e => setManualSymbol(e.target.value)}
-                style={{ width: '100%', padding: '4px', background: 'var(--bg-primary)', color: 'white', border: '1px solid var(--border-light)', borderRadius: 4 }}
-              >
-                {symbolNames.map(s => <option key={s} value={s}>{formatSymbolLabel(s)}</option>)}
-              </select>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Rozmiar:</span>
-                <input 
-                  type="number" 
-                  value={manualSize} 
-                  onChange={e => setManualSize(Number(e.target.value))}
-                  style={{ width: 50, padding: 2, background: 'var(--bg-primary)', color: 'white', border: '1px solid var(--border-light)' }}
-                />
-              </div>
-              <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
-                <button 
-                  onClick={confirmManualBox}
-                  style={{ flex: 1, background: 'var(--accent-gold)', color: 'black', border: 'none', padding: '4px', borderRadius: 4, fontWeight: 'bold', cursor: 'pointer' }}
-                >
-                  Dodaj
-                </button>
-                <button 
-                  onClick={() => setManualPos(null)}
-                  style={{ flex: 1, background: 'transparent', border: '1px solid var(--border-light)', color: 'white', padding: '4px', borderRadius: 4, cursor: 'pointer' }}
-                >
-                  Anuluj
-                </button>
-              </div>
-            </div>
-          )}
-
           {/* Podgląd dodawanego boxa */}
-          {manualPos && (
+          {manualDraft && (
              <div style={{
                 position: 'absolute',
-                left: manualPos.x - manualSize / 2,
-                top: manualPos.y - manualSize / 2,
-                width: manualSize,
-                height: manualSize,
+                left: manualDraft.x,
+                top: manualDraft.y,
+                width: manualDraft.width,
+                height: manualDraft.height,
                 border: '2px dashed var(--accent-gold)',
                 backgroundColor: 'rgba(198,168,124,0.2)',
                 pointerEvents: 'none',
@@ -1140,6 +1107,111 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
           )}
         </div>
       </div>
+
+      {isManualMode && (
+        <div
+          className="manual-box-panel"
+          data-wheel-ui="true"
+          onMouseDown={event => event.stopPropagation()}
+          onClick={event => event.stopPropagation()}
+        >
+          <div className="manual-box-header">
+            <div>
+              <div className="manual-box-title">Dodaj trafienie</div>
+              <div className="manual-box-subtitle">
+                {manualDraft ? 'Dopasuj box i opis przed zapisem.' : 'Kliknij plan, żeby ustawić box.'}
+              </div>
+            </div>
+            <button
+              type="button"
+              className="btn-icon"
+              title="Zamknij dodawanie"
+              onClick={() => {
+                setManualDraft(null);
+                setIsManualMode(false);
+              }}
+            >
+              <X size={15} />
+            </button>
+          </div>
+
+          <label className="manual-box-field">
+            <span>Symbol</span>
+            <select
+              value={manualDraft?.symbolName ?? symbolNames[0] ?? ''}
+              disabled={symbolNames.length === 0}
+              onChange={event =>
+                setManualDraft(current =>
+                  current
+                    ? { ...current, symbolName: event.target.value }
+                    : {
+                        x: 0,
+                        y: 0,
+                        width: 40,
+                        height: 40,
+                        symbolName: event.target.value,
+                        note: '',
+                      }
+                )
+              }
+            >
+              {symbolNames.length === 0 ? (
+                <option value="">Brak wzorców</option>
+              ) : symbolNames.map(symbolName => (
+                <option key={symbolName} value={symbolName}>{formatSymbolLabel(symbolName)}</option>
+              ))}
+            </select>
+          </label>
+
+          <div className="manual-box-grid">
+            {(['x', 'y', 'width', 'height'] as const).map(key => (
+              <label key={key} className="manual-box-field">
+                <span>{key === 'width' ? 'W' : key === 'height' ? 'H' : key.toUpperCase()}</span>
+                <input
+                  type="number"
+                  min={key === 'width' || key === 'height' ? 1 : undefined}
+                  value={manualDraft?.[key] ?? ''}
+                  disabled={!manualDraft}
+                  onChange={event => {
+                    const value = Number(event.target.value);
+                    setManualDraft(current => current ? { ...current, [key]: Number.isFinite(value) ? value : 0 } : current);
+                  }}
+                />
+              </label>
+            ))}
+          </div>
+
+          <label className="manual-box-field">
+            <span>Opis do goldena</span>
+            <textarea
+              value={manualDraft?.note ?? ''}
+              disabled={!manualDraft}
+              rows={3}
+              placeholder="np. expected 28_TB11, manual check albo dlaczego poprawione"
+              onChange={event => setManualDraft(current => current ? { ...current, note: event.target.value } : current)}
+            />
+          </label>
+
+          <div className="manual-box-actions">
+            <button
+              type="button"
+              className="btn-secondary"
+              disabled={!manualDraft}
+              onClick={() => setManualDraft(null)}
+            >
+              Wyczyść
+            </button>
+            <button
+              type="button"
+              className="btn-primary"
+              disabled={!manualDraft?.symbolName}
+              onClick={confirmManualBox}
+            >
+              Zapisz trafienie
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* CSS dla pulse animacji */}
       <style>{`

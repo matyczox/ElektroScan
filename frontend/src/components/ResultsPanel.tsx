@@ -10,6 +10,7 @@ interface Box {
   y: number;
   width: number;
   height: number;
+  visualBBox?: [number, number, number, number] | null;
   confidence: number;
   verificationScore?: number;
   color: string;
@@ -27,6 +28,8 @@ interface Box {
   sourcePdf?: string;
   hiddenLayersUsed?: string[];
   reason?: string;
+  note?: string;
+  reviewStatus?: 'unchecked' | 'accepted' | 'wrong' | 'manual_check';
 }
 
 interface ResultGroup {
@@ -50,6 +53,7 @@ interface ResultsPanelProps {
   onFocusBox?: (id: string) => void;
   onRejectBox: (id: string) => void;
   onChangeBoxSymbol?: (id: string, symbolName: string) => void;
+  onUpdateBox?: (id: string, patch: Partial<Box>) => void;
   onRenameSymbol?: (currentName: string, nextName: string) => Promise<string | void> | string | void;
   symbolNames?: string[];
   symbolLabels?: Record<string, string>;
@@ -65,6 +69,7 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
   onFocusBox,
   onRejectBox,
   onChangeBoxSymbol,
+  onUpdateBox,
   onRenameSymbol,
   symbolNames = [],
   symbolLabels = {},
@@ -79,7 +84,14 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
   const [renamingGroup, setRenamingGroup] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
   const [renameBusyGroup, setRenameBusyGroup] = useState<string | null>(null);
+  const [editingBoxId, setEditingBoxId] = useState<string | null>(null);
   const getSymbolDisplayName = (name: string) => symbolLabels[name] || formatSymbolLabel(name);
+  const reviewLabels: Record<NonNullable<Box['reviewStatus']>, string> = {
+    unchecked: 'Nieopisane',
+    accepted: 'OK',
+    wrong: 'Błąd',
+    manual_check: 'Sprawdzić',
+  };
 
   const toggleGroup = (name: string) => {
     setExpandedGroups(prev => {
@@ -437,79 +449,143 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
                           groupBoxes.map(box => {
                             const isFocused = focusedBoxId === box.id;
                             const displayConfidence = getDisplayConfidence(box);
+                            const isEditing = editingBoxId === box.id;
                             return (
-                            <div
-                              key={box.id}
-                              onClick={() => onFocusBox?.(box.id)}
-                              style={{
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: 8,
-                                padding: '7px 14px',
-                                borderBottom: '1px solid var(--border-light)',
-                                background: isFocused ? 'rgba(249,115,22,0.1)' : 'transparent',
-                                borderLeft: isFocused ? '3px solid var(--accent-orange)' : '3px solid transparent',
-                                cursor: 'pointer',
-                                transition: 'all 0.15s',
-                              }}
-                            >
-                              {/* Confidence chip */}
-                              <span
-                                style={{
-                                  fontSize: 11,
-                                  fontWeight: 700,
-                                  color: displayConfidence < 0.55 ? '#f59e0b' : '#10b981',
-                                  minWidth: 36,
-                                }}
-                              >
-                                {(displayConfidence * 100).toFixed(0)}%
-                              </span>
-                              {/* Position */}
-                              <span className="text-xs text-muted" style={{ flex: 1 }}>
-                                x:{box.x} y:{box.y}
-                              </span>
-                              {onChangeBoxSymbol && allSymbolNames.length > 0 && (
-                                <select
-                                  value={box.symbolName}
-                                  onClick={e => e.stopPropagation()}
-                                  onChange={e => onChangeBoxSymbol(box.id, e.target.value)}
-                                  title="Zmien klase symbolu"
+                              <React.Fragment key={box.id}>
+                                <div
+                                  onClick={() => onFocusBox?.(box.id)}
                                   style={{
-                                    maxWidth: 92,
-                                    background: 'var(--bg-main)',
-                                    color: 'var(--text-primary)',
-                                    border: '1px solid var(--border-light)',
-                                    borderRadius: 4,
-                                    fontSize: 10,
-                                    padding: '2px 4px',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: 8,
+                                    padding: '7px 14px',
+                                    borderBottom: '1px solid var(--border-light)',
+                                    background: isFocused ? 'rgba(249,115,22,0.1)' : 'transparent',
+                                    borderLeft: isFocused ? '3px solid var(--accent-orange)' : '3px solid transparent',
+                                    cursor: 'pointer',
+                                    transition: 'all 0.15s',
                                   }}
                                 >
-                                  {allSymbolNames.map(name => (
-                                    <option key={name} value={name}>{getSymbolDisplayName(name)}</option>
-                                  ))}
-                                </select>
-                              )}
-                              {/* Odrzuć */}
-                              <button
-                                onClick={e => { e.stopPropagation(); onRejectBox(box.id); }}
-                                title="Odrzuć (fałszywe trafienie)"
-                                style={{
-                                  background: 'none',
-                                  border: 'none',
-                                  cursor: 'pointer',
-                                  color: '#ef4444',
-                                  padding: 2,
-                                  display: 'flex',
-                                  opacity: 0.5,
-                                  transition: 'opacity 0.15s',
-                                }}
-                                onMouseEnter={e => (e.currentTarget.style.opacity = '1')}
-                                onMouseLeave={e => (e.currentTarget.style.opacity = '0.5')}
-                              >
-                                <X size={14} />
-                              </button>
-                            </div>
-                          );
+                                  <span
+                                    style={{
+                                      fontSize: 11,
+                                      fontWeight: 700,
+                                      color: displayConfidence < 0.55 ? '#f59e0b' : '#10b981',
+                                      minWidth: 36,
+                                    }}
+                                  >
+                                    {(displayConfidence * 100).toFixed(0)}%
+                                  </span>
+                                  <span className="text-xs text-muted" style={{ flex: 1 }}>
+                                    x:{box.x} y:{box.y}
+                                    {box.note?.trim() ? ' · opis' : ''}
+                                  </span>
+                                  {onChangeBoxSymbol && allSymbolNames.length > 0 && (
+                                    <select
+                                      value={box.symbolName}
+                                      onClick={e => e.stopPropagation()}
+                                      onChange={e => onChangeBoxSymbol(box.id, e.target.value)}
+                                      title="Zmien klase symbolu"
+                                      style={{
+                                        maxWidth: 92,
+                                        background: 'var(--bg-main)',
+                                        color: 'var(--text-primary)',
+                                        border: '1px solid var(--border-light)',
+                                        borderRadius: 4,
+                                        fontSize: 10,
+                                        padding: '2px 4px',
+                                      }}
+                                    >
+                                      {allSymbolNames.map(name => (
+                                        <option key={name} value={name}>{getSymbolDisplayName(name)}</option>
+                                      ))}
+                                    </select>
+                                  )}
+                                  <button
+                                    className="btn-icon"
+                                    onClick={e => {
+                                      e.stopPropagation();
+                                      setEditingBoxId(current => current === box.id ? null : box.id);
+                                      onFocusBox?.(box.id);
+                                    }}
+                                    title="Edytuj box i opis"
+                                  >
+                                    <Edit3 size={14} />
+                                  </button>
+                                  <button
+                                    onClick={e => { e.stopPropagation(); onRejectBox(box.id); }}
+                                    title="Odrzuć (fałszywe trafienie)"
+                                    style={{
+                                      background: 'none',
+                                      border: 'none',
+                                      cursor: 'pointer',
+                                      color: '#ef4444',
+                                      padding: 2,
+                                      display: 'flex',
+                                      opacity: 0.5,
+                                      transition: 'opacity 0.15s',
+                                    }}
+                                    onMouseEnter={e => (e.currentTarget.style.opacity = '1')}
+                                    onMouseLeave={e => (e.currentTarget.style.opacity = '0.5')}
+                                  >
+                                    <X size={14} />
+                                  </button>
+                                </div>
+                                {isEditing && (
+                                  <div
+                                    className="box-edit-panel"
+                                    onClick={event => event.stopPropagation()}
+                                    onMouseDown={event => event.stopPropagation()}
+                                  >
+                                    <div className="box-edit-grid">
+                                      {(['x', 'y', 'width', 'height'] as const).map(key => (
+                                        <label key={key} className="box-edit-field">
+                                          <span>{key === 'width' ? 'W' : key === 'height' ? 'H' : key.toUpperCase()}</span>
+                                          <input
+                                            type="number"
+                                            value={box[key]}
+                                            min={key === 'width' || key === 'height' ? 1 : undefined}
+                                            disabled={!onUpdateBox}
+                                            onChange={event => {
+                                              const value = Number(event.target.value);
+                                              if (Number.isFinite(value)) onUpdateBox?.(box.id, { [key]: value });
+                                            }}
+                                          />
+                                        </label>
+                                      ))}
+                                    </div>
+                                    <div className="box-edit-grid box-edit-grid-wide">
+                                      <label className="box-edit-field">
+                                        <span>Status</span>
+                                        <select
+                                          value={box.reviewStatus ?? 'unchecked'}
+                                          disabled={!onUpdateBox}
+                                          onChange={event => onUpdateBox?.(box.id, { reviewStatus: event.target.value as Box['reviewStatus'] })}
+                                        >
+                                          {Object.entries(reviewLabels).map(([value, label]) => (
+                                            <option key={value} value={value}>{label}</option>
+                                          ))}
+                                        </select>
+                                      </label>
+                                      <label className="box-edit-field">
+                                        <span>Źródło</span>
+                                        <input value={box.source ?? 'template'} readOnly />
+                                      </label>
+                                    </div>
+                                    <label className="box-edit-field">
+                                      <span>Opis do goldena / decyzja manualna</span>
+                                      <textarea
+                                        rows={3}
+                                        value={box.note ?? ''}
+                                        disabled={!onUpdateBox}
+                                        placeholder="np. expected 28_TB11, pusty hit, manual_check"
+                                        onChange={event => onUpdateBox?.(box.id, { note: event.target.value })}
+                                      />
+                                    </label>
+                                  </div>
+                                )}
+                              </React.Fragment>
+                            );
                           })
                         )}
                       </div>

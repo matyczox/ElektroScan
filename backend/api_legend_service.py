@@ -20,6 +20,32 @@ from template_store import (
 )
 
 
+def _rect_overlap_area(
+    left: tuple[int, int, int, int],
+    right: tuple[int, int, int, int],
+) -> int:
+    left_x, left_y, left_w, left_h = left
+    right_x, right_y, right_w, right_h = right
+    x0 = max(left_x, right_x)
+    y0 = max(left_y, right_y)
+    x1 = min(left_x + left_w, right_x + right_w)
+    y1 = min(left_y + left_h, right_y + right_h)
+    return max(0, x1 - x0) * max(0, y1 - y0)
+
+
+def _exclude_rects_for_legend_extraction(
+    exclude_rects: list[tuple[int, int, int, int]],
+    legend_rect_px: tuple[int, int, int, int],
+) -> list[tuple[int, int, int, int]]:
+    """Keep analysis exclusions from erasing the active legend crop."""
+
+    return [
+        rect
+        for rect in exclude_rects
+        if _rect_overlap_area(rect, legend_rect_px) == 0
+    ]
+
+
 async def _extract_legend_response(
     session_id: str,
     body: ExtractRequest | None,
@@ -75,6 +101,8 @@ async def _extract_legend_response(
                 detail="Brak strefy legendy. Zaznacz obszar legendy na planie przed ekstrakcją.",
             )
 
+        legend_exclude_rects = _exclude_rects_for_legend_extraction(exclude_rects, legend_rect_px)
+
         _log("Ekstrakcja legendy...")
         templates_dir.mkdir(parents=True, exist_ok=True)
         added_template_ids: set[str] = set()
@@ -84,7 +112,7 @@ async def _extract_legend_response(
                 plan_img,
                 output_dir=extraction_dir,
                 dpi=ANALYSIS_DPI,
-                exclude_rects=exclude_rects,
+                exclude_rects=legend_exclude_rects,
                 legend_rect_px=legend_rect_px,
                 mask_mode=mask_mode,
                 hidden_layers=hidden_layers,

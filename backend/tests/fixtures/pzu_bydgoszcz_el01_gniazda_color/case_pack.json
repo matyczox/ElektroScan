@@ -1,0 +1,69 @@
+{
+  "name": "pzu_bydgoszcz_el01_gniazda_color",
+  "status": "diagnostic_case_pack",
+  "releaseGate": false,
+  "snapshotCompareGate": false,
+  "notes": "Diagnostic-only case pack for PZU Bydgoszcz EL_01 GNIAZDA. This is not a production golden and must not justify coordinate-specific detector rules.",
+  "pdfPath": "test_pdfs/PZU_ZDROWIE_BYDGOSZCZ - EL_01 - R00 - GNIAZDA.PDF",
+  "detectorProfile": "color",
+  "legendMaskMode": "color",
+  "currentDetectionCount": 204,
+  "analysisId": "cde7c87c-6774-4659-aa74-b0239491d16d",
+  "analysisSession": "frontend_manual_export_20260517_181539",
+  "templates": {
+    "requiresReviewedTemplates": true,
+    "committedFixtureTemplates": true,
+    "notes": "Reviewed EL_01 templates are committed in this fixture for reproducible caution regression."
+  },
+  "excludedZones": [
+    {
+      "x": 5878,
+      "y": 1354,
+      "width": 1026,
+      "height": 1117,
+      "notes": "Legend/excluded zone from reviewed EL_01 run."
+    }
+  ],
+  "cases": [
+    {
+      "id": "sym01_misread_as_02_at_1543_676",
+      "reviewStatus": "wrong",
+      "roi": [1543, 676, 61, 47],
+      "expectedSymbols": ["01_sym_01"],
+      "currentSymbols": ["02_sym_02"],
+      "sourceNot": "pdf_text",
+      "notes": "User-reviewed: red socket-like symbol is 01, currently detected as 02."
+    },
+    {
+      "id": "sym04_misread_as_03_at_2869_682",
+      "reviewStatus": "wrong",
+      "roi": [2869, 682, 66, 45],
+      "expectedSymbols": ["04_sym_04"],
+      "currentSymbols": ["03_sym_03"],
+      "sourceNot": "pdf_text",
+      "notes": "User-reviewed ROI inspector case: expected 04; 03/04/05/01 all appear plausible locally."
+    },
+    {
+      "id": "sym04_known_good_at_2940_721",
+      "reviewStatus": "expected",
+      "roi": [2940, 721, 61, 47],
+      "expectedSymbols": ["04_sym_04"],
+      "sourceNot": "pdf_text",
+      "notes": "Known-good 04 example nearby, useful as a visual reference for the wrong 04/03 case."
+    },
+    {
+      "id": "pel5_visual_text_split_at_2631_649",
+      "reviewStatus": "manual_check",
+      "roi": [2631, 649, 71, 61],
+      "allowedSymbols": ["15_PEL5"],
+      "notes": "Manual check: visual PEL5 symbol and PDF text can appear as separate detections; decide later whether merged visual+label output is needed."
+    },
+    {
+      "id": "pel5_pdf_text_at_2660_706",
+      "reviewStatus": "manual_check",
+      "roi": [2660, 706, 52, 30],
+      "allowedSymbols": ["15_PEL5"],
+      "notes": "Manual check: current source=pdf_text label for PEL5. Keep as diagnostic evidence until text-label policy for this PDF is decided."
+    }
+  ]
+}

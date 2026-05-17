@@ -1,0 +1,154 @@
+# PZU EL01 Manual Diff
+
+- Raw snapshot: `backend/tests/golden/pzu_bydgoszcz_el01_gniazda_color_snapshots/cde7c87c-6774-4659-aa74-b0239491d16d_202_boxes.json` (202 boxes)
+- Manual golden: `backend/tests/golden/pzu_bydgoszcz_el01_gniazda_color_caution.json` (204 boxes)
+- Added boxes: `6`
+- Removed boxes: `4`
+- Changed existing ids: `121`
+- Status counts: `{'wrong': 14, 'none': 176, 'manual_check': 4, 'accepted': 10}`
+
+## Symbol Reclass Summary
+- `04_sym_04` -> `03_sym_03`: 61
+- `02_sym_02` -> `01_sym_01`: 23
+- `05_sym_05` -> `02_sym_02`: 11
+- `21_PEL7` -> `24_-_punkt_PEL_w_puszce_podlogowej_wyposazenie_wg_ww_standardu_PELx-PP_-_puszka_pod`: 9
+- `01_sym_01` -> `02_sym_02`: 4
+- `05_sym_05` -> `01_sym_01`: 1
+- `03_sym_03` -> `04_sym_04`: 1
+
+## Added Manual Boxes
+- `manual_1779040057406_d46v5` `15_PEL5` bbox `3210,3093,40,40` source `manual` status `accepted` note `expected pel5`
+- `manual_1779040174333_jwm46` `03_sym_03` bbox `2890,645,40,40` source `manual` status `accepted` note `expected 3`
+- `manual_1779040193905_iiz1u` `04_sym_04` bbox `2878,684,40,40` source `manual` status `accepted` note `expected sym 04`
+- `manual_1779040272625_hh2pe` `03_sym_03` bbox `4360,3057,40,40` source `manual` status `accepted` note `expected 03`
+- `manual_1779040294623_7ie7j` `03_sym_03` bbox `4359,3094,40,40` source `manual` status `accepted` note `expected 03`
+- `manual_1779040311877_412pf` `04_sym_04` bbox `4353,3130,40,40` source `manual` status `accepted` note `expected 04`
+
+## Removed Boxes
+- `03_sym_03_2822_2310` `03_sym_03` bbox `2822,2310,43,40` source `template`
+- `03_sym_03_3033_2487` `03_sym_03` bbox `3033,2487,40,43` source `template`
+- `07_TB11_4873_1807` `07_TB11` bbox `4873,1807,103,78` source `template`
+- `07_TB11_4873_2186` `07_TB11` bbox `4873,2186,103,78` source `template`
+
+## Changed Existing Boxes
+- `01_sym_01_2607_1434` bbox `2607,1434,47,44`: symbol `01_sym_01` -> `02_sym_02`
+- `01_sym_01_3271_984` bbox `3271,984,44,47`: symbol `01_sym_01` -> `02_sym_02`, status `None` -> `wrong` note `expected 02`
+- `01_sym_01_3619_1032` bbox `3619,1032,44,47`: symbol `01_sym_01` -> `02_sym_02`, status `None` -> `wrong` note `expected 02 w legendzie jest czarna 2 tu czerwona nie wiem czy na towplywa`
+- `01_sym_01_3967_1032` bbox `3967,1032,44,47`: symbol `01_sym_01` -> `02_sym_02`, status `None` -> `wrong` note `expected 02`
+- `01_sym_01_4381_1488` bbox `4381,1488,44,47`: status `None` -> `wrong` note `expected 02`
+- `02_sym_02_1543_676` bbox `1543,676,61,47`: symbol `02_sym_02` -> `01_sym_01`
+- `02_sym_02_2068_780` bbox `2068,780,61,47`: symbol `02_sym_02` -> `01_sym_01`, status `None` -> `wrong` note `expected 01`
+- `02_sym_02_2203_1076` bbox `2203,1076,47,61`: symbol `02_sym_02` -> `01_sym_01`
+- `02_sym_02_2721_2534` bbox `2721,2534,47,61`: symbol `02_sym_02` -> `01_sym_01`
+- `02_sym_02_2742_1166` bbox `2742,1166,47,61`: symbol `02_sym_02` -> `01_sym_01`, status `None` -> `wrong` note `expected 01`
+- `02_sym_02_2959_2921` bbox `2959,2921,61,47`: symbol `02_sym_02` -> `01_sym_01`
+- `02_sym_02_3039_2534` bbox `3039,2534,47,61`: symbol `02_sym_02` -> `01_sym_01`
+- `02_sym_02_3100_1166` bbox `3100,1166,47,61`: symbol `02_sym_02` -> `01_sym_01`
+- `02_sym_02_3456_2582` bbox `3456,2582,47,61`: symbol `02_sym_02` -> `01_sym_01`
+- `02_sym_02_3485_1166` bbox `3485,1166,47,61`: symbol `02_sym_02` -> `01_sym_01`, status `None` -> `wrong` note `expected 01`
+- `02_sym_02_3621_1756` bbox `3621,1756,61,47`: symbol `02_sym_02` -> `01_sym_01`, status `None` -> `wrong` note `expected 01`
+- `02_sym_02_3829_1166` bbox `3829,1166,47,61`: symbol `02_sym_02` -> `01_sym_01`, status `None` -> `wrong` note `expected 01`
+- `02_sym_02_3832_2582` bbox `3832,2582,47,61`: symbol `02_sym_02` -> `01_sym_01`
+- `02_sym_02_4089_1481` bbox `4089,1481,47,61`: symbol `02_sym_02` -> `01_sym_01`, status `None` -> `wrong` note `expected 01`
+- `02_sym_02_4089_2582` bbox `4089,2582,47,61`: symbol `02_sym_02` -> `01_sym_01`
+- `02_sym_02_4219_1166` bbox `4219,1166,47,61`: symbol `02_sym_02` -> `01_sym_01`, status `None` -> `wrong` note `expected 01`
+- `02_sym_02_4503_2802` bbox `4503,2802,47,61`: symbol `02_sym_02` -> `01_sym_01`
+- `02_sym_02_4660_1166` bbox `4660,1166,47,61`: symbol `02_sym_02` -> `01_sym_01`, status `None` -> `wrong` note `expected 01`
+- `02_sym_02_4685_1594` bbox `4685,1594,61,47`: symbol `02_sym_02` -> `01_sym_01`
+- `02_sym_02_4685_2413` bbox `4685,2413,61,47`: symbol `02_sym_02` -> `01_sym_01`
+- `02_sym_02_4685_2730` bbox `4685,2730,61,47`: symbol `02_sym_02` -> `01_sym_01`
+- `02_sym_02_4796_1245` bbox `4796,1245,47,61`: symbol `02_sym_02` -> `01_sym_01`, status `None` -> `wrong` note `expected 01`
+- `02_sym_02_5115_1181` bbox `5115,1181,47,61`: symbol `02_sym_02` -> `01_sym_01`
+- `03_sym_03_3758_1893` bbox `3758,1893,48,44`: symbol `03_sym_03` -> `04_sym_04`
+- `04_sym_04_2641_2126` bbox `2641,2126,61,47`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_2663_1989` bbox `2663,1989,47,61`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_2663_2057` bbox `2663,2057,47,61`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_2795_1995` bbox `2795,1995,61,47`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_2861_1494` bbox `2861,1494,61,47`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_2873_733` bbox `2873,733,61,47`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_2896_1826` bbox `2896,1826,61,47`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_2901_1943` bbox `2901,1943,47,61`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_2918_2247` bbox `2918,2247,47,61`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_2942_769` bbox `2942,769,61,47`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_2942_806` bbox `2942,806,61,47`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_3057_1531` bbox `3057,1531,61,47`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_3058_1481` bbox `3058,1481,47,61`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_3060_1697` bbox `3060,1697,47,61`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_3213_1703` bbox `3213,1703,47,61`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_3253_1481` bbox `3253,1481,47,61`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_3365_1820` bbox `3365,1820,61,47`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_3365_2185` bbox `3365,2185,61,47`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_3368_2245` bbox `3368,2245,61,47`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_3569_2788` bbox `3569,2788,61,47`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_3570_3204` bbox `3570,3204,61,47`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_3600_780` bbox `3600,780,61,47`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_3621_2120` bbox `3621,2120,61,47`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_3637_2995` bbox `3637,2995,61,47`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_3637_3031` bbox `3637,3031,61,47`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_3670_726` bbox `3670,726,61,47`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_3671_774` bbox `3671,774,61,47`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_3763_1708` bbox `3763,1708,61,47`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_3797_1876` bbox `3797,1876,47,61`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_3867_1551` bbox `3867,1551,61,47`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_3867_1595` bbox `3867,1595,61,47`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_3867_1836` bbox `3867,1836,61,47`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_3869_1779` bbox `3869,1779,61,47`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_3978_1874` bbox `3978,1874,47,61`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_4014_1006` bbox `4014,1006,61,47`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_4014_1044` bbox `4014,1044,61,47`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_4077_2258` bbox `4077,2258,47,61`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_4086_2044` bbox `4086,2044,61,47`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_4123_2208` bbox `4123,2208,61,47`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_4132_2259` bbox `4132,2259,47,61`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_4150_1963` bbox `4150,1963,61,47`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_4152_2100` bbox `4152,2100,47,61`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_4187_2172` bbox `4187,2172,61,47`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_4346_3020` bbox `4346,3020,61,47`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_4346_732` bbox `4346,732,61,47`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_4346_771` bbox `4346,771,61,47`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_4767_2914` bbox `4767,2914,47,61`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_4808_2914` bbox `4808,2914,47,61`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_4874_1793` bbox `4874,1793,47,61`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_4874_2218` bbox `4874,2218,47,61`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_4918_1944` bbox `4918,1944,61,47`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_4923_2022` bbox `4923,2022,47,61`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_4926_875` bbox `4926,875,61,47`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_4926_913` bbox `4926,913,61,47`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_4929_2216` bbox `4929,2216,47,61`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_4930_1792` bbox `4930,1792,47,61`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_5048_1483` bbox `5048,1483,47,61`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_5083_2845` bbox `5083,2845,47,61`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_5088_1483` bbox `5088,1483,47,61`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_5122_2912` bbox `5122,2912,47,61`: symbol `04_sym_04` -> `03_sym_03`
+- `04_sym_04_5143_2037` bbox `5143,2037,47,61`: symbol `04_sym_04` -> `03_sym_03`
+- `05_sym_05_2897_3192` bbox `2897,3192,61,48`: symbol `05_sym_05` -> `02_sym_02`
+- `05_sym_05_2958_3192` bbox `2958,3192,61,48`: symbol `05_sym_05` -> `02_sym_02`
+- `05_sym_05_3103_2786` bbox `3103,2786,48,61`: symbol `05_sym_05` -> `02_sym_02`
+- `05_sym_05_3256_3192` bbox `3256,3192,61,48`: symbol `05_sym_05` -> `02_sym_02`
+- `05_sym_05_3570_3090` bbox `3570,3090,61,48`: symbol `05_sym_05` -> `02_sym_02`
+- `05_sym_05_3611_2322` bbox `3611,2322,53,67`: symbol `05_sym_05` -> `02_sym_02`
+- `05_sym_05_3624_1628` bbox `3624,1628,61,48`: symbol `05_sym_05` -> `02_sym_02`
+- `05_sym_05_3634_3192` bbox `3634,3192,61,48`: symbol `05_sym_05` -> `02_sym_02`
+- `05_sym_05_3950_2911` bbox `3950,2911,61,48`: symbol `05_sym_05` -> `02_sym_02`
+- `05_sym_05_4373_1657` bbox `4373,1657,48,61`: symbol `05_sym_05` -> `02_sym_02`
+- `05_sym_05_4635_2804` bbox `4635,2804,48,61`: symbol `05_sym_05` -> `01_sym_01`
+- `05_sym_05_4897_2596` bbox `4897,2596,48,61`: symbol `05_sym_05` -> `02_sym_02`
+- `07_TB11_2907_2648` bbox `2907,2648,78,103`: status `None` -> `wrong` note `tu sa 2 obok siebie powinny byc widziane rozdzielnie`
+- `12_PEL2_3182_3025` bbox `3182,3025,71,61`: status `None` -> `accepted` note `OK: właściwy symbol, docelowo scalić z tekstem PEL2 jako jeden symbol 12`
+- `12_PEL2_3210_2999` bbox `3210,2999,52,30`: status `None` -> `manual_check` note `DUPLIKAT/TEKST: nie liczyć osobno, scalić z figurą 12`
+- `12_PEL2_4827_2843` bbox `4827,2843,71,61`: status `None` -> `accepted` note `OK: właściwy symbol, docelowo scalić z tekstem PEL2 jako jeden symbol 12`
+- `12_PEL2_4895_2848` bbox `4895,2848,30,52`: status `None` -> `manual_check` note `DUPLIKAT/TEKST: nie liczyć osobno, scalić z figurą 12`
+- `15_PEL5_2566_649` bbox `2566,649,71,61`: status `None` -> `accepted` note `właściwy symbol 15_PEL5; tekst PEL5 jest label/evidence dla klasy`
+- `15_PEL5_2595_706` bbox `2595,706,52,30`: status `None` -> `manual_check` note `DUPLIKAT/TEKST: nie liczyć osobno, scalić z figurą 15`
+- `15_PEL5_2631_649` bbox `2631,649,71,61`: status `None` -> `accepted` note `właściwy symbol 15_PEL5; tekst PEL5 jest label/evidence dla klasy`
+- `15_PEL5_2660_706` bbox `2660,706,52,30`: status `None` -> `manual_check` note `DUPLIKAT/TEKST: nie liczyć osobno, scalić z figurą 15`
+- `15_PEL5_3211_3141` bbox `3211,3141,52,30`: metadata changed note `DUPLIKAT/TEKST: nie liczyć osobno; użyć tylko jako evidence do klasy 15_PEL5`
+- `21_PEL7_3400_3157` bbox `3400,3157,71,60`: symbol `21_PEL7` -> `24_-_punkt_PEL_w_puszce_podlogowej_wyposazenie_wg_ww_standardu_PELx-PP_-_puszka_pod`
+- `21_PEL7_3851_3157` bbox `3851,3157,71,60`: symbol `21_PEL7` -> `24_-_punkt_PEL_w_puszce_podlogowej_wyposazenie_wg_ww_standardu_PELx-PP_-_puszka_pod`
+- `21_PEL7_4113_672` bbox `4113,672,71,60`: symbol `21_PEL7` -> `24_-_punkt_PEL_w_puszce_podlogowej_wyposazenie_wg_ww_standardu_PELx-PP_-_puszka_pod`
+- `21_PEL7_4604_688` bbox `4604,688,71,60`: symbol `21_PEL7` -> `24_-_punkt_PEL_w_puszce_podlogowej_wyposazenie_wg_ww_standardu_PELx-PP_-_puszka_pod`
+- `21_PEL7_4673_3197` bbox `4673,3197,71,60`: symbol `21_PEL7` -> `24_-_punkt_PEL_w_puszce_podlogowej_wyposazenie_wg_ww_standardu_PELx-PP_-_puszka_pod`
+- `21_PEL7_5098_3093` bbox `5098,3093,71,60`: symbol `21_PEL7` -> `24_-_punkt_PEL_w_puszce_podlogowej_wyposazenie_wg_ww_standardu_PELx-PP_-_puszka_pod`
+- `21_PEL7_5171_1679` bbox `5171,1679,71,60`: symbol `21_PEL7` -> `24_-_punkt_PEL_w_puszce_podlogowej_wyposazenie_wg_ww_standardu_PELx-PP_-_puszka_pod`
+- `21_PEL7_5171_2199` bbox `5171,2199,71,60`: symbol `21_PEL7` -> `24_-_punkt_PEL_w_puszce_podlogowej_wyposazenie_wg_ww_standardu_PELx-PP_-_puszka_pod`
+- `21_PEL7_5206_1007` bbox `5206,1007,71,60`: symbol `21_PEL7` -> `24_-_punkt_PEL_w_puszce_podlogowej_wyposazenie_wg_ww_standardu_PELx-PP_-_puszka_pod`

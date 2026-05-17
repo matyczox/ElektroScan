@@ -67,6 +67,19 @@ def _clean_template_display_label(raw_label: str | None) -> str | None:
         return None
     return label[:180].strip() or None
 
+def _is_template_display_heading(label: str | None) -> bool:
+    compact = re.sub(r"[^0-9A-Za-z]+", "", str(label or "")).casefold()
+    return compact in {
+        "legend",
+        "legenda",
+        "oznaczenia",
+        "symbol",
+        "opis",
+        "nazwa",
+        "indeks",
+        "producent",
+    }
+
 def _set_template_display_label(templates_dir: Path, template_id: str, label: str | None) -> None:
     labels = _load_template_labels(templates_dir)
     clean_label = _clean_template_display_label(label)
@@ -136,10 +149,14 @@ def _legend_display_labels_from_drafts(
         if not isinstance(draft, dict):
             continue
         label = _clean_template_display_label(draft.get("name_draft"))
-        if label:
+        if label and not _is_template_display_heading(label):
             labels.append(label)
 
-    return labels if len(labels) == expected_count else None
+    if len(labels) == expected_count:
+        return labels
+    if expected_count < len(labels) <= expected_count + max(2, expected_count // 4):
+        return labels[:expected_count]
+    return None
 
 def _safe_template_stem(raw_name: str) -> str:
     """Return a safe template file stem while keeping human-readable labels."""

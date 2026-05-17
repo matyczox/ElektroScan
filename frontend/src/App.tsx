@@ -142,6 +142,8 @@ interface DetectionBox {
   analysisSession?: string;
   sourcePdf?: string;
   hiddenLayersUsed?: string[];
+  note?: string;
+  reviewStatus?: 'unchecked' | 'accepted' | 'wrong' | 'manual_check';
 }
 
 interface RoiCandidate {
@@ -1336,12 +1338,32 @@ function App() {
     if (focusedBoxId === id) setFocusedBoxId(null);
   };
 
-  const handleChangeBoxSymbol = (id: string, symbolName: string) => {
-    setBoxes(prev => prev.map(box => box.id === id ? { ...box, symbolName } : box));
+  const ensureResultGroup = (symbolName: string, fallbackColor = '#22c55e') => {
     setResults(prev => {
       if (prev.some(result => result.name === symbolName)) return prev;
-      return [...prev, { name: symbolName, count: 0, color: '#22c55e' }];
+      return [...prev, { name: symbolName, count: 0, color: fallbackColor }];
     });
+  };
+
+  const handleChangeBoxSymbol = (id: string, symbolName: string) => {
+    setBoxes(prev => prev.map(box => box.id === id ? { ...box, symbolName } : box));
+    ensureResultGroup(symbolName);
+  };
+
+  const handleUpdateBox = (id: string, patch: Partial<DetectionBox>) => {
+    const geometryChanged = ['x', 'y', 'width', 'height'].some(key => key in patch);
+    setBoxes(prev =>
+      prev.map(box =>
+        box.id === id
+          ? {
+              ...box,
+              ...patch,
+              ...(geometryChanged ? { visualBBox: null } : {}),
+            }
+          : box
+      )
+    );
+    if (patch.symbolName) ensureResultGroup(patch.symbolName);
   };
 
   const handleAddManualBox = (box: Omit<DetectionBox, 'id' | 'color'>) => {
@@ -1504,6 +1526,7 @@ function App() {
         onClearPlanZone={() => setPlanZone(null)}
         symbolNames={patterns.map(p => p.id ?? p.name)}
         onAddManualBox={handleAddManualBox}
+        onUpdateBox={handleUpdateBox}
         onRejectBox={handleRejectBox}
         onInspectZone={handleInspectRoi}
         grayDebugOverlayImage={grayDebugZones?.overlayImage ?? null}
@@ -1639,6 +1662,7 @@ function App() {
           onFocusBox={id => setFocusedBoxId(prev => prev === id ? null : id)}
           onRejectBox={handleRejectBox}
           onChangeBoxSymbol={handleChangeBoxSymbol}
+          onUpdateBox={handleUpdateBox}
           onRenameSymbol={handleRenameResultSymbol}
           symbolNames={patterns.map(p => p.id ?? p.name)}
           symbolLabels={patternLabelMap}

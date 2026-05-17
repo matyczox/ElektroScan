@@ -1,12 +1,30 @@
 import cv2
 import numpy as np
 
-from main import TemplateUpdateRequest, _append_extracted_templates, _update_template_response
+from main import (
+    TemplateUpdateRequest,
+    _append_extracted_templates,
+    _legend_display_labels_from_drafts,
+    _update_template_response,
+)
 
 
 def _write_png(path):
     image = np.zeros((8, 8, 3), dtype=np.uint8)
     assert cv2.imwrite(str(path), image)
+
+
+def test_legend_display_labels_skip_heading_and_tolerate_trailing_continuation_row():
+    drafts = [
+        {"name_draft": "LEGENDA", "bbox_pt": [0, -12, 10, 10]},
+        {"name_draft": "row one", "bbox_pt": [0, 0, 10, 10]},
+        {"name_draft": "row two", "bbox_pt": [0, 12, 10, 10]},
+        {"name_draft": "continuation text", "bbox_pt": [0, 24, 10, 10]},
+    ]
+
+    labels = _legend_display_labels_from_drafts(drafts, expected_count=2)
+
+    assert labels == ["row one", "row two"]
 
 
 def test_append_extracted_templates_keeps_existing_files(tmp_path):

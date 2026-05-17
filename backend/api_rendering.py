@@ -12,7 +12,7 @@ import cv2
 import fitz
 import numpy as np
 
-from core.detector_masks import _ink_mask
+from core.detector_masks import _hsv_mask, _ink_mask
 from core.legend_extractor import _normalize_layer_name, get_pdf_layers, pdf_to_png
 
 
@@ -111,7 +111,10 @@ def _ink_profile_stats(plan_img: np.ndarray) -> dict:
             "recommendedProfile": "color",
         }
 
-    ink = _ink_mask(plan_img, dilate=False)
+    ink = _ink_mask(plan_img, dilate=False, ignore_color=False)
+    color_ink = _hsv_mask(plan_img, dilate=False)
+    if cv2.countNonZero(color_ink):
+        ink = cv2.bitwise_or(ink, color_ink)
     ink_pixels = int(np.count_nonzero(ink))
     if ink_pixels <= 0:
         return {
@@ -121,10 +124,8 @@ def _ink_profile_stats(plan_img: np.ndarray) -> dict:
             "recommendedProfile": "color",
         }
 
-    hsv = cv2.cvtColor(plan_img, cv2.COLOR_BGR2HSV)
-    saturation = hsv[:, :, 1]
-    colorful = ink & (saturation > 35)
-    colorful_pixels = int(np.count_nonzero(colorful))
+    colorful = cv2.bitwise_and(ink, color_ink)
+    colorful_pixels = int(cv2.countNonZero(colorful))
     gray_pixels = ink_pixels - colorful_pixels
     colorful_ink_pct = (colorful_pixels / ink_pixels) * 100.0
 

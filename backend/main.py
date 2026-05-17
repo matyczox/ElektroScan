@@ -558,6 +558,7 @@ def api_project_analysis_export(
     user: dict = Depends(require_user),
 ):
     project = _project_or_404(project_id, user)
+    _save_analysis_export_payload(project_id, body)
     rows = _build_analysis_export_rows(body, _project_templates_dir(project_id))
     if not rows:
         raise HTTPException(status_code=400, detail="Brak wyników analizy do eksportu.")
@@ -575,6 +576,34 @@ def api_project_analysis_export(
             "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
         },
     )
+
+
+def _save_analysis_export_payload(project_id: str, body: AnalysisExportRequest) -> None:
+    """Persist the exact reviewed UI payload sent during XLSX export."""
+    try:
+        analysis_context = body.analysis_context or {}
+        analysis_id = str(analysis_context.get("analysisId") or "no-analysis")
+        safe_analysis_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", analysis_id)[:80]
+        timestamp = time.strftime("%Y%m%d_%H%M%S", time.gmtime())
+        box_count = len(body.boxes or [])
+        out_dir = _project_analysis_dir(project_id) / "manual_exports"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        payload = body.model_dump(by_alias=True, mode="json")
+        payload.setdefault("metadata", {})
+        payload["metadata"].update(
+            {
+                "kind": "manual_review_export_payload",
+                "projectId": project_id,
+                "analysisId": analysis_id,
+                "boxCount": box_count,
+                "savedAtUtc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "note": "Exact frontend boxes/results payload captured from analysis-export request.",
+            }
+        )
+        out_path = out_dir / f"manual_export_{timestamp}_{safe_analysis_id}_{box_count}_boxes.json"
+        out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:
+        _log(f"analysis export payload save failed: {exc}")
 
 
 @app.post("/api/inspect-roi")

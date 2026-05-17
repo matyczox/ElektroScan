@@ -25,6 +25,43 @@ from core.legend_extractor import (
     _trim_selection_to_table_grid,
 )
 from core.legend_scene_transform import build_scene_transform
+from core.legend_table_drafts import _select_expected_color_table_drafts
+from core.legend_vector_drafts import VectorLegendDraft
+
+
+def _draft_for_row(index: int, y: int, label: str) -> VectorLegendDraft:
+    return VectorLegendDraft(
+        draft_id=f"row:{index}",
+        bbox_pt=(0.0, float(y), 100.0, 20.0),
+        bbox_px_300=(0, y, 100, 20),
+        row_bbox_pt=(0.0, float(y), 100.0, 20.0),
+        name_draft=label,
+        symbol_code=None,
+        confidence=0.8,
+        primitive_refs=[],
+        review_required=True,
+        label_source="right_text",
+        structure_source="table_cell",
+        fallback_eligible=True,
+    )
+
+
+def test_color_table_draft_trim_prefers_rows_with_symbol_ink():
+    plan_image = np.full((100, 120, 3), 255, dtype=np.uint8)
+    drafts = []
+    for index, label in enumerate(["row one", "row two", "row three", "next section"]):
+        y = index * 20
+        drafts.append(_draft_for_row(index, y, label))
+        if index < 3:
+            cv2.rectangle(plan_image, (8, y + 5), (24, y + 15), (0, 0, 255), -1)
+
+    selected = _select_expected_color_table_drafts(
+        drafts,
+        expected_count=3,
+        plan_image=plan_image,
+    )
+
+    assert [draft.name_draft for draft in selected] == ["row one", "row two", "row three"]
 
 
 def test_clean_ocr_label_text_canonicalizes_noisy_electrical_labels():

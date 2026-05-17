@@ -182,6 +182,52 @@ def _table_region_color_score(table_area: np.ndarray) -> int:
     return int(cv2.countNonZero(_hsv_mask(left_band)))
 
 
+def _row_color_score(plan_image: np.ndarray, bbox_px: tuple[int, int, int, int]) -> int:
+    """Count colored ink in the likely symbol side of one absolute row bbox."""
+
+    if plan_image.size == 0:
+        return 0
+    x, y, w, h = [int(value) for value in bbox_px]
+    if w <= 0 or h <= 0:
+        return 0
+    x0 = max(0, min(x, plan_image.shape[1]))
+    y0 = max(0, min(y, plan_image.shape[0]))
+    x1 = max(x0, min(x + w, plan_image.shape[1]))
+    y1 = max(y0, min(y + h, plan_image.shape[0]))
+    if x1 <= x0 or y1 <= y0:
+        return 0
+    return _table_region_color_score(plan_image[y0:y1, x0:x1])
+
+
+def _select_expected_color_table_drafts(
+    drafts: list[VectorLegendDraft],
+    *,
+    expected_count: int,
+    plan_image: np.ndarray,
+) -> list[VectorLegendDraft]:
+    """Trim extra OCR/PDF rows, keeping the contiguous block with symbol ink."""
+
+    if len(drafts) <= expected_count:
+        return drafts
+
+    ordered = sorted(drafts, key=lambda draft: (draft.bbox_px_300[1], draft.bbox_px_300[0]))
+    best_window: list[VectorLegendDraft] | None = None
+    best_score: tuple[int, int, int] | None = None
+    for start in range(0, len(ordered) - expected_count + 1):
+        window = ordered[start : start + expected_count]
+        row_scores = [_row_color_score(plan_image, draft.bbox_px_300) for draft in window]
+        strong_rows = sum(1 for score in row_scores if score >= 10)
+        total_color = sum(row_scores)
+        # Earlier windows win ties. Extra text after a legend table is common
+        # when the user selects a little too much of the next legend section.
+        score = (strong_rows, total_color, -start)
+        if best_score is None or score > best_score:
+            best_score = score
+            best_window = window
+
+    return best_window or ordered[:expected_count]
+
+
 def _build_color_table_display_drafts(
     page: fitz.Page,
     plan_image: np.ndarray,
@@ -244,8 +290,13 @@ def _build_color_table_display_drafts(
         drafts = [
             draft for draft in drafts if _is_descriptive_table_label(draft.name_draft)
         ]
-        if len(drafts) != expected_count:
+        if len(drafts) < expected_count:
             continue
+        drafts = _select_expected_color_table_drafts(
+            drafts,
+            expected_count=expected_count,
+            plan_image=plan_image,
+        )
 
         descriptive_count = len(drafts)
         if descriptive_count < max(2, int(expected_count * 0.72)):
