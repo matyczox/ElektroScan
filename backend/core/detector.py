@@ -12,8 +12,8 @@ import numpy as np
 from core.detector_color_engine import detect_symbols_color
 from core.detector_gray_engine import detect_symbols_gray
 from core.detector_models import DetectionResult, TemplateInfo
-from core.detector_pipeline import draw_results
 from core.detector_templates import load_templates
+from core.detector_visualization import draw_results
 
 
 def detect_symbols(
