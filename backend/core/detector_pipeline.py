@@ -56,6 +56,7 @@ from core.detector_models import (
 from core.detector_pdf import (
     _collect_pdf_text_exclude_rects,
     _collect_pdf_text_hits,
+    _collect_pdf_word_boxes,
     _estimate_legend_exclude_rect,
     _estimate_title_block_exclude_rects,
 )
@@ -169,6 +170,13 @@ def _detect_symbols_pipeline(
         exclude_rects=exclude_rects,
     )
     pdf_candidates = [hit for hits in pdf_hits_by_template.values() for hit in hits]
+    pdf_word_boxes = _collect_pdf_word_boxes(
+        pdf_path=pdf_path or "",
+        image_shape=plan_image.shape,
+        dpi=pdf_dpi,
+        hidden_layers=hidden_layers,
+        exclude_rects=exclude_rects,
+    )
     has_pdf_text_assist = len(pdf_candidates) > 0
     timings["pdf_text"] = time.perf_counter() - phase_start
 
@@ -761,6 +769,7 @@ def _detect_symbols_pipeline(
             templates=templates,
             template_context=template_context,
             plan_masks_by_template=plan_masks_by_template,
+            pdf_word_boxes=pdf_word_boxes,
         )
         diagnostics.update(color_postprocess_counts)
         rescued_gray_frames = 0

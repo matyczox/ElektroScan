@@ -12,6 +12,8 @@ from core.detector_clustering import _bbox_metrics
 from core.detector_config import DEFAULT_PDF_DPI, LEGEND_HEIGHT_PT, LEGEND_KEYWORD, LEGEND_WIDTH_PT
 from core.detector_models import CandidateHit, TemplateInfo
 
+PdfWordBox = tuple[str, tuple[int, int, int, int]]
+
 
 def _apply_hidden_layers(doc: fitz.Document, hidden_layers: list[str] | None) -> None:
     """Disable selected PDF layers before text lookup."""
@@ -215,6 +217,49 @@ def _collect_pdf_text_hits(
         doc.close()
 
     return hits_by_template
+
+
+def _collect_pdf_word_boxes(
+    pdf_path: str,
+    image_shape: tuple[int, int, int] | tuple[int, int],
+    dpi: int = DEFAULT_PDF_DPI,
+    hidden_layers: list[str] | None = None,
+    exclude_rects: list[tuple[int, int, int, int]] | None = None,
+) -> list[PdfWordBox]:
+    """Return exact PDF word tokens in rendered image coordinates."""
+
+    if not pdf_path or not os.path.exists(pdf_path):
+        return []
+
+    exclude_rects = exclude_rects or []
+    words: list[PdfWordBox] = []
+    doc = fitz.open(pdf_path)
+    try:
+        _apply_hidden_layers(doc, hidden_layers)
+        page = doc.load_page(0)
+        scale = dpi / 72.0
+        for word in page.get_text("words"):
+            if len(word) < 5:
+                continue
+            token = re.sub(r"[^A-Z0-9]+", "", str(word[4] or "").upper())
+            if not token:
+                continue
+            bbox = _clamp_bbox(
+                (
+                    int(round(float(word[0]) * scale)),
+                    int(round(float(word[1]) * scale)),
+                    int(round((float(word[2]) - float(word[0])) * scale)),
+                    int(round((float(word[3]) - float(word[1])) * scale)),
+                ),
+                image_shape,
+            )
+            if bbox is None or _overlaps_excluded_zones(bbox, exclude_rects):
+                continue
+            words.append((token, bbox))
+    finally:
+        doc.close()
+
+    return words
 
 
 def _collect_pdf_text_exclude_rects(

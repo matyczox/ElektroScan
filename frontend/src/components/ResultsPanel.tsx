@@ -189,6 +189,8 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
     return `elektroscan_${safeName.slice(0, 80)}_wyniki.xlsx`;
   };
 
+  const exportJsonFileName = () => exportFileName().replace(/\.xlsx$/i, '_review.json');
+
   const filenameFromHeader = (header: string | null) => {
     if (!header) return exportFileName();
     const utfMatch = header.match(/filename\*=UTF-8''([^;]+)/i);
@@ -228,6 +230,33 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
     } finally {
       setExporting(false);
     }
+  };
+
+  const handleExportJson = () => {
+    if (exportTotal <= 0) return;
+    const payload = {
+      schema: 'elektroscan.review-export.v1',
+      exportedAtUtc: new Date().toISOString(),
+      analysisContext,
+      results,
+      boxes: filteredBoxes,
+      symbolLabels,
+      summary: {
+        totalBoxes: filteredBoxes.length,
+        exportTotal,
+        reviewedBoxes: filteredBoxes.filter(box => box.reviewStatus && box.reviewStatus !== 'unchecked').length,
+        manualBoxes: filteredBoxes.filter(box => box.source === 'manual').length,
+      },
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = exportJsonFileName();
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
   };
 
   const empty = results.length === 0;
@@ -608,6 +637,15 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
                 >
                   <Download size={15} />
                   {exporting ? 'Eksportowanie...' : 'Eksportuj XLSX'}
+                </button>
+                <button
+                  className="btn-secondary flex-row gap-2"
+                  style={{ width: '100%', justifyContent: 'center' }}
+                  onClick={handleExportJson}
+                  disabled={exportTotal <= 0}
+                >
+                  <Download size={15} />
+                  Eksportuj JSON review
                 </button>
 
                 {exportRows.map(row => (

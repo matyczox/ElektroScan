@@ -47,6 +47,28 @@ interface ManualDraft {
   note: string;
 }
 
+interface RoiCandidate {
+  symbolName: string;
+  accepted: boolean;
+  reason: string;
+  match: number;
+  threshold?: number;
+  verification: number;
+  coverage: number;
+  purity: number;
+  contextPurity: number;
+  scale: number;
+  rotation: number;
+  mirrored: boolean;
+  bbox: { x: number; y: number; width: number; height: number };
+  scanMask?: string;
+}
+
+interface RoiInspection {
+  roi: { x: number; y: number; width: number; height: number };
+  candidates: RoiCandidate[];
+}
+
 interface ExcludedZone {
   x: number;
   y: number;
@@ -106,6 +128,8 @@ interface CanvasViewProps {
   onSetPlanZone?: (x: number, y: number, w: number, h: number) => void;
   onClearPlanZone?: () => void;
   onInspectZone?: (x: number, y: number, w: number, h: number) => void;
+  roiInspection?: RoiInspection | null;
+  isInspectingRoi?: boolean;
   grayDebugOverlayImage?: string | null;
   grayDebugInfo?: GrayDebugInfo | null;
   onToggleGrayDebugZones?: () => void;
@@ -137,6 +161,8 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
   onSetPlanZone,
   onClearPlanZone,
   onInspectZone,
+  roiInspection = null,
+  isInspectingRoi = false,
   grayDebugOverlayImage = null,
   grayDebugInfo = null,
   onToggleGrayDebugZones,
@@ -478,6 +504,50 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
 
   const formatDebugValue = (value?: number, digits = 3) =>
     typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : 'n/a';
+
+  const sameRoi = (left?: { x: number; y: number; width: number; height: number } | null, right?: { x: number; y: number; width: number; height: number } | null) => {
+    if (!left || !right) return false;
+    return (
+      Math.round(left.x) === Math.round(right.x) &&
+      Math.round(left.y) === Math.round(right.y) &&
+      Math.round(left.width) === Math.round(right.width) &&
+      Math.round(left.height) === Math.round(right.height)
+    );
+  };
+
+  const manualRoiInspection = manualDraft && sameRoi(roiInspection?.roi, manualDraft) ? roiInspection : null;
+
+  const roiCandidateEvidence = (candidate: RoiCandidate) => {
+    const status = candidate.accepted ? 'PASS' : candidate.reason;
+    const threshold = typeof candidate.threshold === 'number' ? ` thr=${candidate.threshold.toFixed(3)}` : '';
+    return [
+      `roiInspectorTop=${candidate.symbolName}`,
+      status,
+      `match=${candidate.match.toFixed(3)}`,
+      threshold.trim(),
+      `ver=${candidate.verification.toFixed(3)}`,
+      `cov=${candidate.coverage.toFixed(3)}`,
+      `pur=${candidate.purity.toFixed(3)}`,
+      `ctx=${candidate.contextPurity.toFixed(3)}`,
+      `bbox=${candidate.bbox.x},${candidate.bbox.y},${candidate.bbox.width},${candidate.bbox.height}`,
+    ].filter(Boolean).join(' ');
+  };
+
+  const selectManualRoiCandidate = (candidate: RoiCandidate) => {
+    setManualDraft(current => {
+      if (!current) return current;
+      const evidence = roiCandidateEvidence(candidate);
+      const noteLines = current.note
+        .split('\n')
+        .map(line => line.trimEnd())
+        .filter(line => line.trim() && !line.trim().startsWith('roiInspectorTop='));
+      return {
+        ...current,
+        symbolName: candidate.symbolName,
+        note: [...noteLines, evidence].join('\n'),
+      };
+    });
+  };
 
   const toggleDrawMode = (mode: Exclude<DrawMode, 'none' | 'legend-template'>) => {
     if (legendTemplateCropTarget) onCancelLegendTemplateCrop?.();
@@ -1191,6 +1261,43 @@ export const CanvasView: React.FC<CanvasViewProps> = ({
               onChange={event => setManualDraft(current => current ? { ...current, note: event.target.value } : current)}
             />
           </label>
+
+          <div className="manual-roi-section">
+            <button
+              type="button"
+              className="btn-secondary"
+              disabled={!manualDraft || !onInspectZone || isInspectingRoi}
+              onClick={() => {
+                if (!manualDraft) return;
+                onInspectZone?.(manualDraft.x, manualDraft.y, manualDraft.width, manualDraft.height);
+              }}
+            >
+              {isInspectingRoi ? 'Inspektor liczy...' : 'Podepnij Inspektora ROI'}
+            </button>
+            {manualDraft && manualRoiInspection && (
+              <div className="manual-roi-candidates">
+                {manualRoiInspection.candidates.length === 0 ? (
+                  <div className="manual-roi-empty">Brak kandydatów w ROI.</div>
+                ) : manualRoiInspection.candidates.slice(0, 6).map((candidate, index) => (
+                  <button
+                    key={`${candidate.symbolName}_${index}_${candidate.scale}_${candidate.rotation}_${candidate.bbox.x}_${candidate.bbox.y}`}
+                    type="button"
+                    className={`manual-roi-candidate ${candidate.accepted ? 'manual-roi-candidate-pass' : ''}`}
+                    onClick={() => selectManualRoiCandidate(candidate)}
+                    title={roiCandidateEvidence(candidate)}
+                  >
+                    <span className="manual-roi-candidate-main">
+                      <strong>{index + 1}. {formatSymbolLabel(candidate.symbolName)}</strong>
+                      <em>{candidate.accepted ? 'PASS' : candidate.reason}</em>
+                    </span>
+                    <span className="manual-roi-candidate-meta">
+                      match {candidate.match.toFixed(3)} | ver {candidate.verification.toFixed(3)} | cov {candidate.coverage.toFixed(3)}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
 
           <div className="manual-box-actions">
             <button

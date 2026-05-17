@@ -1529,6 +1529,8 @@ function App() {
         onUpdateBox={handleUpdateBox}
         onRejectBox={handleRejectBox}
         onInspectZone={handleInspectRoi}
+        roiInspection={roiInspection}
+        isInspectingRoi={isInspectingRoi}
         grayDebugOverlayImage={grayDebugZones?.overlayImage ?? null}
         grayDebugInfo={grayDebugZones}
         onToggleGrayDebugZones={handleToggleGrayZones}

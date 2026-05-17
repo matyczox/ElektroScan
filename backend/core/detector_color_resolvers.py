@@ -22,7 +22,50 @@ from core.detector_long_l_resolver import (
 )
 from core.detector_magenta_resolver import reconcile_magenta_family_hits, rescue_magenta_family_hits
 from core.detector_models import CandidateHit, TemplateInfo
+from core.detector_pel_resolver import resolve_pel_floor_box_hits
 from core.detector_postprocess import dedupe_final_hits
+from core.detector_pdf import PdfWordBox
+from core.detector_socket_resolver import resolve_socket_family_hits
+
+
+def _suppress_weak_panel_tb11_hits(
+    final_hits: list[CandidateHit],
+    templates: list[TemplateInfo],
+) -> tuple[list[CandidateHit], int]:
+    """Drop sparse panel-shaped TB11 impostors while keeping true wavy TB11 strokes.
+
+    This is geometry/score based: broad panel TB11 templates should cover a
+    substantial part of their local color mask. Very low-coverage panel hits are
+    usually two unrelated red compact symbols bridged into one large box.
+    """
+
+    output: list[CandidateHit] = []
+    suppressed = 0
+    for hit in final_hits:
+        if not (0 <= hit.template_id < len(templates)):
+            output.append(hit)
+            continue
+        name = templates[hit.template_id].name.upper()
+        if "TB11" not in name:
+            output.append(hit)
+            continue
+
+        w, h = hit.bbox[2], hit.bbox[3]
+        area = max(1, w * h)
+        aspect = max(float(w) / max(1.0, float(h)), float(h) / max(1.0, float(w)))
+        sparse_panel_like = (
+            area >= 4_500
+            and aspect <= 1.75
+            and hit.coverage < 0.50
+            and hit.match_score < 0.50
+            and hit.verification_score < 0.62
+        )
+        if sparse_panel_like:
+            suppressed += 1
+            continue
+        output.append(hit)
+
+    return output, suppressed
 
 
 def apply_color_postprocess(
@@ -37,6 +80,7 @@ def apply_color_postprocess(
     templates: list[TemplateInfo],
     template_context: DetectionTemplateContext,
     plan_masks_by_template: dict[int, np.ndarray],
+    pdf_word_boxes: list[PdfWordBox] | None = None,
 ) -> tuple[list[CandidateHit], dict[str, int]]:
     """Apply behavior-preserving color-family postprocess stages."""
 
@@ -108,6 +152,20 @@ def apply_color_postprocess(
         _expanded_box=expanded_box,
         _hue_close=hue_close,
     )
+    final_hits, socket_family_disambiguation = resolve_socket_family_hits(
+        final_hits,
+        final_hits + all_candidates,
+        detector_profile=detector_profile,
+        templates=templates,
+        pdf_word_boxes=list(pdf_word_boxes or []),
+    )
+    final_hits, pel_floor_box_disambiguation = resolve_pel_floor_box_hits(
+        final_hits,
+        detector_profile=detector_profile,
+        templates=templates,
+        pdf_word_boxes=list(pdf_word_boxes or []),
+        candidates=final_hits + all_candidates,
+    )
     final_hits, long_l_over_true_tb11_suppressed = suppress_long_l_rescue_over_tb11_waves(
         final_hits,
         pdf_candidates + removed_pdf_text_fallbacks,
@@ -128,6 +186,10 @@ def apply_color_postprocess(
         _template_name=template_context.template_name,
         _center_distance=center_distance,
     )
+    final_hits, weak_panel_tb11_suppressed = _suppress_weak_panel_tb11_hits(
+        final_hits,
+        templates,
+    )
     final_hits, duplicate_final_suppressed = dedupe_final_hits(final_hits)
     return final_hits, {
         "color_magenta_reclassed": color_magenta_reclassed,
@@ -136,7 +198,10 @@ def apply_color_postprocess(
         "long_l_over_tb11_promoted": long_l_over_tb11_promoted,
         "tb11_long_l_suppressed": tb11_long_l_suppressed,
         "final_label_disambiguation": final_label_disambiguation,
+        "socket_family_disambiguation": socket_family_disambiguation,
+        "pel_floor_box_disambiguation": pel_floor_box_disambiguation,
         "long_l_over_true_tb11_suppressed": long_l_over_true_tb11_suppressed,
         "weak_short_l_suppressed": weak_short_l_suppressed,
+        "weak_panel_tb11_suppressed": weak_panel_tb11_suppressed,
         "duplicate_final_suppressed": duplicate_final_suppressed,
     }

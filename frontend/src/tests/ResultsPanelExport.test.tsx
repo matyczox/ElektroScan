@@ -78,4 +78,49 @@ describe('ResultsPanel export', () => {
     expect(createObjectURL).toHaveBeenCalled();
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:wyniki');
   });
+
+  it('exports review JSON without calling the backend', () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const createObjectURL = vi.fn(() => 'blob:review-json');
+    const revokeObjectURL = vi.fn();
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createObjectURL });
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURL });
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+
+    render(
+      <ResultsPanel
+        projectId="project-1"
+        analysisContext={{ analysisId: 'analysis-1', sourcePdf: 'plan.pdf' }}
+        results={[
+          { name: '01_TM', count: 1, color: '#ef4444' },
+        ]}
+        boxes={[
+          {
+            id: 'box-1',
+            symbolName: '01_TM',
+            x: 10,
+            y: 10,
+            width: 20,
+            height: 20,
+            confidence: 0.9,
+            color: '#ef4444',
+            source: 'manual',
+            note: 'roiInspectorTop=01_TM PASS match=0.900',
+            reviewStatus: 'accepted',
+          },
+        ]}
+        symbolLabels={{ '01_TM': 'rozdzielnica glowna mieszkaniowa' }}
+        onRejectBox={vi.fn()}
+      />
+    );
+
+    fireEvent.click(screen.getByText('Eksport'));
+    fireEvent.click(screen.getByText('Eksportuj JSON review'));
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(createObjectURL).toHaveBeenCalledWith(expect.any(Blob));
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:review-json');
+  });
 });

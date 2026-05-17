@@ -352,6 +352,25 @@ def _color_fragment_suppression_reason(
     if protected_adjacent_text_label:
         return None
 
+    candidate_aspect = max(
+        float(candidate.bbox[2]) / max(1.0, float(candidate.bbox[3])),
+        float(candidate.bbox[3]) / max(1.0, float(candidate.bbox[2])),
+    )
+    protected_compact_color_symbol = (
+        candidate.source == "template"
+        and not candidate.is_text_label
+        and 1_500 <= candidate_area <= 3_300
+        and candidate_aspect <= 1.65
+        and stronger_area >= candidate_area * 1.25
+        and candidate.match_score >= 0.62
+        and candidate.verification_score >= 0.62
+        and candidate.coverage >= 0.78
+        and candidate.purity >= 0.74
+        and (iom <= 0.48 or x_overlap < 0.70 or y_overlap < 0.70)
+    )
+    if protected_compact_color_symbol:
+        return None
+
     same_template_parent_label_pair = (
         (
             candidate.source.startswith("template_parent_search_")
