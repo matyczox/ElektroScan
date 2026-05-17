@@ -1,22 +1,18 @@
 import base64
 import json
-import math
 import os
 import re
 import shutil
 import tempfile
 import time
 import uuid
-from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import Lock
 from typing import List, Optional
 from urllib.parse import quote
 
 import cv2
-import fitz
 import numpy as np
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -54,6 +50,16 @@ from api_auth import (
     _dev_auth_token_payload,
     _set_auth_cookie,
     require_user,
+)
+from api_rendering import (
+    ANALYSIS_DPI,
+    PREVIEW_DPI,
+    _build_pdf_diagnostics,
+    _clear_render_cache,
+    _pdf_page_size_at_dpi,
+    _preview_response_meta,
+    _render_pdf_for_session,
+    _render_preview_response_for_session,
 )
 from template_store import (
     _append_extracted_templates,
@@ -161,13 +167,6 @@ PROJECTS_DIR.mkdir(exist_ok=True)
 
 SNAPSHOT_EXECUTOR = ThreadPoolExecutor(max_workers=1)
 ANALYSIS_PROGRESS: dict[str, dict] = {}
-ANALYSIS_DPI = 300
-PREVIEW_DPI = int(os.getenv("ELEKTROSCAN_PREVIEW_DPI", "180"))
-RENDER_CACHE_MAX_ENTRIES = int(os.getenv("ELEKTROSCAN_RENDER_CACHE_MAX_ENTRIES", "4"))
-RENDER_CACHE: OrderedDict[tuple[str, int, int, tuple[str, ...]], np.ndarray] = OrderedDict()
-RENDER_CACHE_LOCK = Lock()
-
-
 def _env_flag(name: str, default: bool = False) -> bool:
     raw = os.getenv(name)
     if raw is None:
@@ -298,111 +297,6 @@ def _read_session_meta(session_id: str, upload_dir: Path = UPLOAD_DIR) -> dict:
         return {}
 
 
-def _normalized_hidden_layer_key(hidden_layers: list[str] | None = None) -> tuple[str, ...]:
-    return tuple(
-        sorted(
-            _normalize_layer_name(layer)
-            for layer in (hidden_layers or [])
-            if str(layer).strip()
-        )
-    )
-
-
-def _clear_render_cache(session_id: str | None = None) -> None:
-    with RENDER_CACHE_LOCK:
-        if session_id is None:
-            RENDER_CACHE.clear()
-            return
-        for key in list(RENDER_CACHE.keys()):
-            if key[0] == session_id:
-                RENDER_CACHE.pop(key, None)
-
-
-def _pdf_page_size_at_dpi(pdf_path: str, *, page: int = 0, dpi: int = ANALYSIS_DPI) -> dict:
-    doc = fitz.open(pdf_path)
-    try:
-        pg = doc.load_page(page)
-        zoom = dpi / 72.0
-        return {
-            "width": int(math.ceil(pg.rect.width * zoom)),
-            "height": int(math.ceil(pg.rect.height * zoom)),
-        }
-    finally:
-        doc.close()
-
-
-def _render_pdf_for_session(
-    session_id: str,
-    pdf_path: str,
-    *,
-    page: int = 0,
-    dpi: int = ANALYSIS_DPI,
-    hidden_layers: list[str] | None = None,
-    copy_image: bool = False,
-) -> tuple[np.ndarray, bool]:
-    key = (session_id, int(page), int(dpi), _normalized_hidden_layer_key(hidden_layers))
-    with RENDER_CACHE_LOCK:
-        cached = RENDER_CACHE.get(key)
-        if cached is not None:
-            RENDER_CACHE.move_to_end(key)
-            return (cached.copy() if copy_image else cached), True
-
-    rendered = pdf_to_png(pdf_path, page=page, dpi=dpi, hidden_layers=hidden_layers or [])
-
-    with RENDER_CACHE_LOCK:
-        RENDER_CACHE[key] = rendered
-        RENDER_CACHE.move_to_end(key)
-        while len(RENDER_CACHE) > max(1, RENDER_CACHE_MAX_ENTRIES):
-            RENDER_CACHE.popitem(last=False)
-
-    return (rendered.copy() if copy_image else rendered), False
-
-
-def _preview_response_meta(
-    plan_img: np.ndarray,
-    *,
-    preview_dpi: int,
-    analysis_size: dict,
-    cache_hit: bool,
-) -> dict:
-    return {
-        "previewDpi": int(preview_dpi),
-        "analysisDpi": int(ANALYSIS_DPI),
-        "analysisSize": analysis_size,
-        "isFullResolution": int(preview_dpi) == int(ANALYSIS_DPI),
-        "renderCacheHit": bool(cache_hit),
-        "imageWidth": int(plan_img.shape[1]),
-        "imageHeight": int(plan_img.shape[0]),
-    }
-
-
-def _render_preview_response_for_session(
-    session_id: str,
-    file_path: Path,
-    body: Optional["RenderRequest"] = None,
-) -> dict:
-    hidden_layers = body.hidden_layers if body else []
-    render_dpi = PREVIEW_DPI if body and body.preview else ANALYSIS_DPI
-    plan_img, cache_hit = _render_pdf_for_session(
-        session_id,
-        str(file_path),
-        dpi=render_dpi,
-        hidden_layers=hidden_layers,
-    )
-    analysis_size = _pdf_page_size_at_dpi(str(file_path), dpi=ANALYSIS_DPI)
-    pdf_diagnostics = _build_pdf_diagnostics(str(file_path), plan_img)
-    _, buffer_plan = cv2.imencode(".jpg", plan_img, [cv2.IMWRITE_JPEG_QUALITY, 80])
-    plan_base64 = base64.b64encode(buffer_plan).decode("utf-8")
-    return {
-        "planPreview": f"data:image/jpeg;base64,{plan_base64}",
-        "pdfDiagnostics": pdf_diagnostics,
-        **_preview_response_meta(
-            plan_img,
-            preview_dpi=render_dpi,
-            analysis_size=analysis_size,
-            cache_hit=cache_hit,
-        ),
-    }
 
 
 def _analysis_snapshot_path(analysis_id: str, analysis_dir: Path = ANALYSIS_DIR) -> Path:
@@ -505,87 +399,6 @@ def _normalize_legend_engine(engine: str | None) -> str:
     value = (engine or "auto").strip().lower()
     return value if value in {"auto", "raster", "vector_first"} else "auto"
 
-
-def _ink_profile_stats(plan_img: np.ndarray) -> dict:
-    arr = plan_img.astype(np.int16)
-    max_channel = arr.max(axis=2)
-    min_channel = arr.min(axis=2)
-    saturation = max_channel - min_channel
-    ink = max_channel < 245
-    ink_pixels = int(np.count_nonzero(ink))
-    total_pixels = int(plan_img.shape[0] * plan_img.shape[1])
-
-    if ink_pixels == 0 or total_pixels == 0:
-        return {
-            "inkPct": 0.0,
-            "colorfulInkPct": 0.0,
-            "grayInkPct": 0.0,
-            "recommendedProfile": "color",
-        }
-
-    colorful = ink & (saturation > 35)
-    colorful_pixels = int(np.count_nonzero(colorful))
-    gray_pixels = ink_pixels - colorful_pixels
-    colorful_ink_pct = (colorful_pixels / ink_pixels) * 100.0
-
-    return {
-        "inkPct": round((ink_pixels / total_pixels) * 100.0, 3),
-        "colorfulInkPct": round(colorful_ink_pct, 3),
-        "grayInkPct": round((gray_pixels / ink_pixels) * 100.0, 3),
-        "recommendedProfile": "gray" if colorful_ink_pct < 1.0 else "color",
-    }
-
-
-def _build_pdf_diagnostics(pdf_path: str, plan_img: np.ndarray | None = None) -> dict:
-    diagnostics = {
-        "pages": 0,
-        "layers": 0,
-        "textCharsPage1": 0,
-        "textBlocksPage1": 0,
-        "drawingsPage1": 0,
-        "imagesPage1": 0,
-        "inkPct": 0.0,
-        "colorfulInkPct": 0.0,
-        "grayInkPct": 0.0,
-        "recommendedProfile": "color",
-    }
-
-    try:
-        diagnostics["layers"] = len(get_pdf_layers(pdf_path))
-    except Exception:
-        pass
-
-    doc = fitz.open(pdf_path)
-    try:
-        diagnostics["pages"] = int(doc.page_count)
-        if doc.page_count:
-            page = doc.load_page(0)
-            text_blocks = page.get_text("blocks")
-            diagnostics["textBlocksPage1"] = int(
-                sum(1 for block in text_blocks if len(block) > 6 and block[6] == 0)
-            )
-            diagnostics["textCharsPage1"] = int(len(page.get_text("text") or ""))
-            try:
-                diagnostics["drawingsPage1"] = int(len(page.get_drawings()))
-            except Exception:
-                diagnostics["drawingsPage1"] = 0
-            try:
-                diagnostics["imagesPage1"] = int(len(page.get_images(full=True)))
-            except Exception:
-                diagnostics["imagesPage1"] = 0
-    finally:
-        doc.close()
-
-    if plan_img is None:
-        try:
-            plan_img = pdf_to_png(pdf_path, dpi=100)
-        except Exception:
-            plan_img = None
-
-    if plan_img is not None:
-        diagnostics.update(_ink_profile_stats(plan_img))
-
-    return diagnostics
 
 
 @app.get("/")
