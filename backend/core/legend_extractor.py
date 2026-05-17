@@ -25,7 +25,6 @@ import shutil
 import subprocess
 import tempfile
 import unicodedata
-from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
@@ -33,11 +32,41 @@ import fitz  # PyMuPDF
 import numpy as np
 
 try:
+    from .legend_mask_utils import _hsv_mask, _ink_mask, _legend_symbol_mask, _visible_ink_mask
+    from .legend_models import ExtractedSymbol, LegendExtractionBundle
+    from .legend_pdf_render import (
+        _normalize_layer_name,
+        _prepare_doc_with_hidden_layers,
+        get_pdf_layers,
+        pdf_to_png,
+    )
     from .legend_scene_transform import build_scene_transform, hash_pdf_file, rect_px300_to_pt
+    from .legend_text import (
+        _clean_ocr_label_text,
+        _clean_table_description_ocr_text,
+        _sanitize_filename,
+        _symbol_text_token,
+    )
+    from .legend_visual_code import _read_visual_symbol_code
     from .legend_vector_drafts import VectorLegendDraft, build_vector_legend_drafts
     from .legend_vector_profile import PageProfile, profile_legend_region
 except ImportError:  # pragma: no cover - keeps direct script execution working.
+    from legend_mask_utils import _hsv_mask, _ink_mask, _legend_symbol_mask, _visible_ink_mask
+    from legend_models import ExtractedSymbol, LegendExtractionBundle
+    from legend_pdf_render import (
+        _normalize_layer_name,
+        _prepare_doc_with_hidden_layers,
+        get_pdf_layers,
+        pdf_to_png,
+    )
     from legend_scene_transform import build_scene_transform, hash_pdf_file, rect_px300_to_pt
+    from legend_text import (
+        _clean_ocr_label_text,
+        _clean_table_description_ocr_text,
+        _sanitize_filename,
+        _symbol_text_token,
+    )
+    from legend_visual_code import _read_visual_symbol_code
     from legend_vector_drafts import VectorLegendDraft, build_vector_legend_drafts
     from legend_vector_profile import PageProfile, profile_legend_region
 
@@ -73,269 +102,6 @@ TEXT_MIN_OVERLAP_X = -15  # lekkie najście tekstu na symbol dozwolone
 # Maksymalna długość nazwy pliku
 MAX_FILENAME_LENGTH = 80
 
-VISUAL_CODE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-_VISUAL_CODE_TEMPLATES: list[tuple[str, np.ndarray]] | None = None
-
-
-# ── Pomocnicze ─────────────────────────────────────────────────────────────
-
-
-def _sanitize_filename(text: str) -> str:
-    """Czyści tekst do bezpiecznej nazwy pliku (ASCII, underscory)."""
-    text = text.strip().replace("\n", "_")
-    text = re.sub(r"[^\w\s-]", "", text)
-    text = re.sub(r"\s+", "_", text)
-    # Transliteracja polskich znaków (cv2.imwrite nie radzi z Unicode na Windows)
-    _PL = str.maketrans("ąćęłńóśźżĄĆĘŁŃÓŚŹŻ", "acelnoszzACELNOSZZ")
-    text = text.translate(_PL)
-    return text[:MAX_FILENAME_LENGTH].strip("_")
-
-
-def _clean_ocr_label_text(text: str) -> str | None:
-    """Turn noisy OCR from a legend description into a stable human label."""
-
-    raw = " ".join(str(text or "").replace("_", " ").split())
-    if sum(1 for char in raw if char.isalnum()) < 2:
-        return None
-
-    upper = unicodedata.normalize("NFKC", raw).upper()
-    upper = upper.translate(str.maketrans("ĄĆĘŁŃÓŚŹŻ", "ACELNOSZZ"))
-    upper = re.sub(r"[^A-Z0-9+\-/ ]+", " ", upper)
-    upper = re.sub(r"\s+", " ", upper).strip()
-    compact = re.sub(r"[^A-Z0-9]+", " ", upper)
-
-    def contains_any(*needles: str) -> bool:
-        return any(needle in compact for needle in needles)
-
-    voltage_match = re.search(r"\b(230|400)\s*V\b", compact)
-    voltage = f"{voltage_match.group(1)}V" if voltage_match else None
-    ip_match = re.search(r"\bIP\s*(20|44|54|65)\b", compact)
-    ip = f"IP{ip_match.group(1)}" if ip_match else None
-    phase_match = re.search(r"\b([135])\s*[-]?\s*F\b", compact)
-    phase = phase_match.group(1) if phase_match else None
-    if phase == "5":
-        # Tesseract commonly misreads the 3-phase row as 5-F on this CAD font.
-        phase = "3"
-
-    if "ROZDZ" in compact:
-        has_descriptor = any(
-            token in compact
-            for token in (
-                "GLOWNA",
-                "ADMINISTRACYJNA",
-                "MIESZKANIOWA",
-                "BUDYNKU",
-                "LOKALNA",
-                "PIETROWA",
-            )
-        )
-        if has_descriptor:
-            readable = re.sub(r"[^0-9A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż+\-/ ]+", " ", raw)
-            readable = re.sub(r"\s+", " ", readable).strip()
-            if readable:
-                return readable
-        return "ROZDZIELNICA"
-
-    if contains_any("WYPUST", "WYPUS", "WYFUS", "WYIFUS") and contains_any(
-        "SCIANY", "SCLANY", "SC1ANY"
-    ):
-        suffix = f" {voltage}" if voltage else ""
-        return f"WYPUST ZE SCIANY{suffix}".strip()
-
-    if contains_any("ZESTAW", "SOCKET KIT") and ("2X16" in compact or "SOCKET KIT" in compact):
-        return "ZESTAW GNIAZD 2x16A 3f 2x16A 1f"
-
-    if contains_any("BOLCEM", "ROICEM", "OCHRONNYM", "OCHRONNY"):
-        parts = ["GNIAZDO"]
-        if phase:
-            parts.append(f"{phase}-F")
-        parts.extend(["Z", "BOLCEM", "OCHRONNYM"])
-        if "16A" in compact or "I6A" in compact:
-            parts.append("16A")
-        if ip:
-            parts.append(ip)
-        return " ".join(parts)
-
-    # Generic fallback for other projects: keep readable OCR, but trim very long
-    # endings that usually contain accidental neighboring rows.
-    readable = re.sub(r"[^0-9A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż+\-/ ]+", " ", raw)
-    readable = re.sub(r"\s+", " ", readable).strip()
-    tokens = readable.split()
-    if len(tokens) > 12:
-        tokens = tokens[:12]
-    cleaned = " ".join(tokens)
-    if sum(1 for char in cleaned if char.isalnum()) < 2:
-        return None
-    return cleaned
-
-
-def _clean_table_description_ocr_text(text: str) -> str | None:
-    """Keep OCR table descriptions readable without forcing electrical shortcuts."""
-
-    raw = " ".join(str(text or "").replace("_", " ").split())
-    if sum(1 for char in raw if char.isalnum()) < 2:
-        return None
-
-    readable = re.sub(r"[^0-9A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż+\-/()., ]+", " ", raw)
-    readable = re.sub(r"\s+", " ", readable).strip(" .,-")
-    if not readable:
-        return None
-
-    compact = _sanitize_filename(readable).casefold().strip("_")
-    ignored = {
-        "legenda",
-        "legend",
-        "symbol",
-        "opis",
-        "nazwa",
-        "nazwa_artykulu",
-        "nazwaartykułu",
-        "indeks",
-        "producent",
-    }
-    if compact in ignored:
-        return None
-
-    tokens = readable.split()
-    if len(tokens) > 28:
-        tokens = tokens[:28]
-    cleaned = " ".join(tokens)
-    return cleaned if sum(1 for char in cleaned if char.isalnum()) >= 2 else None
-
-
-def _symbol_text_token(text: str) -> str | None:
-    """Return a short alphanumeric symbol token from PDF text, if it looks like one."""
-
-    token = _sanitize_filename(str(text or "")).upper()
-    if not re.fullmatch(r"[A-Z0-9_]{2,12}", token):
-        return None
-
-    compact = token.replace("_", "")
-    if not (2 <= len(compact) <= 10):
-        return None
-    if not re.search(r"[A-Z]", compact):
-        return None
-    if not (re.search(r"\d", compact) or len(compact) <= 4):
-        return None
-    if re.fullmatch(r"\d+(?:X\d+)+", compact):
-        return None
-
-    return compact
-
-
-def _normalize_visual_char_mask(mask: np.ndarray, size: tuple[int, int] = (32, 32)) -> np.ndarray:
-    """Normalize one isolated character mask for lightweight template matching."""
-
-    pixels = cv2.findNonZero(mask)
-    if pixels is None:
-        return np.zeros(size, dtype=np.uint8)
-
-    x, y, width, height = cv2.boundingRect(pixels)
-    crop = mask[y : y + height, x : x + width]
-    target_w, target_h = size
-    scale = min((target_w - 6) / max(1, width), (target_h - 6) / max(1, height))
-    resized_w = max(1, int(round(width * scale)))
-    resized_h = max(1, int(round(height * scale)))
-    resized = cv2.resize(crop, (resized_w, resized_h), interpolation=cv2.INTER_AREA)
-
-    canvas = np.zeros((target_h, target_w), dtype=np.uint8)
-    offset_x = (target_w - resized_w) // 2
-    offset_y = (target_h - resized_h) // 2
-    canvas[offset_y : offset_y + resized_h, offset_x : offset_x + resized_w] = resized
-    return canvas
-
-
-def _get_visual_code_templates() -> list[tuple[str, np.ndarray]]:
-    """Build small OCR templates from OpenCV fonts for short CAD-like legend codes."""
-
-    global _VISUAL_CODE_TEMPLATES
-    if _VISUAL_CODE_TEMPLATES is not None:
-        return _VISUAL_CODE_TEMPLATES
-
-    fonts = [
-        cv2.FONT_HERSHEY_SIMPLEX,
-        cv2.FONT_HERSHEY_PLAIN,
-        cv2.FONT_HERSHEY_DUPLEX,
-    ]
-    templates: list[tuple[str, np.ndarray]] = []
-    for char in VISUAL_CODE_CHARS:
-        for font in fonts:
-            for scale in (0.7, 0.9, 1.1, 1.3, 1.5):
-                for thickness in (1, 2):
-                    image = np.zeros((80, 80), dtype=np.uint8)
-                    cv2.putText(
-                        image,
-                        char,
-                        (8, 58),
-                        font,
-                        scale,
-                        255,
-                        thickness,
-                        cv2.LINE_AA,
-                    )
-                    templates.append((char, _normalize_visual_char_mask(image)))
-
-    _VISUAL_CODE_TEMPLATES = templates
-    return templates
-
-
-def _classify_visual_code_char(char_mask: np.ndarray) -> tuple[str, float]:
-    normalized = _normalize_visual_char_mask(char_mask)
-    best_char = ""
-    best_score = float("inf")
-
-    for candidate, template in _get_visual_code_templates():
-        score = float(np.mean(cv2.absdiff(normalized, template)) / 255.0)
-        if score < best_score:
-            best_char = candidate
-            best_score = score
-
-    return best_char, best_score
-
-
-def _read_visual_symbol_code(cell_image: np.ndarray) -> str | None:
-    """Read a short printed code from a simple table cell without external OCR."""
-
-    if cell_image.size == 0:
-        return None
-
-    mask = _visible_ink_mask(cell_image, gray_threshold=190)
-    if mask.shape[0] > CELL_BORDER_TRIM * 2:
-        mask[:CELL_BORDER_TRIM, :] = 0
-        mask[-CELL_BORDER_TRIM:, :] = 0
-    if mask.shape[1] > CELL_BORDER_TRIM * 2:
-        mask[:, :CELL_BORDER_TRIM] = 0
-        mask[:, -CELL_BORDER_TRIM:] = 0
-
-    pixels = cv2.findNonZero(mask)
-    if pixels is None:
-        return None
-
-    x, y, width, height = cv2.boundingRect(pixels)
-    if height < 8 or width < 4:
-        return None
-    mask = mask[max(0, y - 2) : y + height + 2, max(0, x - 2) : x + width + 2]
-
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    boxes: list[tuple[int, int, int, int]] = []
-    for contour in contours:
-        cx, cy, cw, ch = cv2.boundingRect(contour)
-        if cw * ch < 5 or ch < 6:
-            continue
-        boxes.append((cx, cy, cw, ch))
-
-    if not 1 <= len(boxes) <= 6:
-        return None
-
-    token = ""
-    for cx, cy, cw, ch in sorted(boxes, key=lambda item: item[0]):
-        char, score = _classify_visual_code_char(mask[cy : cy + ch, cx : cx + cw])
-        if not char or score > 0.22:
-            return None
-        token += char
-
-    return _symbol_text_token(token)
-
 
 def _next_template_index(output_path: Path) -> int:
     """Return next numeric template prefix so repeated legend crops append."""
@@ -347,46 +113,6 @@ def _next_template_index(output_path: Path) -> int:
                 max_index = max(max_index, int(match.group(1)))
     return max_index + 1
 
-
-def _hsv_mask(image_bgr: np.ndarray) -> np.ndarray:
-    """Tworzy binarną maskę kolorowych pikseli (HSV)."""
-    hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
-    return cv2.inRange(hsv, HSV_LOWER, HSV_UPPER)
-
-
-def _ink_mask(image_bgr: np.ndarray, threshold: int = 238) -> np.ndarray:
-    """Create a binary mask for dark ink in gray/black PDFs."""
-    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
-    ink_pixels = gray < threshold
-    hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
-    color_pixels = cv2.inRange(hsv, HSV_LOWER, HSV_UPPER) > 0
-    ink_pixels = np.logical_and(ink_pixels, np.logical_not(color_pixels))
-    return np.where(ink_pixels, 255, 0).astype(np.uint8)
-
-
-def _legend_symbol_mask(image_bgr: np.ndarray, mask_mode: str = "auto") -> tuple[np.ndarray, str]:
-    """Pick HSV color masking or dark-ink masking for legend segmentation."""
-    requested = (mask_mode or "auto").lower()
-    if requested not in {"auto", "color", "gray"}:
-        requested = "auto"
-
-    color_mask = _hsv_mask(image_bgr)
-    if requested == "color":
-        return color_mask, "color"
-
-    ink_mask = _ink_mask(image_bgr)
-    if requested == "gray":
-        return ink_mask, "gray"
-
-    color_pixels = int(cv2.countNonZero(color_mask))
-    ink_pixels = int(cv2.countNonZero(ink_mask))
-    if ink_pixels == 0:
-        return color_mask, "color"
-
-    color_ratio = color_pixels / max(ink_pixels, 1)
-    if color_pixels < 100 or color_ratio < 0.08:
-        return ink_mask, "gray"
-    return color_mask, "color"
 
 
 def _filter_gray_legend_symbol_contours(
@@ -1784,14 +1510,6 @@ def _table_symbol_images_have_color(raw_symbols: list[tuple[np.ndarray, str]]) -
     return colored >= max(3, int(len(raw_symbols) * 0.6))
 
 
-def _visible_ink_mask(image_bgr: np.ndarray, gray_threshold: int = 235) -> np.ndarray:
-    """Mask visible dark or colored drawing pixels."""
-
-    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
-    dark_pixels = gray < gray_threshold
-    color_pixels = _hsv_mask(image_bgr) > 0
-    return np.where(np.logical_or(dark_pixels, color_pixels), 255, 0).astype(np.uint8)
-
 
 def _find_left_symbol_gutter_x(
     legend_area: np.ndarray,
@@ -2811,29 +2529,6 @@ def _extract_left_gutter_table_legend_raw(
     return raw_symbols, (crop_x1, crop_y1, crop_x2 - crop_x1, crop_y2 - crop_y1)
 
 
-@dataclass
-class ExtractedSymbol:
-    """Wynik ekstrakcji jednego symbolu z legendy."""
-
-    name: str
-    image: np.ndarray  # BGR z CZARNYM tłem (tylko kolorowe piksele symbolu)
-    index: int
-    pixel_count: int = 0  # liczba kolorowych pikseli — przydatna do sortowania
-
-@dataclass
-class LegendExtractionBundle:
-    """Detailed extraction result used by the vector-first spike."""
-
-    extracted_symbols: list[ExtractedSymbol]
-    used_legend_rect_px_300: tuple[int, int, int, int]
-    engine_requested: str
-    engine_used: str
-    fallback_reason: str | None = None
-    page_profile: dict | None = None
-    scene_transform: dict | None = None
-    vector_drafts: list[dict] | None = None
-    vector_primitives: list[dict] | None = None
-
 
 def _is_spurious_color_legend_fragment(
     *,
@@ -2859,132 +2554,6 @@ def _is_spurious_color_legend_fragment(
         and cur_h <= max(28, int(prev_h * 0.72))
     )
 
-
-def get_pdf_layers(pdf_path: str) -> list[dict]:
-    """
-    Zwraca listę warstw (Optional Content Groups - OCG) dostępnych w pliku PDF.
-    """
-    doc = fitz.open(pdf_path)
-    layers = []
-
-    # Próbujemy pobrać konfigurację warstw
-    try:
-        ui_configs = doc.layer_ui_configs()
-        if ui_configs:
-            for conf in ui_configs:
-                # conf to dict, np. {'text': 'Warstwa 1', 'depth': 0, 'on': True, ...}
-                if "text" in conf:
-                    layers.append({"name": conf["text"], "visible": conf.get("on", True)})
-    except Exception as e:
-        print(f"Błąd odczytu warstw: {e}")
-
-    return layers
-
-
-def _render_doc_to_bgr(doc: fitz.Document, page: int = 0, dpi: int = 300) -> np.ndarray:
-    """Render a PDF page from an already prepared document."""
-    pg = doc.load_page(page)
-    zoom = dpi / 72.0
-    pix = pg.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
-    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, 3)
-    return cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-
-
-def _normalize_layer_name(name: str) -> str:
-    """Normalize layer names to make matching resilient to PDF text encoding quirks."""
-    text = str(name).strip()
-
-    # When layer names pass through different shells / encodings we sometimes
-    # get mojibake like "UKLAD" instead of "UKŁAD". Repair that first when
-    # possible, then normalize everything to the same ASCII-ish form.
-    try:
-        repaired = text.encode("latin1").decode("utf-8")
-        if "\ufffd" not in repaired:
-            text = repaired
-    except (UnicodeEncodeError, UnicodeDecodeError):
-        pass
-
-    text = text.casefold().translate(str.maketrans({"ł": "l", "Ł": "l"}))
-    normalized = unicodedata.normalize("NFKD", text)
-    return "".join(char for char in normalized if not unicodedata.combining(char))
-
-
-def _get_ocg_xrefs_in_catalog_order(doc: fitz.Document) -> list[int]:
-    """Read OCG xrefs from the PDF catalog in their declared order."""
-    catalog_object = doc.xref_object(doc.pdf_catalog())
-    match = re.search(r"/OCGs\s*\[(.*?)\]", catalog_object, re.S)
-    if not match:
-        return []
-
-    return [int(value) for value in re.findall(r"(\d+)\s+0\s+R", match.group(1))]
-
-
-def _prepare_doc_with_hidden_layers(
-    pdf_path: str,
-    hidden_layers: list[str] | None = None,
-) -> fitz.Document:
-    """
-    Open a PDF and apply hidden OCG layers in a way that affects rendering.
-
-    Some PDFs expose layer UI state, but PyMuPDF's direct `set_layer_ui_config()`
-    does not change `get_pixmap()` output for them. Updating the OCG defaults and
-    reopening the modified in-memory PDF does.
-    """
-    doc = fitz.open(pdf_path)
-    hidden_layers = [name for name in (hidden_layers or []) if name]
-    if not hidden_layers:
-        return doc
-
-    try:
-        ui_configs = doc.layer_ui_configs() or []
-        ocg_xrefs = _get_ocg_xrefs_in_catalog_order(doc)
-        if not ui_configs or not ocg_xrefs:
-            return doc
-
-        hidden_set = {_normalize_layer_name(name) for name in hidden_layers}
-        off_refs: list[int] = []
-
-        for config in ui_configs:
-            layer_name = str(config.get("text", "")).strip()
-            if not layer_name:
-                continue
-
-            number = config.get("number")
-            if not isinstance(number, int):
-                continue
-            if number < 0 or number >= len(ocg_xrefs):
-                continue
-
-            if _normalize_layer_name(layer_name) in hidden_set:
-                off_refs.append(ocg_xrefs[number])
-        if not off_refs:
-            return doc
-
-        catalog_xref = doc.pdf_catalog()
-        off_value = "[" + " ".join(f"{ref} 0 R" for ref in off_refs) + "]"
-
-        doc.xref_set_key(catalog_xref, "OCProperties/D/OFF", off_value)
-
-        mutated_pdf = doc.write()
-        doc.close()
-        return fitz.open(stream=mutated_pdf, filetype="pdf")
-    except Exception as e:
-        print(f"Błąd ukrywania warstw: {e}")
-        return doc
-
-
-def pdf_to_png(
-    pdf_path: str, page: int = 0, dpi: int = 300, hidden_layers: list[str] = None
-) -> np.ndarray:
-    """
-    Konwertuje stronę PDF do obrazu OpenCV (BGR).
-    Pozwala na wyłączenie wybranych warstw (hidden_layers) przed renderowaniem.
-    """
-    doc = _prepare_doc_with_hidden_layers(pdf_path, hidden_layers=hidden_layers)
-    try:
-        return _render_doc_to_bgr(doc, page=page, dpi=dpi)
-    finally:
-        doc.close()
 
 
 def _extract_legend_raster_current(
