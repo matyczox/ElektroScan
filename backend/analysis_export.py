@@ -3,11 +3,77 @@
 from __future__ import annotations
 
 import io
+from collections import OrderedDict
 import re
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from xml.sax.saxutils import escape as xml_escape
+
+from template_store import (
+    _clean_template_display_label,
+    _display_template_name,
+    _load_template_labels,
+)
+
+
+def _export_label_for_symbol(
+    symbol_name: str,
+    labels: dict[str, str],
+) -> str:
+    clean_label = _clean_template_display_label(labels.get(symbol_name))
+    return clean_label or _display_template_name(symbol_name)
+
+
+def _build_analysis_export_rows(
+    body: "AnalysisExportRequest",
+    templates_dir: Path,
+) -> list[dict]:
+    labels = _load_template_labels(templates_dir)
+    for key, value in (body.symbol_labels or {}).items():
+        clean_label = _clean_template_display_label(value)
+        if clean_label:
+            labels[str(key)] = clean_label
+
+    counts_by_symbol: OrderedDict[str, int] = OrderedDict()
+    colors_by_symbol: dict[str, str] = {}
+
+    if body.boxes:
+        for box in body.boxes:
+            symbol_name = str(box.symbol_name or "").strip()
+            if not symbol_name:
+                continue
+            counts_by_symbol[symbol_name] = counts_by_symbol.get(symbol_name, 0) + 1
+            if box.color:
+                colors_by_symbol.setdefault(symbol_name, box.color)
+    else:
+        for result in body.results:
+            symbol_name = str(result.name or "").strip()
+            if not symbol_name:
+                continue
+            count = max(0, int(result.count or 0))
+            counts_by_symbol[symbol_name] = counts_by_symbol.get(symbol_name, 0) + count
+            if result.color:
+                colors_by_symbol.setdefault(symbol_name, result.color)
+
+    aggregated: OrderedDict[str, dict] = OrderedDict()
+    for symbol_name, count in counts_by_symbol.items():
+        if count <= 0:
+            continue
+        element_name = _export_label_for_symbol(symbol_name, labels)
+        aggregate_key = " ".join(element_name.casefold().split())
+        if aggregate_key not in aggregated:
+            aggregated[aggregate_key] = {
+                "element": element_name,
+                "count": 0,
+                "templateIds": [],
+                "color": colors_by_symbol.get(symbol_name),
+            }
+        aggregated[aggregate_key]["count"] += count
+        if symbol_name not in aggregated[aggregate_key]["templateIds"]:
+            aggregated[aggregate_key]["templateIds"].append(symbol_name)
+
+    return list(aggregated.values())
 
 
 def _xlsx_col_name(index: int) -> str:

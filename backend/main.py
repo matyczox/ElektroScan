@@ -41,7 +41,20 @@ from api_models import (
     TemplateCropRequest,
     TemplateUpdateRequest,
 )
-from analysis_export import _build_analysis_export_xlsx, _export_filename
+from analysis_export import (
+    _build_analysis_export_rows,
+    _build_analysis_export_xlsx,
+    _export_filename,
+)
+from api_auth import (
+    SESSION_COOKIE_NAME,
+    SESSION_TTL_DAYS,
+    _clear_auth_cookie,
+    _current_user_from_request,
+    _dev_auth_token_payload,
+    _set_auth_cookie,
+    require_user,
+)
 from template_store import (
     _append_extracted_templates,
     _clean_template_display_label,
@@ -70,7 +83,6 @@ from auth_store import (
     delete_auth_sessions_for_user,
     get_analysis_run_for_project,
     get_project_for_user,
-    get_user_by_session_token,
     init_database,
     list_analysis_runs_for_project,
     list_auth_sessions_for_user,
@@ -140,15 +152,6 @@ ANALYSIS_DIR = BASE_DIR / "analysis_debug"
 DATA_DIR = BASE_DIR / "data"
 PROJECTS_DIR = DATA_DIR / "projects"
 SESSION_META_SUFFIX = ".meta.json"
-SESSION_COOKIE_NAME = "elektroscan_session"
-SESSION_TTL_DAYS = int(os.getenv("ELEKTROSCAN_SESSION_TTL_DAYS", "30"))
-AUTH_COOKIE_SECURE = str(os.getenv("ELEKTROSCAN_AUTH_COOKIE_SECURE", "")).lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
-
 # Upewniamy się, że foldery istnieją
 UPLOAD_DIR.mkdir(exist_ok=True)
 TEMPLATES_DIR.mkdir(exist_ok=True)
@@ -174,8 +177,6 @@ def _env_flag(name: str, default: bool = False) -> bool:
 
 VERBOSE_LOGS = _env_flag("ELEKTROSCAN_VERBOSE_LOGS", default=True)
 DEFAULT_ANALYSIS_DEBUG = _env_flag("ELEKTROSCAN_ANALYSIS_DEBUG", default=True)
-AUTH_DEV_TOKENS = _env_flag("ELEKTROSCAN_AUTH_DEV_TOKENS", default=True)
-
 
 def _log(message: str) -> None:
     if VERBOSE_LOGS:
@@ -195,38 +196,6 @@ def _log(message: str) -> None:
 
 
 
-
-def _set_auth_cookie(response: Response, token: str) -> None:
-    response.set_cookie(
-        SESSION_COOKIE_NAME,
-        token,
-        max_age=SESSION_TTL_DAYS * 24 * 60 * 60,
-        httponly=True,
-        secure=AUTH_COOKIE_SECURE,
-        samesite="lax",
-        path="/",
-    )
-
-
-def _clear_auth_cookie(response: Response) -> None:
-    response.delete_cookie(SESSION_COOKIE_NAME, path="/")
-
-
-def _current_user_from_request(request: Request) -> dict | None:
-    return get_user_by_session_token(request.cookies.get(SESSION_COOKIE_NAME))
-
-
-def _dev_auth_token_payload(field_name: str, token: str | None) -> dict:
-    if not AUTH_DEV_TOKENS or not token:
-        return {}
-    return {field_name: token}
-
-
-def require_user(request: Request) -> dict:
-    user = _current_user_from_request(request)
-    if user is None:
-        raise HTTPException(status_code=401, detail="Wymagane logowanie.")
-    return user
 
 
 def _project_or_404(project_id: str, user: dict) -> dict:
@@ -475,66 +444,6 @@ def _template_path_for_id(template_id: str, templates_dir: Path = TEMPLATES_DIR)
 
     suffix_matches = sorted(templates_dir.glob(f"*_{safe_stem}.png"))
     return suffix_matches[0] if suffix_matches else None
-
-
-def _export_label_for_symbol(
-    symbol_name: str,
-    labels: dict[str, str],
-) -> str:
-    clean_label = _clean_template_display_label(labels.get(symbol_name))
-    return clean_label or _display_template_name(symbol_name)
-
-
-def _build_analysis_export_rows(
-    body: "AnalysisExportRequest",
-    templates_dir: Path,
-) -> list[dict]:
-    labels = _load_template_labels(templates_dir)
-    for key, value in (body.symbol_labels or {}).items():
-        clean_label = _clean_template_display_label(value)
-        if clean_label:
-            labels[str(key)] = clean_label
-
-    counts_by_symbol: OrderedDict[str, int] = OrderedDict()
-    colors_by_symbol: dict[str, str] = {}
-
-    if body.boxes:
-        for box in body.boxes:
-            symbol_name = str(box.symbol_name or "").strip()
-            if not symbol_name:
-                continue
-            counts_by_symbol[symbol_name] = counts_by_symbol.get(symbol_name, 0) + 1
-            if box.color:
-                colors_by_symbol.setdefault(symbol_name, box.color)
-    else:
-        for result in body.results:
-            symbol_name = str(result.name or "").strip()
-            if not symbol_name:
-                continue
-            count = max(0, int(result.count or 0))
-            counts_by_symbol[symbol_name] = counts_by_symbol.get(symbol_name, 0) + count
-            if result.color:
-                colors_by_symbol.setdefault(symbol_name, result.color)
-
-    aggregated: OrderedDict[str, dict] = OrderedDict()
-    for symbol_name, count in counts_by_symbol.items():
-        if count <= 0:
-            continue
-        element_name = _export_label_for_symbol(symbol_name, labels)
-        aggregate_key = " ".join(element_name.casefold().split())
-        if aggregate_key not in aggregated:
-            aggregated[aggregate_key] = {
-                "element": element_name,
-                "count": 0,
-                "templateIds": [],
-                "color": colors_by_symbol.get(symbol_name),
-            }
-        aggregated[aggregate_key]["count"] += count
-        if symbol_name not in aggregated[aggregate_key]["templateIds"]:
-            aggregated[aggregate_key]["templateIds"].append(symbol_name)
-
-    return list(aggregated.values())
-
 
 
 def _slowest_stages(timings_ms: dict[str, float], limit: int = 8) -> list[dict]:
