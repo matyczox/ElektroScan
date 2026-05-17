@@ -53,8 +53,6 @@ from core.detector_diagnostics import (
 )
 from core.detector_masks import (
     _build_search_rois,
-    _hsv_mask,
-    _ink_mask,
 )
 from core.detector_models import (
     CandidateHit,
@@ -73,6 +71,7 @@ from core.detector_pdf_policy import (
     filter_pdf_text_fallbacks,
 )
 from core.detector_parent_search import search_parent_candidates
+from core.detector_plan_masks import PlanMaskCache
 from core.detector_scanning import scan_template_candidates
 from core.detector_templates import (
     _build_socket_07_promotions,
@@ -189,59 +188,6 @@ def _detect_symbols_pipeline(
         )
         exclude_rects.extend(gray_title_exclude_rects)
 
-    color_masks_cache: dict[str, np.ndarray] = {}
-    ink_mask_cache: np.ndarray | None = None
-    dilated_ink_mask_cache: np.ndarray | None = None
-    empty_plan_mask_cache: np.ndarray | None = None
-
-    def _get_ink_plan_mask(*, dilate: bool) -> np.ndarray:
-        nonlocal ink_mask_cache, dilated_ink_mask_cache
-        if ink_mask_cache is None:
-            ink_mask_cache = _ink_mask(plan_image, dilate=False)
-            for ex, ey, ew, eh in exclude_rects:
-                cv2.rectangle(ink_mask_cache, (ex, ey), (ex + ew, ey + eh), 0, -1)
-        if not dilate:
-            return ink_mask_cache
-        if dilated_ink_mask_cache is None:
-            dilated_ink_mask_cache = cv2.dilate(
-                ink_mask_cache,
-                np.ones((3, 3), np.uint8),
-                iterations=1,
-            )
-        return dilated_ink_mask_cache
-
-    def _get_empty_plan_mask() -> np.ndarray:
-        nonlocal empty_plan_mask_cache
-        if empty_plan_mask_cache is None:
-            empty_plan_mask_cache = np.zeros(plan_image.shape[:2], dtype=np.uint8)
-        return empty_plan_mask_cache
-
-    def _get_plan_mask(template: TemplateInfo) -> np.ndarray:
-        if detector_profile == "gray":
-            return _get_ink_plan_mask(dilate=True)
-
-        if template.dominant_hsv is None:
-            return _get_empty_plan_mask()
-
-        if template.dominant_hsv is not None:
-            cache_key = color_strategy.color_mask_cache_key(template)
-            if cache_key not in color_masks_cache:
-                mask = color_strategy.build_color_plan_mask(
-                    plan_image=plan_image,
-                    plan_hsv=plan_hsv,
-                    template=template,
-                    exclude_rects=exclude_rects,
-                )
-                if cache_key is not None:
-                    color_masks_cache[cache_key] = mask
-                return mask
-            return color_masks_cache[cache_key]
-
-        fallback = _hsv_mask(plan_image, dilate=False, hsv_image=plan_hsv)
-        for ex, ey, ew, eh in exclude_rects:
-            cv2.rectangle(fallback, (ex, ey), (ex + ew, ey + eh), 0, -1)
-        return fallback
-
     phase_start = time.perf_counter()
     _progress("pdf_text", 12, "Odczyt pomocniczych tekstow PDF")
     pdf_hits_by_template = _collect_pdf_text_hits(
@@ -259,6 +205,12 @@ def _detect_symbols_pipeline(
     phase_start = time.perf_counter()
     _progress("prepare", 18, "Przygotowanie masek i wariantow")
     plan_hsv = cv2.cvtColor(plan_image, cv2.COLOR_BGR2HSV) if detector_profile == "color" else None
+    plan_mask_cache = PlanMaskCache(
+        plan_image=plan_image,
+        plan_hsv=plan_hsv,
+        exclude_rects=exclude_rects,
+        detector_profile=detector_profile,
+    )
 
     variant_workers = max(1, min(len(templates), DETECTOR_POSTPROCESS_MAX_WORKERS))
     used_scales = list(GRAY_SCALES) if detector_profile == "gray" else list(SCALES)
@@ -336,21 +288,17 @@ def _detect_symbols_pipeline(
     unique_mask_keys = set(template_by_mask_key)
 
     def _build_cached_color_mask(cache_key: str) -> tuple[str, np.ndarray]:
-        mask = color_strategy.build_color_plan_mask(
-            plan_image=plan_image,
-            plan_hsv=plan_hsv,
-            template=template_by_mask_key[cache_key],
-            exclude_rects=exclude_rects,
-        )
-        return cache_key, mask
+        return cache_key, plan_mask_cache.build_color_mask(template_by_mask_key[cache_key])
 
     if unique_mask_keys:
         mask_workers = max(1, min(len(unique_mask_keys), DETECTOR_POSTPROCESS_MAX_WORKERS))
         with ThreadPoolExecutor(max_workers=mask_workers) as pool:
-            color_masks_cache.update(dict(pool.map(_build_cached_color_mask, unique_mask_keys)))
+            plan_mask_cache.color_masks_cache.update(
+                dict(pool.map(_build_cached_color_mask, unique_mask_keys))
+            )
 
     for template_id, template in enumerate(templates):
-        plan_masks_by_template[template_id] = _get_plan_mask(template)
+        plan_masks_by_template[template_id] = plan_mask_cache.get_plan_mask(template)
     plan_mask_foregrounds = {
         template_id: int(cv2.countNonZero(plan_mask))
         for template_id, plan_mask in plan_masks_by_template.items()
@@ -389,7 +337,7 @@ def _detect_symbols_pipeline(
     timings["gray_suppress"] = 0.0
     if detector_profile == "gray":
         _t_suppress = time.perf_counter()
-        _raw_dilated = _get_ink_plan_mask(dilate=True)
+        _raw_dilated = plan_mask_cache.get_ink_plan_mask(dilate=True)
         gray_scan_masks = gray_strategy.build_gray_scan_masks(
             plan_image=plan_image,
             templates=templates,
