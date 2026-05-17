@@ -10,25 +10,21 @@ import numpy as np
 
 def _safe_cpu_count() -> int:
     """Return a sane positive CPU count fallback."""
-
     return max(1, int(os.cpu_count() or 1))
 
 
 def _default_opencv_threads() -> int:
     """Keep OpenCV single-threaded while Python spreads variant scan tasks."""
-
     return 1
 
 
 def _default_detector_workers() -> int:
     """Use bounded parallelism; large PDFs can allocate huge match maps per worker."""
-
     return min(_safe_cpu_count(), 8)
 
 
 def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
     """Read an integer env var safely."""
-
     raw = os.getenv(name)
     if raw is None or raw == "":
         return max(minimum, default)

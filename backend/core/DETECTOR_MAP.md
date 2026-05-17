@@ -45,7 +45,8 @@ backend bez czytania kilku tysiecy linii naraz.
 2. `detector_clustering.py`: oddzielic geometrie, ranking winnera i clustering.
 3. `detector_masks.py`: oddzielic mask building od metryk fragmentow/wave/rail.
 4. `legend_extractor.py`: rozdzielic raster/table/OCR/vector.
-5. `main.py`: rozbic routery i serwisy dopiero po ustabilizowaniu core.
+5. `main.py`: trzymac tylko setup aplikacji i cienkie endpointy; ciezsze helpery
+   API mieszkaja w `backend/api_*_service.py`.
 
 ## Required Smoke Before Commit
 

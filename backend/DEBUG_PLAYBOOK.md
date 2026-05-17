@@ -37,8 +37,9 @@ npm run build
   `backend/core/detector_candidate_selection.py`.
 - Legenda: `backend/core/LEGEND_MAP.md`, potem `legend_extractor.py` i
   wyspecjalizowane `legend_*`.
-- API/export/template store: `backend/main.py`, `backend/analysis_export.py`,
-  `backend/template_store.py`.
+- API/export/template store: `backend/main.py`, `backend/api_preview_service.py`,
+  `backend/api_legend_service.py`, `backend/api_debug_service.py`,
+  `backend/analysis_export.py`, `backend/template_store.py`.
 
 ## Zasady Detektora
 
@@ -70,4 +71,3 @@ Dobry sentinel opisuje objaw:
 2. Porownaj diff z ostatnim zielonym commitem.
 3. Jesli to import/cache/order effect, napraw refactor.
 4. Jesli to realny bug silnika, zatrzymaj refactor i zrob osobny fix commit.
-
