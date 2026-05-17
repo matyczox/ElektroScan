@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from dataclasses import dataclass
-
 import cv2
 import numpy as np
 
@@ -175,6 +172,13 @@ from core.detector_config import (
     ROI_PADDING_RATIO,
 )
 from core.detector_models import CandidateHit
+from core.detector_color_hit_rules import evaluate_color_hit_rules
+from core.detector_validation_cache import (
+    ValidationMaskCache,
+    _context_purity,
+    _gray_rect_frame_evidence_ok,
+    _is_gray_rect_frame_candidate,
+)
 from core.detector_mask_builders import (
     _build_search_rois,
     _cached_dilated_mask,
@@ -188,7 +192,6 @@ from core.detector_mask_builders import (
     _suppress_long_strokes,
 )
 from core.detector_shape_metrics import (
-    _context_purity,
     _extract_label_content_mask,
     _foreground_path_variance_ratio,
     _foreground_span_ratios,
@@ -199,212 +202,6 @@ from core.detector_shape_metrics import (
     _thickness_normalized_mask,
     _tight_mask_crop,
 )
-
-
-@dataclass(slots=True)
-class ValidationMaskCache:
-    """Per-validation-run cache for template-mask derived metrics."""
-
-    normalized_masks: dict[int, np.ndarray]
-    normalized_pixels: dict[int, int]
-    centroids: dict[int, tuple[float, float] | None]
-    content_bboxes: dict[int, tuple[int, int, int, int] | None]
-    foreground_integrals: dict[int, np.ndarray]
-
-    @classmethod
-    def build(
-        cls,
-        hits: list[CandidateHit],
-        plan_masks: Iterable[np.ndarray] = (),
-    ) -> "ValidationMaskCache":
-        transformed_masks: dict[int, np.ndarray] = {}
-        content_masks: dict[int, np.ndarray] = {}
-        for hit in hits:
-            if hit.transformed_mask is not None:
-                transformed_masks[id(hit.transformed_mask)] = hit.transformed_mask
-            if hit.content_mask is not None:
-                content_masks[id(hit.content_mask)] = hit.content_mask
-
-        foreground_integrals: dict[int, np.ndarray] = {}
-        for mask in plan_masks:
-            if not isinstance(mask, np.ndarray):
-                continue
-            mask_id = id(mask)
-            if mask_id in foreground_integrals:
-                continue
-            foreground_integrals[mask_id] = cv2.integral(
-                (mask > 0).astype(np.uint8, copy=False),
-                sdepth=cv2.CV_32S,
-            )
-
-        normalized_masks: dict[int, np.ndarray] = {}
-        normalized_pixels: dict[int, int] = {}
-        centroids: dict[int, tuple[float, float] | None] = {}
-        for mask_id, mask in transformed_masks.items():
-            normalized = _thickness_normalized_mask(mask)
-            normalized_masks[mask_id] = normalized
-            normalized_pixels[mask_id] = max(1, int(cv2.countNonZero(normalized)))
-            centroids[mask_id] = _mask_centroid(mask)
-
-        return cls(
-            normalized_masks=normalized_masks,
-            normalized_pixels=normalized_pixels,
-            centroids=centroids,
-            content_bboxes={
-                mask_id: _mask_bbox(mask)
-                for mask_id, mask in content_masks.items()
-            },
-            foreground_integrals=foreground_integrals,
-        )
-
-    def normalized_mask(self, mask: np.ndarray) -> np.ndarray:
-        cached = self.normalized_masks.get(id(mask))
-        if cached is not None:
-            return cached
-        return _thickness_normalized_mask(mask)
-
-    def normalized_pixel_count(self, mask: np.ndarray) -> int:
-        cached = self.normalized_pixels.get(id(mask))
-        if cached is not None:
-            return cached
-        return max(1, int(cv2.countNonZero(self.normalized_mask(mask))))
-
-    def centroid(self, mask: np.ndarray) -> tuple[float, float] | None:
-        cached = self.centroids.get(id(mask))
-        if id(mask) in self.centroids:
-            return cached
-        return _mask_centroid(mask)
-
-    def content_bbox(self, mask: np.ndarray) -> tuple[int, int, int, int] | None:
-        cached = self.content_bboxes.get(id(mask))
-        if id(mask) in self.content_bboxes:
-            return cached
-        return _mask_bbox(mask)
-
-    def foreground_count(
-        self,
-        mask: np.ndarray,
-        bbox: tuple[int, int, int, int],
-    ) -> int:
-        integral = self.foreground_integrals.get(id(mask))
-        if integral is None:
-            roi = _roi_mask(mask, bbox)
-            return 0 if roi is None else int(cv2.countNonZero(roi))
-
-        x, y, w, h = bbox
-        x2 = x + w
-        y2 = y + h
-        return int(integral[y2, x2] - integral[y, x2] - integral[y2, x] + integral[y, x])
-
-
-
-def _is_gray_rect_frame_candidate(hit: CandidateHit) -> bool:
-    if hit.transformed_mask is None:
-        return False
-
-    width, height = hit.bbox[2], hit.bbox[3]
-    aspect = max(width / max(1, height), height / max(1, width))
-    density = hit.pixel_count / max(1, width * height)
-    return (
-        hit.dominant_hsv is None
-        and not hit.is_text_label
-        and aspect >= GRAY_RECT_FRAME_MIN_ASPECT
-        and GRAY_RECT_FRAME_MIN_DENSITY <= density <= GRAY_RECT_FRAME_MAX_DENSITY
-    )
-
-
-def _gray_rect_frame_evidence_ok(roi: np.ndarray, template_mask: np.ndarray) -> bool:
-    """Check that a hollow frame has real ink on its perimeter and an empty middle."""
-
-    height, width = template_mask.shape[:2]
-    band = max(2, min(height, width) // 5)
-    intersection = cv2.bitwise_and(roi, template_mask)
-    edge_slices = (
-        (slice(0, band), slice(None)),
-        (slice(height - band, height), slice(None)),
-        (slice(None), slice(0, band)),
-        (slice(None), slice(width - band, width)),
-    )
-
-    edge_coverages: list[float] = []
-    for edge_slice in edge_slices:
-        template_pixels = cv2.countNonZero(template_mask[edge_slice])
-        intersection_pixels = cv2.countNonZero(intersection[edge_slice])
-        edge_coverages.append(intersection_pixels / max(1, template_pixels))
-
-    inner = roi[band : height - band, band : width - band]
-    center_density = cv2.countNonZero(inner) / max(1, inner.size) if inner.size else 0.0
-
-    def max_run(values: np.ndarray) -> int:
-        best = 0
-        current = 0
-        for value in values.astype(bool, copy=False).tolist():
-            if value:
-                current += 1
-                best = max(best, current)
-            else:
-                current = 0
-        return best
-
-    top_run = max_run((intersection[:band, :] > 0).any(axis=0)) / max(1, width)
-    bottom_run = max_run((intersection[height - band : height, :] > 0).any(axis=0)) / max(1, width)
-    left_run = max_run((intersection[:, :band] > 0).any(axis=1)) / max(1, height)
-    right_run = max_run((intersection[:, width - band : width] > 0).any(axis=1)) / max(1, height)
-
-    if width >= height:
-        long_edges = (top_run, bottom_run)
-        short_edges = (left_run, right_run)
-    else:
-        long_edges = (left_run, right_run)
-        short_edges = (top_run, bottom_run)
-
-    continuous_frame = (
-        min(long_edges) >= GRAY_RECT_FRAME_LONG_EDGE_MIN_RUN
-        and max(short_edges) >= GRAY_RECT_FRAME_SHORT_EDGE_STRONG_RUN
-        and min(short_edges) >= GRAY_RECT_FRAME_SHORT_EDGE_WEAK_RUN
-    )
-
-    return (
-        sum(score >= GRAY_RECT_FRAME_STRONG_EDGE_COVERAGE for score in edge_coverages) >= 3
-        and all(score >= GRAY_RECT_FRAME_WEAK_EDGE_COVERAGE for score in edge_coverages)
-        and center_density <= GRAY_RECT_FRAME_MAX_CENTER_DENSITY
-        and continuous_frame
-    )
-
-
-def _context_purity(
-    plan_mask: np.ndarray,
-    bbox: tuple[int, int, int, int],
-    intersection_mask: np.ndarray,
-    *,
-    explained_pixels: int | None = None,
-    validation_cache: ValidationMaskCache | None = None,
-) -> float:
-    """Measure how much local foreground around the hit is explained by the template."""
-
-    x, y, w, h = bbox
-    margin = max(3, int(round(max(w, h) * CONTEXT_MARGIN_RATIO)))
-
-    x0 = max(0, x - margin)
-    y0 = max(0, y - margin)
-    x1 = min(plan_mask.shape[1], x + w + margin)
-    y1 = min(plan_mask.shape[0], y + h + margin)
-
-    context_bbox = (x0, y0, x1 - x0, y1 - y0)
-    if context_bbox[2] <= 0 or context_bbox[3] <= 0:
-        return 0.0
-
-    context_foreground = (
-        validation_cache.foreground_count(plan_mask, context_bbox)
-        if validation_cache is not None
-        else int(cv2.countNonZero(plan_mask[y0:y1, x0:x1]))
-    )
-    if context_foreground == 0:
-        return 0.0
-
-    if explained_pixels is None:
-        explained_pixels = int(cv2.countNonZero(intersection_mask))
-    return explained_pixels / context_foreground
 
 
 def _validate_template_hit(
@@ -491,230 +288,27 @@ def _validate_template_hit(
         and purity >= GRAY_INTERRUPTED_LABEL_RECOVERY_MIN_PURITY
         and context_purity >= GRAY_INTERRUPTED_LABEL_RECOVERY_MIN_CONTEXT
     )
-    early_color_similarity = 1.0
-    if hit.dominant_hsv is not None:
-        early_color_similarity = _roi_color_similarity(
-            plan_image,
-            plan_mask,
-            hit.bbox,
-            hit.dominant_hsv,
-            plan_hsv,
-        )
-    strong_color_partial_geometry = (
-        hit.dominant_hsv is not None
-        and early_color_similarity >= 0.90
-        and hit.match_score >= 0.60
-        and coverage >= 0.56
-        and purity >= 0.75
-        and context_purity >= 0.28
+    color_state = evaluate_color_hit_rules(
+        hit=hit,
+        plan_image=plan_image,
+        plan_mask=plan_mask,
+        plan_hsv=plan_hsv,
+        coverage=coverage,
+        purity=purity,
+        context_purity=context_purity,
+        hit_area=hit_area,
+        hit_aspect=hit_aspect,
+        major_span_ratio=major_span_ratio,
+        minor_span_ratio=minor_span_ratio,
+        path_variance_ratio=path_variance_ratio,
     )
-    small_color_recovery_fragment = (
-        hit.dominant_hsv is not None
-        and hit.source == "template_color_recovery"
-        and hit_area < 1_000
-        and hit.match_score < 0.45
-        and coverage < 0.70
-    )
-    if small_color_recovery_fragment:
-        _record("color_recovery_tiny_fragment")
-        return False
-    color_recovery_geometry = (
-        hit.dominant_hsv is not None
-        and hit.source == "template_color_recovery"
-        and early_color_similarity >= COLOR_RECOVERY_MIN_COLOR_SIMILARITY
-        and hit.scale >= 0.90
-        and 900 <= hit_area <= 3_800
-        and hit_aspect <= 3.20
-        and (
-            (
-                hit.match_score >= 0.52
-                and coverage >= max(0.70, COLOR_RECOVERY_MIN_COVERAGE)
-                and purity >= max(0.60, COLOR_RECOVERY_MIN_PURITY)
-                and context_purity >= max(0.18, COLOR_RECOVERY_MIN_CONTEXT)
-                and hit_area >= 1_100
-            )
-            or (
-                hit.match_score >= 0.46
-                and coverage >= 0.74
-                and purity >= 0.66
-                and context_purity >= 0.30
-                and hit_area >= 900
-            )
-        )
-    )
-    if (
-        hit.dominant_hsv is not None
-        and hit.source == "template_color_recovery"
-        and not color_recovery_geometry
-    ):
-        _record("color_recovery_isolated_fragment")
-        return False
-    color_full_label_source = (
-        hit.source in {"template", "template_color_recovery"}
-        or hit.source == "roi_inspector"
-        or hit.source.startswith("template_parent_search_")
-        or hit.source.startswith("template_promoted_")
-    )
-    color_full_label_geometry = (
-        hit.dominant_hsv is not None
-        and color_full_label_source
-        and early_color_similarity >= 0.90
-        and hit.scale >= 0.90
-        and 900 <= hit_area <= 3_800
-        and hit_aspect <= 3.20
-        and (
-            (
-                hit.match_score >= 0.50
-                and coverage >= 0.60
-                and purity >= 0.58
-                and context_purity >= 0.18
-            )
-            or (
-                hit.source == "template_color_recovery"
-                and color_recovery_geometry
-            )
-            or (
-                hit.source != "template_color_recovery"
-                and
-                hit.match_score >= 0.40
-                and coverage >= 0.58
-                and purity >= 0.50
-                and context_purity >= 0.16
-                and hit_area >= 1_250
-                and hit_aspect <= 2.35
-            )
-        )
-    )
-    color_full_text_label_geometry = (
-        plan_hsv is not None
-        and hit.is_text_label
-        and color_full_label_source
-        and hit.source != "pdf_text"
-        and hit.scale >= 0.90
-        and 900 <= hit_area <= 3_800
-        and hit_aspect <= 3.20
-        and hit.match_score >= 0.50
-        and coverage >= 0.70
-        and purity >= 0.75
-        and context_purity >= 0.45
-    )
-    color_full_label_geometry = color_full_label_geometry or color_full_text_label_geometry
-    color_low_content_text_fragment = False
-    if hit.dominant_hsv is not None and hit.is_text_label and hit.content_pixel_count > 0:
-        content_ink_ratio = hit.content_pixel_count / max(1, hit.pixel_count)
-        low_content_symbol_label = content_ink_ratio <= 0.18
-        sideways_weak_fragment = hit.rotation % 180 == 90 and hit.match_score < 0.60
-        weak_local_fragment = (
-            hit.match_score < 0.50
-            and coverage < 0.78
-            and context_purity < 0.45
-        )
-        color_low_content_text_fragment = low_content_symbol_label and (
-            sideways_weak_fragment or weak_local_fragment
-        )
-    if color_low_content_text_fragment:
-        _record("color_text_fragment")
-        return False
-
-    if (
-        hit.dominant_hsv is not None
-        and hit.source != "pdf_text"
-        and early_color_similarity < COLOR_MIN_HUE_SIMILARITY
-    ):
-        _record("color_similarity")
-        return False
-
-    color_straight_stroke_fragment = (
-        hit.dominant_hsv is not None
-        and not hit.is_text_label
-        and hit.source
-        in {"template", "template_near_threshold", "template_color_recovery", "roi_inspector"}
-        and hit_area <= int(COLOR_ELONGATED_STROKE_MAX_AREA)
-        and hit_aspect >= float(COLOR_ELONGATED_STROKE_MIN_ASPECT)
-        and major_span_ratio >= 0.52
-        and minor_span_ratio <= 0.30
-        and hit.match_score < 0.72
-    )
-    if color_straight_stroke_fragment:
-        _record("color_straight_stroke_fragment")
-        return False
-
-    color_flat_elongated_fragment = (
-        hit.dominant_hsv is not None
-        and not hit.is_text_label
-        and hit.source
-        in {"template", "template_near_threshold", "template_color_recovery", "roi_inspector"}
-        and hit_area <= int(COLOR_ELONGATED_STROKE_MAX_AREA)
-        and hit_aspect >= float(COLOR_ELONGATED_STROKE_MIN_ASPECT)
-        and major_span_ratio >= 0.88
-        and minor_span_ratio <= 0.62
-        and path_variance_ratio <= 0.035
-        and hit.match_score < 0.70
-    )
-    if color_flat_elongated_fragment:
-        _record("color_flat_elongated_fragment")
-        return False
-
-    if hit.dominant_hsv is not None and hit.is_text_label and hit.source == "template_content":
-        if (
-            hit.match_score < COLOR_CONTENT_LABEL_MIN_MATCH
-            or coverage < COLOR_CONTENT_LABEL_MIN_COVERAGE
-            or purity < COLOR_CONTENT_LABEL_MIN_PURITY
-            or context_purity < COLOR_CONTENT_LABEL_MIN_CONTEXT
-        ):
-            _record("color_content_fragment")
-            return False
-
-    if (
-        hit.dominant_hsv is not None
-        and hit.is_text_label
-        and hit.source in {"template", "template_near_threshold"}
-    ):
-        if (
-            coverage < COLOR_TEXT_LABEL_MIN_COVERAGE
-            or purity < COLOR_TEXT_LABEL_MIN_PURITY
-            or context_purity < COLOR_TEXT_LABEL_MIN_CONTEXT
-        ):
-            _record("color_text_geometry")
-            return False
-        if (
-            hit.match_score < COLOR_TEXT_LABEL_MIN_MATCH
-            and context_purity < COLOR_TEXT_LABEL_WEAK_MATCH_MIN_CONTEXT
-        ):
-            _record("color_text_weak_match")
-            return False
-
-    color_wavy_low_match_geometry = (
-        hit.dominant_hsv is not None
-        and not hit.is_text_label
-        and hit.source == "roi_inspector"
-        and hit_area <= int(COLOR_ELONGATED_STROKE_MAX_AREA)
-        and hit_aspect >= float(COLOR_ELONGATED_STROKE_MIN_ASPECT)
-        and minor_span_ratio > 0.38
-        and hit.match_score >= 0.45
-        and coverage >= 0.80
-        and purity >= 0.52
-        and context_purity >= 0.16
-    )
-
-    color_elongated_stroke_fragment = (
-        hit.dominant_hsv is not None
-        and not hit.is_text_label
-        and hit.source in {"template", "template_near_threshold"}
-        and hit_area <= int(COLOR_ELONGATED_STROKE_MAX_AREA)
-        and hit_aspect >= float(COLOR_ELONGATED_STROKE_MIN_ASPECT)
-        and not color_wavy_low_match_geometry
-        and (
-            hit.match_score < float(COLOR_ELONGATED_STROKE_MIN_MATCH)
-            or purity < float(COLOR_ELONGATED_STROKE_MIN_PURITY)
-            or (
-                context_purity < float(COLOR_ELONGATED_STROKE_MIN_CONTEXT)
-                and hit.match_score < 0.68
-            )
-        )
-    )
-    if color_elongated_stroke_fragment:
-        _record("color_elongated_stroke_fragment")
+    early_color_similarity = color_state.early_color_similarity
+    strong_color_partial_geometry = color_state.strong_color_partial_geometry
+    color_recovery_geometry = color_state.color_recovery_geometry
+    color_full_label_geometry = color_state.color_full_label_geometry
+    color_wavy_low_match_geometry = color_state.color_wavy_low_match_geometry
+    if color_state.reject_reason is not None:
+        _record(color_state.reject_reason)
         return False
 
     if (
