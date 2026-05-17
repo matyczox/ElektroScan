@@ -10,7 +10,6 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-import os
 
 import cv2
 import numpy as np
@@ -41,19 +40,13 @@ from core.detector_config import (
     SCALES,
     _safe_cpu_count,
 )
-from core.detector_context import (
-    DetectionTemplateContext,
-    trace_points_from_value,
-    trace_values_from_value,
-)
+from core.detector_context import DetectionTemplateContext
 from core.detector_diagnostics import (
     build_candidate_stage_counts,
     build_hit_flow_profile,
     build_roi_strategy_profile,
 )
-from core.detector_masks import (
-    _build_search_rois,
-)
+from core.detector_masks import _build_search_rois
 from core.detector_models import (
     CandidateHit,
     Detection,
@@ -72,6 +65,7 @@ from core.detector_pdf_policy import (
 )
 from core.detector_parent_search import search_parent_candidates
 from core.detector_plan_masks import PlanMaskCache
+from core.detector_runtime_options import build_runtime_options
 from core.detector_scanning import scan_template_candidates
 from core.detector_templates import (
     _build_socket_07_promotions,
@@ -114,47 +108,21 @@ def _detect_symbols_pipeline(
             pass
 
     detector_profile = detector_profile if detector_profile in {"color", "gray"} else "color"
-    initial_debug_profile = dict(debug_profile or {})
-    collect_performance_profile = bool(initial_debug_profile.get("performanceProfile"))
-    ablation_value = str(
-        initial_debug_profile.get("ablation") or os.getenv("ELEKTROSCAN_ABLATION", "")
-    ).strip().lower()
-    ablation_no_text_mirror = ablation_value in {
-        "no-text-mirror",
-        "no_text_mirror",
-        "notextmirror",
-    } or os.getenv("ELEKTROSCAN_ABLATION_NO_TEXT_MIRROR", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-    }
-    gray_text_mirror_override = os.getenv("ELEKTROSCAN_GRAY_TEXT_MIRROR", "").strip().lower()
-    gray_force_text_mirror = ablation_value in {
-        "text-mirror",
-        "text_mirror",
-        "with-text-mirror",
-        "with_text_mirror",
-    } or gray_text_mirror_override in {"1", "true", "yes", "on"}
-    disable_text_mirror = ablation_no_text_mirror or (
-        detector_profile == "gray" and not gray_force_text_mirror
+    runtime_options = build_runtime_options(
+        debug_profile=debug_profile,
+        detector_profile=detector_profile,
     )
-
-    trace_input = initial_debug_profile.get("candidateTrace") or initial_debug_profile.get("trace") or {}
-    if not isinstance(trace_input, dict):
-        trace_input = {}
-
-    trace_symbols = set(trace_values_from_value(trace_input.get("symbols") or trace_input.get("symbol")))
-    trace_symbols.update(trace_values_from_value(os.getenv("ELEKTROSCAN_TRACE_SYMBOLS")))
-    trace_points = trace_points_from_value(trace_input.get("points") or trace_input.get("point"))
-    trace_points.extend(trace_points_from_value(os.getenv("ELEKTROSCAN_TRACE_POINTS")))
-    trace_radius = float(trace_input.get("radius") or os.getenv("ELEKTROSCAN_TRACE_RADIUS", 80))
-    trace_max_items = int(trace_input.get("maxItems") or os.getenv("ELEKTROSCAN_TRACE_MAX_ITEMS", 40))
+    initial_debug_profile = runtime_options.initial_debug_profile
+    collect_performance_profile = runtime_options.collect_performance_profile
+    ablation_no_text_mirror = runtime_options.ablation_no_text_mirror
+    gray_force_text_mirror = runtime_options.gray_force_text_mirror
+    disable_text_mirror = runtime_options.disable_text_mirror
     candidate_trace_recorder = CandidateTraceRecorder(
         templates=templates,
-        trace_symbols=trace_symbols,
-        trace_points=trace_points,
-        trace_radius=trace_radius,
-        max_items=trace_max_items,
+        trace_symbols=runtime_options.trace_symbols,
+        trace_points=runtime_options.trace_points,
+        trace_radius=runtime_options.trace_radius,
+        max_items=runtime_options.trace_max_items,
     )
     _record_candidate_trace = candidate_trace_recorder.record
 
