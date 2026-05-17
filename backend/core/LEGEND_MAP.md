@@ -21,8 +21,15 @@ goldenow.
 - `legend_models.py`: `ExtractedSymbol` i `LegendExtractionBundle`.
 - `legend_visual_code.py`: lekki raster OCR kodow w komorkach legendy.
 - `legend_mask_utils.py`: maski HSV/ink/visible-ink dla raster path.
-- `legend_extractor.py`: nadal trzyma table/raster/vector orchestration do
-  kolejnych etapow rozbijania.
+- `legend_constants.py` / `legend_common.py`: stale i male helpery bez zaleznosci.
+- `legend_label_extractor.py`: PDF text lookup, OCR label lookup, row labels.
+- `legend_row_extractors.py`: klasyczne wiersze i gray row bbox extraction.
+- `legend_table_geometry.py`: wykrywanie siatki tabeli, trymowanie i quality checks.
+- `legend_table_raw.py`: wycinanie surowych symboli z tabeli.
+- `legend_table_drafts.py`: display-only vector drafts dla tabel.
+- `legend_raster_extractor.py`: raster fallback extraction path.
+- `legend_orchestration.py`: vector-first orchestration i raster fallback.
+- `legend_extractor.py`: publiczny compatibility wrapper i re-exporty.
 
 ## Invariants
 
