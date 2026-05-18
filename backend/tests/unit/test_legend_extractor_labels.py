@@ -17,6 +17,7 @@ from core.legend_extractor import (
     _get_classic_row_label_text,
     _gray_row_symbol_bboxes,
     _get_row_label_text,
+    _get_row_symbol_code_text,
     _get_table_description_label_text,
     extract_legend,
     pdf_to_png,
@@ -323,6 +324,75 @@ def test_table_legend_prefers_left_symbol_code_and_skips_title_row():
     )
 
     assert [name for _image, name in symbols] == ["L1", "AW1"]
+
+
+def test_color_table_legend_keeps_bright_visible_symbol_ink():
+    legend_area = np.full((80, 180, 3), 255, dtype=np.uint8)
+    for y in (0, 40, 79):
+        cv2.line(legend_area, (0, y), (179, y), (0, 0, 0), 1)
+    for x in (0, 70, 179):
+        cv2.line(legend_area, (x, 0), (x, 79), (0, 0, 0), 1)
+
+    bright_green = (150, 255, 150)
+    cv2.rectangle(legend_area, (20, 18), (50, 25), bright_green, 3)
+    cv2.circle(legend_area, (36, 26), 8, bright_green, 3)
+
+    text_words = [
+        (86.0, 14.0, 122.0, 28.0, "DECT", 0, 0, 0),
+    ]
+
+    symbols = _extract_table_legend_raw(
+        legend_area,
+        text_blocks=[],
+        text_words=text_words,
+        x_start=0,
+        y_start=0,
+        scale=1.0,
+    )
+
+    assert len(symbols) == 1
+    assert symbols[0][1] == "DECT"
+    symbol_image = symbols[0][0]
+    green_pixels = (
+        (symbol_image[:, :, 1] > 230)
+        & (symbol_image[:, :, 0] > 100)
+        & (symbol_image[:, :, 2] > 100)
+    )
+    assert int(np.sum(green_pixels)) > 20
+
+
+def test_table_symbol_code_skips_generic_description_tokens():
+    text_words = [
+        (12.0, 18.0, 26.0, 30.0, "2x", 0, 0, 0),
+        (32.0, 18.0, 68.0, 30.0, "PEL-1", 0, 0, 1),
+        (12.0, 58.0, 30.0, 70.0, "IP", 0, 1, 0),
+        (34.0, 58.0, 72.0, 70.0, "DECT", 0, 1, 1),
+    ]
+
+    assert (
+        _get_row_symbol_code_text(
+            text_words,
+            x_start=0,
+            y_start=0,
+            scale=1.0,
+            row_top_px=0,
+            row_bottom_px=40,
+            col_right_px=80,
+        )
+        == "PEL1"
+    )
+    assert (
+        _get_row_symbol_code_text(
+            text_words,
+            x_start=0,
+            y_start=0,
+            scale=1.0,
+            row_top_px=40,
+            row_bottom_px=80,
+            col_right_px=80,
+        )
+        == "DECT"
+    )
 
 
 def test_partial_table_selection_expands_to_full_grid():

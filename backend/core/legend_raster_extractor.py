@@ -25,6 +25,9 @@ try:
     )
     from .legend_table_geometry import (
         _detect_legend_format,
+        _table_grid_region_candidates,
+        _table_symbol_images_have_color,
+        _table_symbol_images_look_valid,
         _table_symbols_need_expansion,
         _tighten_gray_legend_symbol_crop,
         _trim_selection_to_table_grid,
@@ -52,6 +55,9 @@ except ImportError:  # pragma: no cover
     )
     from legend_table_geometry import (
         _detect_legend_format,
+        _table_grid_region_candidates,
+        _table_symbol_images_have_color,
+        _table_symbol_images_look_valid,
         _table_symbols_need_expansion,
         _tighten_gray_legend_symbol_crop,
         _trim_selection_to_table_grid,
@@ -86,6 +92,103 @@ def _is_spurious_color_legend_fragment(
         and cur_w <= max(24, int(prev_w * 0.72))
         and cur_h <= max(28, int(prev_h * 0.72))
     )
+
+
+def _raw_symbol_key(name: str) -> str:
+    return _sanitize_filename(str(name or "")).casefold()
+
+
+def _merge_unique_raw_symbols(
+    primary: list[tuple[np.ndarray, str]],
+    extra: list[tuple[np.ndarray, str]],
+) -> list[tuple[np.ndarray, str]]:
+    """Merge table-region extraction results without duplicating the same code."""
+
+    merged = list(primary)
+    seen = {_raw_symbol_key(name) for _image, name in merged if _raw_symbol_key(name)}
+    for symbol_image, name in extra:
+        key = _raw_symbol_key(name)
+        if not key or key in seen:
+            continue
+        merged.append((symbol_image, name))
+        seen.add(key)
+    return merged
+
+
+def _same_table_column_region(
+    first: tuple[int, int, int, int],
+    second: tuple[int, int, int, int],
+) -> bool:
+    fx, _fy, fw, _fh = first
+    sx, _sy, sw, _sh = second
+    return abs(fx - sx) <= 24 and abs((fx + fw) - (sx + sw)) <= 24
+
+
+def _adjacent_table_region_pairs(
+    regions: list[tuple[int, int, int, int]],
+) -> list[tuple[int, int, int, int]]:
+    """Return same-column adjacent table chunks separated by a local heading gap."""
+
+    pairs: list[tuple[int, int, int, int]] = []
+    for index, first in enumerate(regions):
+        second = next(
+            (
+                candidate
+                for candidate in regions[index + 1 :]
+                if _same_table_column_region(first, candidate)
+            ),
+            None,
+        )
+        if second is None:
+            continue
+        fx, fy, fw, fh = first
+        sx, sy, sw, sh = second
+        gap = sy - (fy + fh)
+        if gap < 0 or gap > max(240, int(max(fh, sh) * 0.30)):
+            continue
+        x1 = min(fx, sx)
+        y1 = min(fy, sy)
+        x2 = max(fx + fw, sx + sw)
+        y2 = max(fy + fh, sy + sh)
+        pairs.append((x1, y1, x2 - x1, y2 - y1))
+    return pairs
+
+
+def _extract_multiregion_color_table_symbols(
+    legend_area: np.ndarray,
+    text_blocks: list,
+    text_words: list | None,
+    x_start: int,
+    y_start: int,
+    scale: float,
+) -> list[tuple[np.ndarray, str]]:
+    """Extract symbols from broad selections that contain several color table sections."""
+
+    regions = _table_grid_region_candidates(legend_area)
+    if len(regions) < 2:
+        return []
+
+    merged_symbols: list[tuple[np.ndarray, str]] = []
+    for rx, ry, rw, rh in _adjacent_table_region_pairs(regions) + regions:
+        crop = legend_area[ry : ry + rh, rx : rx + rw]
+        raw_symbols = _extract_table_legend_raw(
+            crop,
+            text_blocks,
+            text_words,
+            x_start + rx,
+            y_start + ry,
+            scale,
+            use_visible_symbol_mask=True,
+        )
+        if not raw_symbols:
+            continue
+        if not (
+            _table_symbol_images_look_valid(raw_symbols)
+            and _table_symbol_images_have_color(raw_symbols)
+        ):
+            continue
+        merged_symbols = _merge_unique_raw_symbols(merged_symbols, raw_symbols)
+    return merged_symbols
 
 
 def _extract_legend_raster_current(
@@ -200,6 +303,7 @@ def _extract_legend_raster_current(
             y_start,
             scale,
             tighten_gray_table_crops=mask_mode == "gray",
+            use_visible_symbol_mask=mask_mode != "gray",
         )
         table_needs_expansion = _table_symbols_need_expansion(raw_symbols)
         if table_needs_expansion:
@@ -214,6 +318,7 @@ def _extract_legend_raster_current(
                     original_y_start,
                     scale,
                     tighten_gray_table_crops=mask_mode == "gray",
+                    use_visible_symbol_mask=mask_mode != "gray",
                 )
                 if gutter_result is not None:
                     raw_symbols, gutter_trim = gutter_result
@@ -224,6 +329,23 @@ def _extract_legend_raster_current(
                         gw,
                         gh,
                     )
+        if mask_mode != "gray":
+            multiregion_symbols = _extract_multiregion_color_table_symbols(
+                original_legend_area,
+                text_blocks,
+                text_words,
+                original_x_start,
+                original_y_start,
+                scale,
+            )
+            if len(multiregion_symbols) > len(raw_symbols) + 2:
+                raw_symbols = _merge_unique_raw_symbols(multiregion_symbols, raw_symbols)
+                used_legend_rect_px = (
+                    original_x_start,
+                    original_y_start,
+                    original_legend_area.shape[1],
+                    original_legend_area.shape[0],
+                )
         if raw_symbols:
             output_path = Path(output_dir)
             output_path.mkdir(parents=True, exist_ok=True)

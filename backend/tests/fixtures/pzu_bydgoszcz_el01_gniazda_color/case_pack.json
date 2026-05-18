@@ -10,6 +10,8 @@
   "currentDetectionCount": 204,
   "analysisId": "cde7c87c-6774-4659-aa74-b0239491d16d",
   "analysisSession": "frontend_manual_export_20260517_181539",
+  "latestAnalysisJson": "backend/tests/golden/pzu_bydgoszcz_el01_gniazda_color_snapshots/manual_export_20260517_181539_cde7c87c-6774-4659-aa74-b0239491d16d_204_boxes.json",
+  "templatesDir": "backend/tests/fixtures/pzu_bydgoszcz_el01_gniazda_color/templates",
   "templates": {
     "requiresReviewedTemplates": true,
     "committedFixtureTemplates": true,

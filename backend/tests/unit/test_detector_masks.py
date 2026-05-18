@@ -93,6 +93,23 @@ def test_color_roi_inspector_reports_template_color_scan_mask(tmp_path):
     assert inspection["roiColorScanTemplate"]["symbolName"] == "01_L1"
 
 
+def test_color_roi_inspector_reports_color_preview_when_template_is_too_large(tmp_path):
+    template_image = _red_plan(width=80, height=80)
+    template_image[10:70, 10:70] = (0, 255, 0)
+    cv2.imwrite(str(tmp_path / "01_green.png"), template_image)
+
+    plan_image = _red_plan(width=100, height=80)
+    plan_image[20:50, 20:50] = (0, 255, 0)
+    templates = load_templates(str(tmp_path))
+
+    inspection = inspect_roi(plan_image, templates, (16, 16, 40, 40), detector_profile="color")
+
+    assert inspection["candidates"] == []
+    assert inspection["roiColorScanPixels"] > 0
+    assert inspection["roiColorScanTemplate"]["symbolName"] == "01_green"
+    assert inspection["roiColorScanTemplate"]["previewOnly"] is True
+
+
 def test_color_template_content_requires_strong_shape_agreement():
     plan_image = _red_plan()
     plan_mask = np.zeros((80, 80), dtype=np.uint8)

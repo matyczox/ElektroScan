@@ -171,6 +171,10 @@ def inspect_roi(
     raw_hits_by_scale: dict[float, int] = {}
     rejected_by_reason: dict[str, int] = {}
     variant_count = 0
+    skipped_oversized_variants = 0
+    best_color_scan_preview: np.ndarray | None = None
+    best_color_scan_template: dict[str, Any] | None = None
+    best_color_scan_pixels = 0
 
     for template_id, template in enumerate(templates):
         validation_mask, scan_mask, scan_mask_kind = _scan_mask_for_template(
@@ -183,7 +187,23 @@ def inspect_roi(
             gray_scan_masks=gray_scan_masks,
         )
         roi_scan = _crop(scan_mask, clamped)
-        if cv2.countNonZero(roi_scan) <= 0:
+        roi_scan_pixels = int(cv2.countNonZero(roi_scan))
+        if (
+            detector_profile == "color"
+            and template.dominant_hsv is not None
+            and roi_scan_pixels > best_color_scan_pixels
+        ):
+            best_color_scan_pixels = roi_scan_pixels
+            best_color_scan_preview = roi_scan.copy()
+            best_color_scan_template = {
+                "templateId": int(template_id),
+                "symbolName": template.name,
+                "scanMask": f"{scan_mask_kind}_preview",
+                "dominantHsv": template.dominant_hsv,
+                "maskBBox": _mask_bbox(best_color_scan_preview),
+                "previewOnly": True,
+            }
+        if roi_scan_pixels <= 0:
             continue
 
         threshold = THRESHOLD_PRECISE if template.requires_precision else THRESHOLD_DILATED
@@ -198,6 +218,7 @@ def inspect_roi(
         ):
             variant_count += 1
             if variant.width > w or variant.height > h:
+                skipped_oversized_variants += 1
                 continue
             result = cv2.matchTemplate(
                 roi_scan,
@@ -340,7 +361,12 @@ def inspect_roi(
                 "scanMask": top_scan_kind,
                 "dominantHsv": top_template.dominant_hsv,
                 "maskBBox": _mask_bbox(roi_color_scan_mask),
+                "previewOnly": False,
             }
+    elif detector_profile == "color" and best_color_scan_preview is not None:
+        roi_scan_mask = best_color_scan_preview
+        roi_color_scan_mask = best_color_scan_preview
+        roi_color_scan_template = best_color_scan_template
     roi_dark_raw_mask = (
         _crop(gray_scan_masks.zone_mask, clamped) if gray_scan_masks is not None else roi_raw_mask
     )
@@ -356,6 +382,7 @@ def inspect_roi(
         "usedScales": used_scales,
         "templates": len(templates),
         "variantsChecked": variant_count,
+        "skippedOversizedVariants": int(skipped_oversized_variants),
         "rawHitsByScale": {f"{scale:.2f}": count for scale, count in sorted(raw_hits_by_scale.items())},
         "rejectedByReason": rejected_by_reason,
         "roiInkPixels": int(cv2.countNonZero(roi_raw_mask)),

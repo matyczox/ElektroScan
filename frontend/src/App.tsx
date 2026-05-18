@@ -169,6 +169,7 @@ interface RoiInspection {
   usedScales: number[];
   templates: number;
   variantsChecked: number;
+  skippedOversizedVariants?: number;
   rawHitsByScale: Record<string, number>;
   rejectedByReason: Record<string, number>;
   roiInkPixels: number;
@@ -180,6 +181,7 @@ interface RoiInspection {
     scanMask: string;
     dominantHsv?: [number, number, number] | null;
     maskBBox?: [number, number, number, number] | null;
+    previewOnly?: boolean;
   } | null;
   roiDarkInkPixels?: number;
   roiDarkScanPixels?: number;
@@ -1616,6 +1618,9 @@ function App() {
               </div>
             )}
             <div>Peaki/skala: {Object.entries(roiInspection.rawHitsByScale).map(([scale, count]) => `${scale}:${count}`).join(' | ') || '(brak)'}</div>
+            {roiInspection.skippedOversizedVariants ? (
+              <div>Za duze warianty dla ROI: {roiInspection.skippedOversizedVariants}</div>
+            ) : null}
             <div>Odrzuty: {Object.entries(roiInspection.rejectedByReason).map(([reason, count]) => `${reason}:${count}`).join(' | ') || '(brak)'}</div>
           </div>
 

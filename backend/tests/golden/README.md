@@ -9,6 +9,9 @@ pliki `backend/analysis_debug/`; te sa tymczasowe i zostaja poza gitem.
   profil `color`; release gate dla color path.
 - `pw_e_02_rev2_color_caution.json` - zaakceptowany kolorowy baseline PW-E-02,
   profil `color`; release gate dla color path.
+- `pzu_bydgoszcz_el01_gniazda_color_caution.json` - PZU Bydgoszcz EL_01
+  GNIAZDA, profil `color`; caution full snapshot z recznie sprawdzonymi boxami
+  i osobnym case packiem diagnostycznym.
 - `pzu_bydgoszcz_el02_color_caution.json` - PZU Bydgoszcz EL_02, profil
   `color`; caution baseline z manual sentinels. Snapshot pomaga diagnozowac
   zmiany, ale release blokuje tylko zestaw sentinelowy.
@@ -26,11 +29,13 @@ pliki `backend/analysis_debug/`; te sa tymczasowe i zostaja poza gitem.
 Lokalne regresje bez UI/backend servera:
 
 ```powershell
-py -3.11 backend\tools\run_local_golden_regression.py --fixture pzu_bydgoszcz_el02_color --fixture pw_e_01_rev2_color --fixture pw_e_02_rev2_color
+py -3.11 backend\tools\run_quality_gate.py
+py -3.11 backend\tools\run_local_golden_regression.py --fixture pzu_bydgoszcz_el01_gniazda_color --fixture pzu_bydgoszcz_el02_color --fixture pw_e_01_rev2_color --fixture pw_e_02_rev2_color
 ```
 
 Oczekiwany stan po stabilizacji color path:
 
+- `pzu_bydgoszcz_el01_gniazda_color`: `204/204`, caution full snapshot.
 - `pzu_bydgoszcz_el02_color`: `318/318`, wszystkie manual sentinels fixed.
 - `pw_e_01_rev2_color`: `151/151`.
 - `pw_e_02_rev2_color`: `134/134`.
@@ -83,6 +88,33 @@ py -3 backend/tools/compare_analysis_snapshot.py `
 
 Jesli wynik sie zmienia, najpierw sprawdz czy to realna poprawa/regresja w
 Inspektorze ROI. Nie aktualizuj goldena tylko dlatego, ze progi sie przesunely.
+
+## Case Packi I Trace
+
+Case pack sluzy do pracy nad jednym PDF bez wpisywania regul po koordynatach do
+detektora. Koordynaty sa dozwolone w fixture, sentinelach i raportach.
+
+```powershell
+py -3.11 backend\tools\build_pdf_case_report.py `
+  backend\tests\fixtures\pzu_bydgoszcz_el01_gniazda_color\case_pack.json `
+  --analysis backend\tests\output\quality_gate\local_regression\pzu_bydgoszcz_el01_gniazda_color_local_candidate.json `
+  --templates-dir backend\tests\fixtures\pzu_bydgoszcz_el01_gniazda_color\templates `
+  --output-dir backend\tests\output\pzu_el01_case_report
+```
+
+Jesli potrzebujesz sledzic konkretny ROI przez pipeline, wygeneruj candidate JSON
+z trace:
+
+```powershell
+py -3.11 backend\tools\run_local_golden_regression.py `
+  --fixture pzu_bydgoszcz_el01_gniazda_color `
+  --trace-point 1570,700 `
+  --trace-radius 90 `
+  --output-dir backend\tests\output\trace_probe
+```
+
+Raport case packa pokaze wtedy etapy `raw_scan`, `validation`, `clustering`,
+postprocess i `final`, o ile candidate JSON zawiera `candidateTrace`.
 
 ## Zasady
 

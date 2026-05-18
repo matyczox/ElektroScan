@@ -86,6 +86,60 @@ def _is_row_label_prefix(text: str) -> bool:
     return compact.casefold() in {"lp", "l.p", "nr", "no", "poz", "pos"}
 
 
+def _is_generic_table_symbol_token(token: str) -> bool:
+    """Return True for quantities and electrical parameters, not legend symbol codes."""
+
+    compact = re.sub(r"[^A-Z0-9]+", "", str(token or "").upper())
+    if not compact:
+        return True
+    if re.fullmatch(r"\d+X", compact):
+        return True
+    if re.fullmatch(r"\d+(?:V|A|M|MM|CM|MB|GB)", compact):
+        return True
+    if re.fullmatch(r"IP\d{0,2}", compact):
+        return True
+    if compact in {
+        "DATA",
+        "HDMI",
+        "HTTP",
+        "KAT",
+        "KAT5",
+        "KAT5E",
+        "KAT6",
+        "KAT6A",
+        "LAN",
+        "POE",
+        "RJ11",
+        "RJ12",
+        "RJ45",
+        "USB",
+    }:
+        return True
+    return False
+
+
+def _table_symbol_code_token(text: str) -> str | None:
+    """Return a compact legend code from a symbol cell while skipping generic specs."""
+
+    raw = str(text or "").strip()
+    direct = _symbol_text_token(raw)
+    if direct and not _is_generic_table_symbol_token(direct):
+        return direct
+
+    token = _sanitize_filename(raw).upper()
+    token = re.sub(r"[-_/]+", "", token)
+    token = re.sub(r"[^A-Z0-9]+", "", token)
+    if not (2 <= len(token) <= 12):
+        return None
+    if not re.search(r"[A-Z]", token):
+        return None
+    if not (re.search(r"\d", token) or len(token) <= 6):
+        return None
+    if _is_generic_table_symbol_token(token):
+        return None
+    return token
+
+
 def _get_row_label_text(
     text_items: list,
     x_start: int,
@@ -482,7 +536,7 @@ def _get_row_symbol_code_text(
         if len(word) < 5:
             continue
 
-        token = _symbol_text_token(str(word[4]))
+        token = _table_symbol_code_token(str(word[4]))
         if token is None:
             continue
 

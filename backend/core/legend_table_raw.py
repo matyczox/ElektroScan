@@ -13,6 +13,7 @@ try:
         _get_row_symbol_code_text,
         _get_visual_row_index_text,
     )
+    from .legend_mask_utils import _visible_ink_mask
     from .legend_table_geometry import (
         _find_left_symbol_gutter_x,
         _first_table_symbol_column_right,
@@ -30,6 +31,7 @@ except ImportError:  # pragma: no cover
         _get_row_symbol_code_text,
         _get_visual_row_index_text,
     )
+    from legend_mask_utils import _visible_ink_mask
     from legend_table_geometry import (
         _find_left_symbol_gutter_x,
         _first_table_symbol_column_right,
@@ -39,6 +41,16 @@ except ImportError:  # pragma: no cover
         _table_symbol_images_look_valid,
         _tighten_gray_legend_symbol_crop,
     )
+
+
+def _table_symbol_mask(image_bgr: np.ndarray, *, use_visible_symbol_mask: bool) -> np.ndarray:
+    """Return symbol ink for a table cell, including bright colored CAD strokes."""
+
+    if use_visible_symbol_mask:
+        return _visible_ink_mask(image_bgr, gray_threshold=235)
+    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+    return (gray < 200).astype(np.uint8) * 255
+
 
 def _extract_table_legend_raw(
     legend_area: np.ndarray,
@@ -50,6 +62,7 @@ def _extract_table_legend_raw(
     allow_description_labels: bool = True,
     allow_visual_index_labels: bool = False,
     tighten_gray_table_crops: bool = False,
+    use_visible_symbol_mask: bool = True,
 ) -> list[tuple[np.ndarray, str]]:
     """Wyciąga symbole z legendy w formacie tabelarycznym (siatka z wierszami)."""
     h, w = legend_area.shape[:2]
@@ -103,8 +116,10 @@ def _extract_table_legend_raw(
         if cell.size == 0:
             continue
 
-        cell_gray = cv2.cvtColor(cell, cv2.COLOR_BGR2GRAY)
-        cell_mask = (cell_gray < 200).astype(np.uint8) * 255
+        cell_mask = _table_symbol_mask(
+            cell,
+            use_visible_symbol_mask=use_visible_symbol_mask,
+        )
         grid_mask = cv2.bitwise_or(
             horiz_lines[row_inner_top:row_inner_bottom, cell_left:cell_right_inner],
             vert_lines[row_inner_top:row_inner_bottom, cell_left:cell_right_inner],
@@ -140,9 +155,22 @@ def _extract_table_legend_raw(
 
         symbol_crop = legend_area[sy1:sy2, sx1:sx2]
         symbol_image = np.full_like(symbol_crop, 255)
-        crop_gray = cv2.cvtColor(symbol_crop, cv2.COLOR_BGR2GRAY)
-        dark_px = crop_gray < 200
-        symbol_image[dark_px] = symbol_crop[dark_px]
+        symbol_mask = _table_symbol_mask(
+            symbol_crop,
+            use_visible_symbol_mask=use_visible_symbol_mask,
+        )
+        symbol_grid_mask = cv2.bitwise_or(
+            horiz_lines[sy1:sy2, sx1:sx2],
+            vert_lines[sy1:sy2, sx1:sx2],
+        )
+        if symbol_grid_mask.size:
+            symbol_grid_mask = cv2.dilate(
+                symbol_grid_mask,
+                np.ones((3, 3), np.uint8),
+                iterations=1,
+            )
+            symbol_mask[symbol_grid_mask > 0] = 0
+        symbol_image[symbol_mask > 0] = symbol_crop[symbol_mask > 0]
         if tighten_gray_table_crops:
             symbol_image = _tighten_gray_legend_symbol_crop(symbol_image)
 
@@ -325,6 +353,7 @@ def _extract_left_gutter_table_legend_raw(
     y_start: int,
     scale: float,
     tighten_gray_table_crops: bool = False,
+    use_visible_symbol_mask: bool = True,
 ) -> tuple[list[tuple[np.ndarray, str]], tuple[int, int, int, int]] | None:
     """Extract table legend symbols when the symbol column sits left of the grid."""
 
@@ -351,6 +380,7 @@ def _extract_left_gutter_table_legend_raw(
         allow_description_labels=False,
         allow_visual_index_labels=True,
         tighten_gray_table_crops=tighten_gray_table_crops,
+        use_visible_symbol_mask=use_visible_symbol_mask,
     )
     if not _table_symbol_images_look_valid(raw_symbols):
         return None

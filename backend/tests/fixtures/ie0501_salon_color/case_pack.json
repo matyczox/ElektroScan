@@ -1,0 +1,54 @@
+{
+  "name": "ie0501_salon_color",
+  "status": "diagnostic_case_pack",
+  "releaseGate": false,
+  "snapshotCompareGate": false,
+  "pdfPath": "test_pdfs/IE.05.01 - Instalacje ele i tele - Salon - Rzut parteru.pdf",
+  "detectorProfile": "color",
+  "legendMaskMode": "color",
+  "dpi": 300,
+  "notes": "Diagnostic-only case pack for IE.05.01. Do not treat this as an accepted golden until manual review is complete.",
+  "legendDiagnostics": {
+    "status": "manual_check",
+    "notes": "The right-side legend has roughly three dozen visible table rows/sections, while the dark-gray table extractor previously returned about 19-20 symbols on broad legend selections.",
+    "candidateLegendRects": [
+      {
+        "id": "right_legend_left_table_full_height",
+        "roi": [7800, 50, 3600, 6400],
+        "extractedSymbolsBeforeFix": 20,
+        "estimatedVisibleRows": 36,
+        "contactSheetBefore": "backend/tests/output/ie0501_debug/contact_left_table_full_height.png",
+        "notes": "Broad right legend table; previously missed bright green/cyan rows and assigned generic names like 1X/2X/IP."
+      },
+      {
+        "id": "right_legend_upper_core",
+        "roi": [7800, 50, 3600, 2500],
+        "extractedSymbolsBeforeFix": 10,
+        "estimatedVisibleRows": 12,
+        "contactSheetBefore": "backend/tests/output/ie0501_debug/contact_upper_core_only.png",
+        "notes": "Upper block containing bright green/cyan symbols plus FB rows."
+      },
+      {
+        "id": "right_legend_pel_zg_block",
+        "roi": [7800, 1200, 3600, 3500],
+        "extractedSymbolsBeforeFix": 15,
+        "estimatedVisibleRows": 18,
+        "contactSheetBefore": "backend/tests/output/ie0501_debug/contact_pel_zg_block.png",
+        "notes": "Middle/lower PEL/ZG/DECT/U-WALL/RCP/PIR/G rows."
+      }
+    ],
+    "manualMissingSections": [
+      "bright green/cyan top legend symbols",
+      "FB2/FB3/FB4 code rows",
+      "PEL-1 through PEL-4 code rows",
+      "ZG-1 through ZG-4 code rows",
+      "DECT",
+      "U-WALL",
+      "RCP",
+      "PIR",
+      "G1-4",
+      "G5-20"
+    ]
+  },
+  "cases": []
+}

@@ -167,6 +167,85 @@ def _candidate_summary(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]
     return rows
 
 
+def _analysis_debug_profile(analysis: dict[str, Any] | None) -> dict[str, Any]:
+    if not analysis:
+        return {}
+    performance = analysis.get("performance")
+    if not isinstance(performance, dict):
+        return {}
+    detector = performance.get("detector")
+    return detector if isinstance(detector, dict) else {}
+
+
+def _candidate_trace(analysis: dict[str, Any] | None) -> dict[str, Any]:
+    trace = _analysis_debug_profile(analysis).get("candidateTrace")
+    return trace if isinstance(trace, dict) else {}
+
+
+def _trace_item_box(item: dict[str, Any]) -> dict[str, Any] | None:
+    bbox = item.get("bbox")
+    if not isinstance(bbox, list | tuple) or len(bbox) < 4:
+        return None
+    return {
+        "symbolName": item.get("symbolName"),
+        "x": bbox[0],
+        "y": bbox[1],
+        "width": bbox[2],
+        "height": bbox[3],
+        "source": item.get("source"),
+    }
+
+
+def _trace_item_summary(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "symbolName": item.get("symbolName"),
+        "bbox": item.get("bbox"),
+        "source": item.get("source"),
+        "reason": item.get("reason"),
+        "match": item.get("match"),
+        "verification": item.get("verification"),
+        "coverage": item.get("coverage"),
+        "purity": item.get("purity"),
+        "context": item.get("context"),
+        "distance": item.get("distance"),
+    }
+
+
+def _trace_for_roi(
+    trace: dict[str, Any],
+    roi: tuple[int, int, int, int],
+    *,
+    tolerance: int,
+    top_n: int,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for stage, stage_payload in trace.items():
+        if not isinstance(stage_payload, dict):
+            continue
+        items = stage_payload.get("items", [])
+        if not isinstance(items, list):
+            items = []
+        near_items: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            item_box = _trace_item_box(item)
+            if item_box is None:
+                continue
+            if _intersects_or_center_near(item_box, roi, tolerance=tolerance):
+                near_items.append(_trace_item_summary(item))
+        rows.append(
+            {
+                "stage": stage,
+                "totalCandidates": stage_payload.get("totalCandidates"),
+                "traceMatchedCandidates": stage_payload.get("matchedCandidates"),
+                "nearRoiCandidates": len(near_items),
+                "items": near_items[:top_n],
+            }
+        )
+    return rows
+
+
 def build_report(
     case_pack_path: Path,
     output_dir: Path,
@@ -182,8 +261,19 @@ def build_report(
     if pdf_path is None or not pdf_path.exists():
         raise RuntimeError(f"Missing pdfPath: {pdf_path}")
 
-    analysis = _load_json(analysis_path) if analysis_path else None
+    if analysis_path is None:
+        analysis_path = _repo_path(
+            str(case_pack.get("analysisPath") or case_pack.get("latestAnalysisJson") or ""),
+            base=case_pack_path.parent,
+        )
+    if templates_dir is None:
+        templates_dir = _repo_path(str(case_pack.get("templatesDir") or ""), base=case_pack_path.parent)
+    if templates_dir is None and (case_pack_path.parent / "templates").exists():
+        templates_dir = (case_pack_path.parent / "templates").resolve()
+
+    analysis = _load_json(analysis_path) if analysis_path and analysis_path.exists() else None
     boxes = _boxes(analysis)
+    trace = _candidate_trace(analysis)
     templates = load_templates(str(templates_dir)) if templates_dir and templates_dir.exists() else []
     image = pdf_to_png(str(pdf_path), dpi=int(case_pack.get("dpi", 300)))
 
@@ -228,6 +318,14 @@ def build_report(
                 "status": _evaluate_case(case, nearby) if boxes else "not_evaluated",
                 "nearbyBoxes": nearby,
                 "roiInspection": inspection,
+                "candidateTrace": _trace_for_roi(
+                    trace,
+                    roi,
+                    tolerance=roi_tolerance,
+                    top_n=top_n,
+                )
+                if trace
+                else [],
             }
         )
 
@@ -238,6 +336,8 @@ def build_report(
         "templatesDir": templates_dir.as_posix() if templates_dir else None,
         "boxCount": len(boxes),
         "templateCount": len(templates),
+        "candidateTracePresent": bool(trace),
+        "legendDiagnostics": case_pack.get("legendDiagnostics", {}),
         "cases": report_cases,
     }
     (output_dir / "case_report.json").write_text(
@@ -255,10 +355,42 @@ def _write_markdown_report(path: Path, report: dict[str, Any]) -> None:
         f"- Analysis boxes: `{report['boxCount']}`",
         f"- Templates: `{report['templateCount']}`",
         f"- Analysis JSON: `{report['analysisPath'] or '(none)'}`",
+        f"- Candidate trace: `{'yes' if report.get('candidateTracePresent') else 'no'}`",
         "",
-        "| Case | Status | Expected / Allowed | Nearby | Crop |",
-        "| --- | --- | --- | --- | --- |",
     ]
+    legend_diagnostics = report.get("legendDiagnostics")
+    if isinstance(legend_diagnostics, dict) and legend_diagnostics:
+        lines.extend(
+            [
+                "## Legend Diagnostics",
+                "",
+                f"- Status: `{legend_diagnostics.get('status', 'manual_check')}`",
+                f"- Notes: {legend_diagnostics.get('notes', '') or '(none)'}",
+            ]
+        )
+        for rect in legend_diagnostics.get("candidateLegendRects", []):
+            if not isinstance(rect, dict):
+                continue
+            extracted = rect.get("extractedSymbolsBeforeFix")
+            rows = rect.get("estimatedVisibleRows")
+            warning = ""
+            if isinstance(extracted, int) and isinstance(rows, int) and rows > extracted + 5:
+                warning = " likely_missing_symbols"
+            lines.append(
+                "- "
+                f"`{rect.get('id')}` roi={rect.get('roi')} "
+                f"before={extracted} rows={rows}{warning}"
+            )
+        missing = legend_diagnostics.get("manualMissingSections", [])
+        if missing:
+            lines.append(f"- Manual missing sections: {', '.join(str(item) for item in missing)}")
+        lines.append("")
+    lines.extend(
+        [
+            "| Case | Status | Expected / Allowed | Nearby | Crop |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+    )
     for case in report["cases"]:
         expected = ", ".join(case.get("expectedSymbols") or case.get("allowedSymbols") or [])
         nearby = ", ".join(
@@ -285,6 +417,38 @@ def _write_markdown_report(path: Path, report: dict[str, Any]) -> None:
                 f"match={candidate.get('match')} ver={candidate.get('verification')} "
                 f"cov={candidate.get('coverage')} pur={candidate.get('purity')}"
             )
+    lines.append("")
+    lines.append("## Candidate Trace By ROI")
+    for case in report["cases"]:
+        lines.append("")
+        lines.append(f"### `{case['id']}`")
+        trace_rows = case.get("candidateTrace") or []
+        if not trace_rows:
+            lines.append(
+                "Candidate trace skipped: rerun local regression with "
+                "`--trace-point x,y --trace-radius N` near this ROI."
+            )
+            continue
+        any_items = False
+        for stage in trace_rows:
+            items = stage.get("items") or []
+            if not items:
+                continue
+            any_items = True
+            lines.append(
+                f"- `{stage.get('stage')}`: near={stage.get('nearRoiCandidates')} "
+                f"traceMatched={stage.get('traceMatchedCandidates')} "
+                f"total={stage.get('totalCandidates')}"
+            )
+            for item in items[:6]:
+                reason = f" reason={item.get('reason')}" if item.get("reason") else ""
+                lines.append(
+                    f"  - `{item.get('symbolName')}` bbox={item.get('bbox')} "
+                    f"match={item.get('match')} ver={item.get('verification')} "
+                    f"cov={item.get('coverage')} pur={item.get('purity')}{reason}"
+                )
+        if not any_items:
+            lines.append("Candidate trace exists, but no traced candidates are near this ROI.")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 

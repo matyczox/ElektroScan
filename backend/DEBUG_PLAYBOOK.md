@@ -8,11 +8,12 @@ czytania calego backendu.
 Najpierw sprawdz baseline lokalnie:
 
 ```powershell
-py -3.11 backend\tools\run_local_golden_regression.py --fixture pzu_bydgoszcz_el02_color --fixture pw_e_01_rev2_color --fixture pw_e_02_rev2_color
+py -3.11 backend\tools\run_quality_gate.py
 ```
 
 Oczekiwane wyniki:
 
+- PZU EL_01 GNIAZDA color: `204/204`.
 - PZU EL_02 color: `318/318`, manual sentinels fixed.
 - PW-E-01 color: `151/151`.
 - PW-E-02 color: `134/134`.
@@ -54,7 +55,8 @@ npm run build
 
 Gdy pojawi sie podejrzany diff:
 
-1. Otworz kandydacki JSON z `backend/analysis_debug/local_regression/`.
+1. Otworz kandydacki JSON z `backend/tests/output/quality_gate/local_regression/`
+   albo `backend/analysis_debug/local_regression/`.
 2. Sprawdz `source`, `bbox`, `raw_bbox`, `frontend_nearby_boxes`.
 3. Uzyj Inspektora ROI w UI albo cropa z debug output.
 4. Decyzja manualna ma trafic do sentinela tylko jako test, nie jako logika.
@@ -64,6 +66,25 @@ Dobry sentinel opisuje objaw:
 - `require_near` dla oczekiwanego symbolu,
 - `forbid_near` dla falszywego symbolu,
 - `allow_any_near` tylko dla realnie niejednoznacznej rodziny.
+
+Case report dla aktywnego PDF:
+
+```powershell
+py -3.11 backend\tools\build_pdf_case_report.py `
+  backend\tests\fixtures\pzu_bydgoszcz_el01_gniazda_color\case_pack.json `
+  --output-dir backend\tests\output\pzu_el01_case_report
+```
+
+Jesli chcesz zobaczyc, w ktorej fazie pipeline zgubil hit, najpierw wygeneruj
+candidate JSON z trace:
+
+```powershell
+py -3.11 backend\tools\run_local_golden_regression.py `
+  --fixture pzu_bydgoszcz_el01_gniazda_color `
+  --trace-point 1570,700 `
+  --trace-radius 90 `
+  --output-dir backend\tests\output\trace_probe
+```
 
 ## Gdy Refactor Zmienia Wynik
 
