@@ -10,6 +10,7 @@ try:
     from .legend_label_extractor import (
         _get_row_index_text,
         _get_row_label_text,
+        _get_row_symbol_code_boxes_px,
         _get_row_symbol_code_text,
         _get_visual_row_index_text,
     )
@@ -28,6 +29,7 @@ except ImportError:  # pragma: no cover
     from legend_label_extractor import (
         _get_row_index_text,
         _get_row_label_text,
+        _get_row_symbol_code_boxes_px,
         _get_row_symbol_code_text,
         _get_visual_row_index_text,
     )
@@ -50,6 +52,39 @@ def _table_symbol_mask(image_bgr: np.ndarray, *, use_visible_symbol_mask: bool) 
         return _visible_ink_mask(image_bgr, gray_threshold=235)
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
     return (gray < 200).astype(np.uint8) * 255
+
+
+def _erase_symbol_cell_code_text(
+    mask: np.ndarray,
+    code_boxes_px: list[tuple[int, int, int, int, str]],
+    *,
+    offset_x: int,
+    offset_y: int,
+) -> np.ndarray:
+    """Remove printed legend codes from color symbol masks without using class rules."""
+
+    if not code_boxes_px or mask.size == 0:
+        return mask
+
+    stripped = mask.copy()
+    original_pixels = int(cv2.countNonZero(mask))
+    for x0, y0, x1, y1, token in code_boxes_px:
+        # A single numeric marker can be a real part of an electrical symbol.
+        # Alphanumeric row codes such as G5-20, PEL2 or FB1 are labels/evidence,
+        # not the visual geometry to be matched later on the plan.
+        if not any(char.isalpha() for char in token):
+            continue
+        lx0 = max(0, x0 - offset_x - 2)
+        ly0 = max(0, y0 - offset_y - 2)
+        lx1 = min(mask.shape[1], x1 - offset_x + 2)
+        ly1 = min(mask.shape[0], y1 - offset_y + 2)
+        if lx1 > lx0 and ly1 > ly0:
+            stripped[ly0:ly1, lx0:lx1] = 0
+
+    stripped_pixels = int(cv2.countNonZero(stripped))
+    if stripped_pixels < max(20, int(original_pixels * 0.15)):
+        return mask
+    return stripped
 
 
 def _extract_table_legend_raw(
@@ -116,6 +151,19 @@ def _extract_table_legend_raw(
         if cell.size == 0:
             continue
 
+        code_boxes_px = (
+            _get_row_symbol_code_boxes_px(
+                text_words,
+                x_start,
+                y_start,
+                scale,
+                row_top,
+                row_bottom,
+                first_col_right,
+            )
+            if use_visible_symbol_mask
+            else []
+        )
         cell_mask = _table_symbol_mask(
             cell,
             use_visible_symbol_mask=use_visible_symbol_mask,
@@ -135,6 +183,13 @@ def _extract_table_legend_raw(
             cell_mask[:, -CELL_BORDER_TRIM:] = 0
         if allow_visual_index_labels and not allow_description_labels:
             cell_mask = _remove_bottom_neighbor_label_components(cell_mask)
+        if use_visible_symbol_mask:
+            cell_mask = _erase_symbol_cell_code_text(
+                cell_mask,
+                code_boxes_px,
+                offset_x=cell_left,
+                offset_y=row_inner_top,
+            )
 
         pixels = cv2.findNonZero(cell_mask)
         if pixels is None:
@@ -170,6 +225,13 @@ def _extract_table_legend_raw(
                 iterations=1,
             )
             symbol_mask[symbol_grid_mask > 0] = 0
+        if use_visible_symbol_mask:
+            symbol_mask = _erase_symbol_cell_code_text(
+                symbol_mask,
+                code_boxes_px,
+                offset_x=sx1,
+                offset_y=sy1,
+            )
         symbol_image[symbol_mask > 0] = symbol_crop[symbol_mask > 0]
         if tighten_gray_table_crops:
             symbol_image = _tighten_gray_legend_symbol_crop(symbol_image)

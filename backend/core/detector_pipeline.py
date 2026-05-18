@@ -25,6 +25,7 @@ from core.detector_clustering import (
     _suppress_color_local_fragments,
 )
 from core.detector_config import (
+    COLOR_SCALES,
     DEFAULT_PDF_DPI,
     DETECTOR_POSTPROCESS_MAX_WORKERS,
     DETECTOR_SCAN_MAX_WORKERS,
@@ -37,7 +38,6 @@ from core.detector_config import (
     GRAY_TINY_FRAGMENT_MAX_DIMENSION,
     GRAY_TINY_FRAGMENT_MAX_SCALE,
     OPENCV_NUM_THREADS,
-    SCALES,
     _safe_cpu_count,
 )
 from core.detector_context import DetectionTemplateContext
@@ -191,7 +191,7 @@ def _detect_symbols_pipeline(
     )
 
     variant_workers = max(1, min(len(templates), DETECTOR_POSTPROCESS_MAX_WORKERS))
-    used_scales = list(GRAY_SCALES) if detector_profile == "gray" else list(SCALES)
+    used_scales = list(GRAY_SCALES) if detector_profile == "gray" else list(COLOR_SCALES)
     with ThreadPoolExecutor(max_workers=variant_workers) as pool:
         prepared_variant_items = list(
             pool.map(
@@ -790,5 +790,4 @@ def _detect_symbols_pipeline(
         subtract_legend=subtract_legend,
         legend_rect=legend_rect,
     )
-
 

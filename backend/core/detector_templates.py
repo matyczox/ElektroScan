@@ -22,6 +22,11 @@ from core.detector_config import (
     GRAY_DIAGONAL_ROTATION_MIN_SCALE,
     GRAY_DIAGONAL_ROTATIONS,
     GRAY_NON_TEXT_DIAGONAL_ROTATIONS_ENABLED,
+    COLOR_SMALL_SCALE_MAX_SCALE,
+    COLOR_SMALL_SCALE_MAX_TEMPLATE_AREA,
+    COLOR_SMALL_SCALE_MAX_TEMPLATE_ASPECT,
+    COLOR_SMALL_SCALE_MAX_TEMPLATE_DENSITY,
+    COLOR_SMALL_SCALE_MIN_TEMPLATE_AREA,
     MIN_TEMPLATE_PIXELS,
     MIRRORED_VARIANT_PREFIXES,
     PDF_TEXT_MAX_TOKEN_LENGTH,
@@ -205,6 +210,28 @@ def _prepare_variants(
         return ((rotated > 0) * 255).astype(np.uint8)
 
     scale_list = list(scales) if scales is not None else list(SCALES)
+    if template.dominant_hsv is not None:
+        # Small color scales are useful for compact pictograms drawn much
+        # smaller on the plan than in the legend. Avoid applying them to text
+        # labels, elongated line symbols and tiny sparse templates where they
+        # mostly become text or rail fragments. This keeps the wider color
+        # scale experiment focused on mid-size compact pictograms.
+        base_area = int(base_mask.shape[0]) * int(base_mask.shape[1])
+        base_density = float(template.pixel_count) / max(1.0, float(base_area))
+        allow_small_color_scales = (
+            not template.is_text_label
+            and base_aspect <= float(COLOR_SMALL_SCALE_MAX_TEMPLATE_ASPECT)
+            and int(COLOR_SMALL_SCALE_MIN_TEMPLATE_AREA)
+            <= base_area
+            <= int(COLOR_SMALL_SCALE_MAX_TEMPLATE_AREA)
+            and base_density <= float(COLOR_SMALL_SCALE_MAX_TEMPLATE_DENSITY)
+        )
+        if not allow_small_color_scales:
+            scale_list = [
+                scale
+                for scale in scale_list
+                if scale >= float(COLOR_SMALL_SCALE_MAX_SCALE)
+            ]
     for scale in scale_list:
         if scale != 1.0:
             new_w = max(1, int(round(base_mask.shape[1] * scale)))

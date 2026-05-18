@@ -8,6 +8,38 @@
   "legendMaskMode": "color",
   "dpi": 300,
   "notes": "Diagnostic-only case pack for IE.05.01. Do not treat this as an accepted golden until manual review is complete.",
+  "aggregateBaseline": {
+    "source": "C:/Users/Admin/Downloads/elektroscan_IE.05.01_-_Instalacje_ele_i_tele_-_Salon_-_Rzut_parteru_wyniki.xlsx",
+    "totalDetections": 191,
+    "classCount": 24,
+    "notes": "XLSX is an aggregate smoke baseline only. It has class counts, not trusted per-box geometry.",
+    "counts": {
+      "01_Gniazdo_wtykowe_pojedyncze_p_t_IP20": 1,
+      "02_Gniazdo_wtykowe_pojedyncze_p_t_hermetyczne_IP44": 5,
+      "03_Wypust_elektryczny_1_fazowy": 3,
+      "05_PS1": 1,
+      "06_RB": 13,
+      "07_FB1": 21,
+      "08_FB2": 2,
+      "09_FB3": 12,
+      "11_PEL1": 20,
+      "13_PEL3": 2,
+      "14_PEL4": 1,
+      "15_ZG1": 13,
+      "16_ZG2": 20,
+      "17_ZG3": 6,
+      "18_ZG4": 1,
+      "19_DECT": 6,
+      "20_UWALL": 7,
+      "21_RCP": 1,
+      "22_Kamera": 4,
+      "23_SK": 19,
+      "24_PIR": 20,
+      "25_G14": 1,
+      "26_G520": 8,
+      "27_PWPUS": 4
+    }
+  },
   "legendDiagnostics": {
     "status": "manual_check",
     "notes": "The right-side legend has roughly three dozen visible table rows/sections, while the dark-gray table extractor previously returned about 19-20 symbols on broad legend selections.",
@@ -50,5 +82,26 @@
       "G5-20"
     ]
   },
-  "cases": []
+  "cases": [
+    {
+      "id": "require-g520-at-2483-4749",
+      "roi": [2483, 4749, 40, 40],
+      "expectedSymbols": ["26_G520"],
+      "sourceNot": "pdf_text",
+      "notes": "Manual hit added by review. Original run confused this area with 25_G14 text."
+    },
+    {
+      "id": "forbid-g14-text-at-2475-4741",
+      "roi": [2475, 4741, 46, 28],
+      "forbiddenSymbols": ["25_G14"],
+      "notes": "Wrong pdf_text label near the green G520 visual symbol."
+    },
+    {
+      "id": "manual-check-pwpus-large-text-at-6451-2571",
+      "roi": [6451, 2571, 81, 112],
+      "allowedSymbols": ["27_PWPUS"],
+      "reviewStatus": "manual_check",
+      "notes": "Current pdf_text box is too large; visual small PWPUS marker still needs manual bbox."
+    }
+  ]
 }

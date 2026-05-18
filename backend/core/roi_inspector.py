@@ -15,10 +15,10 @@ import numpy as np
 
 from core import detector_gray as gray_strategy
 from core.detector_config import (
+    COLOR_SCALES,
     GRAY_SCALES,
     GRAY_SUPPRESS_HORIZONTAL_KERNEL_PX,
     GRAY_SUPPRESS_VERTICAL_KERNEL_PX,
-    SCALES,
     THRESHOLD_DILATED,
     THRESHOLD_PRECISE,
 )
@@ -144,7 +144,7 @@ def inspect_roi(
         }
 
     detector_profile = detector_profile if detector_profile in {"color", "gray"} else "color"
-    used_scales = list(GRAY_SCALES) if detector_profile == "gray" else list(SCALES)
+    used_scales = list(GRAY_SCALES) if detector_profile == "gray" else list(COLOR_SCALES)
     top_n = max(1, min(50, int(top_n)))
     x, y, w, h = clamped
 

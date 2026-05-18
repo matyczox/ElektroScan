@@ -1,0 +1,47 @@
+{
+  "kind": "analysis-golden",
+  "schemaVersion": 1,
+  "metadata": {
+    "status": "diagnostic_smoke_partial",
+    "sentinelOnly": true,
+    "releaseGate": false,
+    "snapshotCompareGate": false,
+    "sourcePdf": "IE.05.01 - Instalacje ele i tele - Salon - Rzut parteru.pdf",
+    "fixture": "ie0501_salon_color",
+    "notes": "Partial IE05 smoke, not a full golden. XLSX aggregate has 191 detections across 24 classes; concrete checks here cover only manually indicated ROI.",
+    "aggregateBaseline": {
+      "source": "C:/Users/Admin/Downloads/elektroscan_IE.05.01_-_Instalacje_ele_i_tele_-_Salon_-_Rzut_parteru_wyniki.xlsx",
+      "totalDetections": 191,
+      "classCount": 24
+    },
+    "manualChecks": [
+      {
+        "id": "manual-check-pwpus-large-text-at-6451-2571",
+        "symbolName": "27_PWPUS",
+        "roi": [6451, 2571, 81, 112],
+        "reason": "Current pdf_text box is too large; visual small PWPUS marker needs manual bbox before strict gating."
+      }
+    ]
+  },
+  "boxes": [],
+  "manualSentinels": [
+    {
+      "id": "require-g520-at-2483-4749",
+      "mode": "require_near",
+      "symbolName": "26_G520",
+      "roi": [2483, 4749, 40, 40],
+      "tolerance": 12,
+      "sourceNot": "pdf_text",
+      "minCount": 1
+    },
+    {
+      "id": "forbid-g14-pdf-text-at-2475-4741",
+      "mode": "forbid_near",
+      "symbolName": "25_G14",
+      "roi": [2475, 4741, 46, 28],
+      "tolerance": 12,
+      "source": "pdf_text",
+      "maxCount": 0
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "name": "ie0501_salon_color",
+  "enabled": true,
+  "caution": true,
+  "sentinelOnly": true,
+  "snapshotCompareGate": false,
+  "notes": "IE.05.01 partial diagnostic smoke. Uses fresh legend extraction and strict manual ROI sentinels only; this is not a full golden.",
+  "pdfPath": "test_pdfs/IE.05.01 - Instalacje ele i tele - Salon - Rzut parteru.pdf",
+  "templatesDir": "backend/templates",
+  "golden": "../../golden/ie0501_salon_color_smoke.json",
+  "detectorProfile": "color",
+  "expectedProfile": "color",
+  "extractTemplatesFresh": true,
+  "legendMaskMode": "color",
+  "legendZone": {
+    "x": 8037,
+    "y": 62,
+    "width": 1594,
+    "height": 5949
+  },
+  "excludeLegendFromAnalysis": true,
+  "excludedZones": [],
+  "manualReviewPolicy": "partial_smoke_from_xlsx_plus_manual_roi",
+  "focus": "*",
+  "centerTolerance": 24,
+  "sizeTolerance": 0.5
+}

@@ -9,6 +9,8 @@ from core.detector_config import (
     COLOR_NEAR_THRESHOLD_RECOVERY_MAX_ROI_AREA,
     COLOR_NEAR_THRESHOLD_RECOVERY_MAX_TEMPLATE_AREA,
     COLOR_NEAR_THRESHOLD_RECOVERY_MIN_TEMPLATE_AREA,
+    COLOR_SMALL_SCALE_MAX_SCALE,
+    COLOR_SMALL_SCALE_RECOVERY_MAX_ROI_AREA,
     GRAY_COMPACT_TEXT_DIAGONAL_MAX_ROI_AREA,
     GRAY_COMPACT_TEXT_DIAGONAL_MAX_ROI_ASPECT,
     GRAY_COMPACT_TEXT_DIAGONAL_MIN_ROI_DENSITY,
@@ -131,7 +133,11 @@ def _color_near_threshold_recovery_eligible(
         return False
     if template.dominant_hsv is None:
         return False
-    if variant.scale < 0.90:
+    small_color_scale = (
+        variant.scale <= float(COLOR_SMALL_SCALE_MAX_SCALE)
+        and not template.is_text_label
+    )
+    if variant.scale < 0.90 and not small_color_scale:
         return False
     variant_area = int(variant.width) * int(variant.height)
     if (
@@ -139,7 +145,12 @@ def _color_near_threshold_recovery_eligible(
         or variant_area > int(COLOR_NEAR_THRESHOLD_RECOVERY_MAX_TEMPLATE_AREA)
     ):
         return False
-    if int(roi_w) * int(roi_h) > int(COLOR_NEAR_THRESHOLD_RECOVERY_MAX_ROI_AREA):
+    max_roi_area = (
+        int(COLOR_SMALL_SCALE_RECOVERY_MAX_ROI_AREA)
+        if small_color_scale
+        else int(COLOR_NEAR_THRESHOLD_RECOVERY_MAX_ROI_AREA)
+    )
+    if int(roi_w) * int(roi_h) > max_roi_area:
         return False
     aspect = max(
         float(variant.width) / max(1.0, float(variant.height)),

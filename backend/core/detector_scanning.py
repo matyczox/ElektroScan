@@ -25,6 +25,11 @@ from core.detector_config import (
     COLOR_NEAR_THRESHOLD_RECOVERY_MAX_TEMPLATE_AREA,
     COLOR_NEAR_THRESHOLD_RECOVERY_MIN_MATCH,
     COLOR_NEAR_THRESHOLD_RECOVERY_MIN_TEMPLATE_AREA,
+    COLOR_SMALL_SCALE_MAX_SCALE,
+    COLOR_SMALL_SCALE_RECOVERY_DELTA,
+    COLOR_SMALL_SCALE_RECOVERY_MAX_PER_ROI,
+    COLOR_SMALL_SCALE_RECOVERY_MAX_PER_VARIANT,
+    COLOR_SMALL_SCALE_RECOVERY_MIN_MATCH,
     DETECTOR_SCAN_MAX_WORKERS,
     GRAY_COMPACT_TEXT_DIAGONAL_MAX_ROI_AREA,
     GRAY_COMPACT_TEXT_DIAGONAL_MAX_ROI_ASPECT,
@@ -373,13 +378,21 @@ def scan_template_candidates(
                 roi_h=roi_h,
                 roi_foreground=roi_foreground,
             ):
-                recovery_threshold = max(
-                    float(COLOR_NEAR_THRESHOLD_RECOVERY_MIN_MATCH),
-                    float(threshold) - float(COLOR_NEAR_THRESHOLD_RECOVERY_DELTA),
-                )
-                if recovery_threshold < threshold and color_recovery_peaks < int(
-                    COLOR_NEAR_THRESHOLD_RECOVERY_MAX_PER_VARIANT
-                ):
+                recovery_max_per_roi = int(COLOR_NEAR_THRESHOLD_RECOVERY_MAX_PER_ROI)
+                recovery_max_per_variant = int(COLOR_NEAR_THRESHOLD_RECOVERY_MAX_PER_VARIANT)
+                if variant.scale <= float(COLOR_SMALL_SCALE_MAX_SCALE):
+                    recovery_threshold = max(
+                        float(COLOR_SMALL_SCALE_RECOVERY_MIN_MATCH),
+                        float(threshold) - float(COLOR_SMALL_SCALE_RECOVERY_DELTA),
+                    )
+                    recovery_max_per_roi = int(COLOR_SMALL_SCALE_RECOVERY_MAX_PER_ROI)
+                    recovery_max_per_variant = int(COLOR_SMALL_SCALE_RECOVERY_MAX_PER_VARIANT)
+                else:
+                    recovery_threshold = max(
+                        float(COLOR_NEAR_THRESHOLD_RECOVERY_MIN_MATCH),
+                        float(threshold) - float(COLOR_NEAR_THRESHOLD_RECOVERY_DELTA),
+                    )
+                if recovery_threshold < threshold and color_recovery_peaks < recovery_max_per_variant:
                     recovery_candidates = [
                         peak
                         for peak in _find_local_maxima(
@@ -390,7 +403,7 @@ def scan_template_candidates(
                         )
                         if peak[2] < threshold
                     ]
-                    if len(recovery_candidates) < int(COLOR_NEAR_THRESHOLD_RECOVERY_MAX_PER_ROI):
+                    if len(recovery_candidates) < recovery_max_per_roi:
                         ys, xs = np.where(
                             (match_result >= recovery_threshold) & (match_result < threshold)
                         )
@@ -411,7 +424,7 @@ def scan_template_candidates(
                                 dense_candidates[
                                     : max(
                                         0,
-                                        int(COLOR_NEAR_THRESHOLD_RECOVERY_MAX_PER_ROI)
+                                        recovery_max_per_roi
                                         - len(recovery_candidates),
                                     )
                                 ]
@@ -428,17 +441,16 @@ def scan_template_candidates(
                                 for normal_peak in peaks
                             )
                         ]
-                    if len(recovery_candidates) > int(COLOR_NEAR_THRESHOLD_RECOVERY_MAX_PER_ROI):
+                    if len(recovery_candidates) > recovery_max_per_roi:
                         recovery_candidates = _select_spatially_fair_peaks(
                             recovery_candidates,
-                            limit=int(COLOR_NEAR_THRESHOLD_RECOVERY_MAX_PER_ROI),
+                            limit=recovery_max_per_roi,
                             template_width=variant.width,
                             template_height=variant.height,
                         )
                     remaining = max(
                         0,
-                        int(COLOR_NEAR_THRESHOLD_RECOVERY_MAX_PER_VARIANT)
-                        - color_recovery_peaks,
+                        recovery_max_per_variant - color_recovery_peaks,
                     )
                     recovery_candidates = recovery_candidates[:remaining]
                     if recovery_candidates:

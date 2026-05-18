@@ -562,6 +562,57 @@ def _get_row_symbol_code_text(
     return candidates[0][2]
 
 
+def _get_row_symbol_code_boxes_px(
+    text_words: list | None,
+    x_start: int,
+    y_start: int,
+    scale: float,
+    row_top_px: int,
+    row_bottom_px: int,
+    col_right_px: int,
+) -> list[tuple[int, int, int, int, str]]:
+    """Return symbol-column code word boxes in legend-local pixel coordinates."""
+
+    if not text_words:
+        return []
+
+    row_top_pt = (y_start + row_top_px) / scale
+    row_bottom_pt = (y_start + row_bottom_px) / scale
+    col_left_pt = x_start / scale
+    col_right_pt = (x_start + col_right_px) / scale
+    boxes: list[tuple[int, int, int, int, str]] = []
+
+    for word in text_words:
+        if len(word) < 5:
+            continue
+
+        token = _table_symbol_code_token(str(word[4]))
+        if token is None:
+            continue
+
+        wx0 = float(word[0])
+        wy0 = float(word[1])
+        wx1 = float(word[2])
+        wy1 = float(word[3])
+        center_x = (wx0 + wx1) / 2.0
+        if not (col_left_pt - 8 <= center_x <= col_right_pt + 12):
+            continue
+
+        overlap_y = min(wy1, row_bottom_pt + 2) - max(wy0, row_top_pt - 2)
+        if overlap_y <= 0:
+            continue
+
+        x0 = int(round(wx0 * scale - x_start))
+        y0 = int(round(wy0 * scale - y_start))
+        x1 = int(round(wx1 * scale - x_start))
+        y1 = int(round(wy1 * scale - y_start))
+        if x1 <= x0 or y1 <= y0:
+            continue
+        boxes.append((x0, y0, x1, y1, token))
+
+    return boxes
+
+
 def _get_visual_row_index_text(
     legend_area: np.ndarray,
     row_top_px: int,

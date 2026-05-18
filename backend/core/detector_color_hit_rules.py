@@ -21,6 +21,13 @@ from core.detector_config import (
     COLOR_RECOVERY_MIN_CONTEXT,
     COLOR_RECOVERY_MIN_COVERAGE,
     COLOR_RECOVERY_MIN_PURITY,
+    COLOR_SMALL_SCALE_MAX_SCALE,
+    COLOR_SMALL_SCALE_MIN_AREA,
+    COLOR_SMALL_SCALE_MIN_COLOR_SIMILARITY,
+    COLOR_SMALL_SCALE_MIN_CONTEXT,
+    COLOR_SMALL_SCALE_MIN_COVERAGE,
+    COLOR_SMALL_SCALE_MIN_MATCH,
+    COLOR_SMALL_SCALE_MIN_PURITY,
     COLOR_TEXT_LABEL_MIN_CONTEXT,
     COLOR_TEXT_LABEL_MIN_COVERAGE,
     COLOR_TEXT_LABEL_MIN_MATCH,
@@ -109,27 +116,55 @@ def evaluate_color_hit_rules(
             strong_color_partial_geometry=strong_color_partial_geometry,
         )
 
+    small_scale_template_hit = (
+        hit.dominant_hsv is not None
+        and not hit.is_text_label
+        and hit.source in {"template", "template_near_threshold", "template_color_recovery"}
+        and hit.scale <= float(COLOR_SMALL_SCALE_MAX_SCALE)
+    )
+    small_scale_template_geometry = (
+        small_scale_template_hit
+        and hit_area >= int(COLOR_SMALL_SCALE_MIN_AREA)
+        and early_color_similarity >= float(COLOR_SMALL_SCALE_MIN_COLOR_SIMILARITY)
+        and hit.match_score >= float(COLOR_SMALL_SCALE_MIN_MATCH)
+        and coverage >= float(COLOR_SMALL_SCALE_MIN_COVERAGE)
+        and purity >= float(COLOR_SMALL_SCALE_MIN_PURITY)
+        and context_purity >= float(COLOR_SMALL_SCALE_MIN_CONTEXT)
+        and hit_aspect <= 3.20
+    )
+    if small_scale_template_hit and not small_scale_template_geometry:
+        return _reject(
+            "color_small_scale_geometry",
+            early_color_similarity=early_color_similarity,
+            strong_color_partial_geometry=strong_color_partial_geometry,
+        )
+
     color_recovery_geometry = (
         hit.dominant_hsv is not None
         and hit.source == "template_color_recovery"
-        and early_color_similarity >= COLOR_RECOVERY_MIN_COLOR_SIMILARITY
-        and hit.scale >= 0.90
-        and 900 <= hit_area <= 3_800
-        and hit_aspect <= 3.20
         and (
-            (
-                hit.match_score >= 0.52
-                and coverage >= max(0.70, COLOR_RECOVERY_MIN_COVERAGE)
-                and purity >= max(0.60, COLOR_RECOVERY_MIN_PURITY)
-                and context_purity >= max(0.18, COLOR_RECOVERY_MIN_CONTEXT)
-                and hit_area >= 1_100
-            )
+            small_scale_template_geometry
             or (
-                hit.match_score >= 0.46
-                and coverage >= 0.74
-                and purity >= 0.66
-                and context_purity >= 0.30
-                and hit_area >= 900
+                early_color_similarity >= COLOR_RECOVERY_MIN_COLOR_SIMILARITY
+                and hit.scale >= 0.90
+                and 900 <= hit_area <= 3_800
+                and hit_aspect <= 3.20
+                and (
+                    (
+                        hit.match_score >= 0.52
+                        and coverage >= max(0.70, COLOR_RECOVERY_MIN_COVERAGE)
+                        and purity >= max(0.60, COLOR_RECOVERY_MIN_PURITY)
+                        and context_purity >= max(0.18, COLOR_RECOVERY_MIN_CONTEXT)
+                        and hit_area >= 1_100
+                    )
+                    or (
+                        hit.match_score >= 0.46
+                        and coverage >= 0.74
+                        and purity >= 0.66
+                        and context_purity >= 0.30
+                        and hit_area >= 900
+                    )
+                )
             )
         )
     )

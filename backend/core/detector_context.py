@@ -130,7 +130,33 @@ class DetectionTemplateContext:
         return self.templates[template_id].name
 
     def is_visual_pdf_text_blocked(self, template_id: int) -> bool:
-        return self.template_token_family(template_id) in {"L", "AW", "EW", "TB"}
+        if not (0 <= template_id < len(self.templates)):
+            return False
+        template = self.templates[template_id]
+        if self.template_token_family(template_id) in {"L", "AW", "EW", "TB"}:
+            return True
+        return self._is_sparse_coded_color_symbol(template)
+
+    def _is_sparse_coded_color_symbol(self, template: TemplateInfo) -> bool:
+        """Return true when a legend code labels a sparse pictogram, not text.
+
+        Some color legends put a code like G14/G520 next to a small symbol in
+        the same cell. The code is useful evidence, but the final detection
+        still needs the pictogram geometry; otherwise PDF text alone becomes a
+        fake visual hit. Dense socket blocks such as PEL stay eligible for
+        text fallback.
+        """
+
+        if template.dominant_hsv is None or template.is_text_label:
+            return False
+        primary_token = (template.text_tokens[0] if template.text_tokens else "").upper()
+        if not re.fullmatch(r"[A-Z]+\d+[A-Z0-9]*", primary_token):
+            return False
+        height, width = template.mask.shape[:2]
+        area = max(1, int(width) * int(height))
+        density = float(template.pixel_count) / float(area)
+        aspect = max(float(width) / max(1.0, float(height)), float(height) / max(1.0, float(width)))
+        return area <= 8_000 and density <= 0.38 and aspect <= 1.85
 
     def l_label_group(self, template_id: int) -> str:
         name = self.template_name(template_id).upper()
